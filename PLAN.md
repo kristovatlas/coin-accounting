@@ -37,28 +37,36 @@ The app keeps **no chain index of its own**. Bitcoin Core's built-in indexes ans
   - `txindex=1` and `blockfilterindex=1`, both fully synced (`getindexinfo`)
   - **unpruned** node (`getblockchaininfo.pruned == false`)
   - matching chain
-  - a minimum Core version: **≥ 25.0** (first release with a stable `scanblocks`), final choice in the M0 ADR
+  - a minimum Core version: **≥ 29.0**, the first release with `getdescriptoractivity` (`scanblocks` itself exists since 25.0). Final choice in the M0 ADR
+  - Disk cost on the node: `txindex` plus the block-filter index. The filter index was ~4–5 GiB in 2019 and is larger now; M1 measures it
 - **RPC access:**
   - The app uses a dedicated `rpcauth` user, restricted in Core by `rpcwhitelist=<user>:<methods>` to read-only methods. The app keeps its own allowlist too, as a second layer.
   - Loopback only.
   - At startup the app calls a harmless method that is *not* on the whitelist (e.g. `uptime`). If that call succeeds, the server-side whitelist is missing, and the app refuses to run.
   - The app never uses the node wallet or the REST interface.
   - Parallel calls are capped below `rpcthreads`/`rpcworkqueue`.
-- **How each question is answered:**
+- **How each question is answered** (verified against BIP158 and Core's `scanblocks`/`getdescriptoractivity` source, 2026-09-27):
 
   | Question | Core RPC |
   |---|---|
   | Transaction details, and backward expansion (the tx that created an input) | `getrawtransaction <txid> 2`: decoded, with prevout values and scripts (`txindex`) |
-  | Address/script history: every tx paying to or spending from a script | `scanblocks start [descriptors] <from> <to>` over the compact block filters → matching block hashes → `getblock <hash> 2`/`3` → keep the txs that touch the script. Scan objects are `addr(...)`, `raw(<script hex>)` for scripts without an address, or ranged descriptors |
-  | Descriptor/xpub discovery | One `scanblocks` call with the ranged descriptor (gap-limit range), plus `deriveaddresses` to map hits to indexes |
-  | Is this output spent? | `gettxout <txid> <n>` |
-  | Forward expansion: which tx spent an output? | If `gettxout` says spent: `scanblocks` for the output's script from the output's height, in chunks, stopping at the first block where it is spent |
+  | Address/script history: every tx paying to or spending from a script | `scanblocks start [descriptors] <from> <to>` → candidate block hashes → `getdescriptoractivity [blocks] [descriptors]` → exact `receive` events (txid, vout, amount) and `spend` events (spend_txid, spend_vin, prevout txid/vout, amount). Core does the per-block matching, so filter false positives simply produce no events |
+  | Descriptor/xpub discovery | One `scanblocks` with the ranged descriptor(s) over the gap-limit range. When the script type is unknown, scan all candidate types in the same call (`pkh`, `sh(wpkh)`, `wpkh`, `tr`; `combo()` for single keys). Map hits back to indexes with `deriveaddresses` |
+  | Early/unusual scripts | P2PK via `pk()`/`combo()`; any script via `raw(<hex>)`. The filters contain exact script bytes, so each script type needs its own descriptor |
+  | Is this output spent? | `gettxout <txid> <n>` (null = spent or never existed; `txindex` tells the two apart) |
+  | Forward expansion: which tx spent an output? | If spent: `scanblocks` for `raw(<its script>)` from the output's height, in chunks → `getdescriptoractivity` → the `spend` event whose prevout matches. If it was spent in the mempool: `gettxspendingprevout`, or `getdescriptoractivity` with `include_mempool` |
   | Chain tip, headers, confirmations | `getblockchaininfo`, `getbestblockhash`, `getblockheader`, `getblockhash` |
 
+- **Why this is complete:** a BIP158 basic filter contains, for every tx in the block, the script of each output (except OP_RETURN) **and the script of each output being spent** (except the coinbase). So a scan for a script finds every block where it was paid **or** spent. The false-positive rate is about 1 in 785,000 per element; Core's exact matching in `getdescriptoractivity` removes false positives.
+- **Guard against silent gaps:** in Core's implementation, if the filter index can't serve part of the requested range, that chunk is skipped **without an error** and the result still says `completed: true`. Before every scan, the app checks that `getindexinfo` reports `basic block filter index` synced to at least the scan's stop height. After it, the app requires `completed == true` and `to_height ==` the requested stop. Otherwise the result is discarded and the error surfaced.
+- **RPC mechanics:**
+  - `scanblocks start` blocks its connection until it finishes, so it needs no client timeout.
+  - `scanblocks status`/`abort` must go over a separate connection.
+  - `getdescriptoractivity` over many blocks can also take minutes, so it is batched.
 - **Scans run as background jobs.** Core runs one `scanblocks` at a time. The app queues scans, shows progress via `scanblocks status`, and can cancel them (`scanblocks abort`). Results arrive incrementally in the UI.
 - **Caching:** decoded txs, script histories and spender lookups are cached in the user DB (on the volume, since they reveal which scripts the user cares about). Each cached row records the block hash and height it came from.
 - **Reorgs:** on each tip change the app checks the cached rows near the tip against the active chain (`getblockhash`). Rows from blocks no longer on the active chain are invalidated and re-fetched. Nothing depends on an undo log.
-- **Perf check (M1):** measure `scanblocks` time for a single script over the whole chain and over typical ranges, and for a ranged descriptor, on a mainnet node, using public scripts that are not the user's (run by the human, per the agent rules in P0.2). If forward expansion is too slow for interactive use, options include scanning smaller ranges first, running scans ahead of time for owned outputs, and batching scripts into one scan. Any change of approach needs an ADR.
+- **Perf check (M1):** measure the node's filter-index size, and `scanblocks` + `getdescriptoractivity` time for a single script over the whole chain and over typical ranges, and for a ranged descriptor, on a mainnet node, using public scripts that are not the user's (run by the human, per the agent rules in P0.2). If forward expansion is too slow for interactive use, options include scanning smaller ranges first, running scans ahead of time for owned outputs, and batching scripts into one scan. Any change of approach needs an ADR.
 
 ### 2. User data model (`backend/coinacct/db/`, SQLite + Alembic migrations)
 Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency code. The tax ledger is USD.
