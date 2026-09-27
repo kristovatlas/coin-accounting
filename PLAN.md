@@ -101,12 +101,13 @@ backend/coinacct/{config.py, rpc.py, app.py, index/{parse.py, store.py, sync.py}
 backend/tests/{unit/, regtest/}
 frontend/{src/{views/, graph/, api.ts}, vite.config.ts}
 docs/{THREAT_MODEL.md, ENGINEERING.md, architecture.md, DEPENDENCIES.md, adr/}
-CLAUDE.md (points to the docs above as binding rules)
+AGENTS.md (vendor-neutral agent instructions; points to the docs above as binding rules)
+CLAUDE.md (one line: `@AGENTS.md`, so Claude Code loads the same rules; no content of its own)
 pyproject.toml, uv.lock, pnpm-workspace.yaml/.npmrc (cooldown, no scripts), README.md
 ```
 
 ## Phase 0 — Gating documents (no application code until the human approves all four)
-Order: design (this plan) → **P0.1 threat model** → **P0.2 engineering practices** → **P0.3 architecture diagram** → **P0.4 ADRs**. Each is a PR/commit the human reviews. After approval, `CLAUDE.md` points to all four as binding, so every future session honors them.
+Order: design (this plan) → **P0.1 threat model** → **P0.2 engineering practices** → **P0.3 architecture diagram** → **P0.4 ADRs**. Each is a PR/commit the human reviews. After approval, `AGENTS.md` (the cross-tool standard) points to all four as binding, so every agent session honors them. `CLAUDE.md` only imports `AGENTS.md`, so there is a single source of truth.
 
 ### P0.1 `docs/THREAT_MODEL.md` (living document)
 - **Scope and assets:**
