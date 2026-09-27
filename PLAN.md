@@ -15,20 +15,20 @@ Decisions made with the user: a local web app, Core plus our own full-chain inde
 Browser UI (Vite + TypeScript + React + Cytoscape.js; all assets bundled, no CDN)
         │  HTTP on 127.0.0.1 only (Host-header check + CSRF token against DNS rebinding)
 FastAPI backend (Python 3.12, uv-managed)
-   ├── rpc.py ── Bitcoin Core JSON-RPC/REST (cookie auth, localhost)
+   ├── rpc.py ── Bitcoin Core JSON-RPC only (cookie auth, localhost)
    ├── chain index (LMDB, public data, large, path configurable, need not be on VeraCrypt)
    └── user DB (SQLite, sensitive, lives on VeraCrypt volume; path set at launch)
 ```
 
 ### 1. Node + chain index (`backend/coinacct/index/`)
-- Required node settings: `txindex=1` (checked via `getindexinfo`) and `rest=1` so raw blocks can be fetched fast via `/rest/block/<hash>.bin`.
+- Required node setting: `txindex=1` (checked via `getindexinfo`). JSON-RPC only: raw blocks come from `getblock <hash> 0`. The REST interface (`rest=1`) is not used, because it is unauthenticated and its only gain is smaller transfers. If the M1 benchmark shows block transfer is a bottleneck, the alternative is reading `blk*.dat` directly, and that needs an ADR.
 - Own index, full chain from genesis, electrs-style compact keys in LMDB:
   - `S | scripthash[8] | height[4] | txid[8]` → funding occurrence (address history). Keying on the sha256 of scriptPubKey covers every script type.
   - `O | txid[8] | vout[4]` → spending `txid[8] | height[4]` (enables "expand forward").
   - `T | txid[8]` → height (disambiguates prefixes).
   - Prefix collisions are resolved by fetching the full tx via `getrawtransaction` (txindex) and verifying.
 - Sync: parse raw blocks in parallel worker processes, write in height batches, and keep a tip marker. Incremental sync on startup and on a poll. Reorg handling keeps the last ~100 block undo entries and rolls back on hash mismatch.
-- **Perf gate:** benchmark pure-Python parsing on 10k mainnet blocks in M1. If the projected full sync is over ~24h, move the parse/insert hot loop to a small Rust extension (PyO3/maturin) behind the same interface.
+- **Perf gate:** benchmark 10k mainnet blocks in M1, timing RPC fetch, parsing and LMDB writes separately. If the projected full sync is over ~24h, move the parse/insert hot loop to a small Rust extension (PyO3/maturin) behind the same interface.
 - The expected size is ~50–100 GB. The UI shows sync progress, and the app is usable for heights already indexed.
 
 ### 2. User data model (`backend/coinacct/db/`, SQLite + Alembic migrations)
@@ -189,7 +189,7 @@ Seed ADRs record the decisions already made:
 ## Milestones
 Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diagram if needed, and it passes the coverage floors and E2E flow.
 
-1. **M0 skeleton:** config, RPC client with node checks (txindex, rest, chain), and a FastAPI app with localhost/Host/CSRF protection. Bitcoin Core must be installed locally for regtest tests, since there is no `bitcoind` on this box yet.
+1. **M0 skeleton:** config, RPC client with node checks (txindex, chain), and a FastAPI app with localhost/Host/CSRF protection. Bitcoin Core must be installed locally for regtest tests, since there is no `bitcoind` on this box yet.
 2. **M1 chain index:** parser, LMDB store, sync/reorg, and the perf benchmark gate.
 3. **M2 user DB + import + discovery:** entities, wallets, many-to-many address↔wallet, and the address/UTXO/tx history views.
 4. **M3 graph UI:** backward/forward expansion and the tagging side panel.
