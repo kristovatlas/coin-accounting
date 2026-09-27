@@ -321,6 +321,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
 9. Later:
    - exchange CSV import
    - in-app lock (see threat model open questions)
+   - a second price source for cross-checking (needs an ADR, since it adds an outbound flow)
    - lost/stolen and fork/airdrop events
    - other chains (account-based FIFO/LIFO) once their privacy model is settled
 
