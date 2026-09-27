@@ -5,8 +5,8 @@
 
 | | |
 |---|---|
-| Version | 0.1 (design stage — no code yet) |
-| Last updated | 2026-09-26 |
+| Version | 0.2 (design stage — no code yet) |
+| Last updated | 2026-09-27 |
 | Scope | v1: Bitcoin (Bitcoin Core) only — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
 
@@ -28,7 +28,7 @@ A threat may only move to **Verified** when a test exists that fails if the miti
 The app is a single-user tool running on the user's own machine. Its parts:
 - **Backend:** a FastAPI process bound to loopback.
 - **UI:** a React + Cytoscape.js single-page app served by the backend and opened in the user's browser.
-- **Chain data:** comes only from the user's Bitcoin Core node over RPC/REST, plus a local full-chain index built by the app.
+- **Chain data:** comes only from the user's Bitcoin Core node over authenticated JSON-RPC (the REST interface is not used), plus a local full-chain index built by the app.
 - **Sensitive user data:** stored in a SQLite database kept on a VeraCrypt volume.
 - **Outbound internet:** the only allowed flow is a bulk download of historical fiat prices, optionally via Tor/SOCKS5.
 
@@ -55,7 +55,7 @@ flowchart LR
     subgraph TB4P["TB4 · Plain disk (public data only)"]
       CIDX[("Chain index (LMDB)")]
     end
-    NODE["Bitcoin Core<br/>(txindex=1, rest=1)"]
+    NODE["Bitcoin Core<br/>(txindex=1)"]
   end
   NET(("Internet<br/>price source"))
   SUPPLY(("TB5 · npm / PyPI / GitHub<br/>(build time only)"))
@@ -65,7 +65,7 @@ flowchart LR
   API --> TAX
   TAX --> UDB
   API --> LOGS
-  IDX -- "TB2: RPC/REST (cookie auth)" --> NODE
+  IDX -- "TB2: JSON-RPC (cookie auth)" --> NODE
   API -- "TB2: RPC (method allowlist)" --> NODE
   IDX --> CIDX
   API --> CIDX
@@ -78,7 +78,7 @@ flowchart LR
 |---|---|---|
 | TB0 | OS account | The user's session ↔ other OS users / remote attackers |
 | TB1 | Browser ↔ backend | Our SPA, and any other web origin the browser loads, ↔ the loopback API |
-| TB2 | Backend ↔ Bitcoin Core | Our process ↔ node RPC/REST |
+| TB2 | Backend ↔ Bitcoin Core | Our process ↔ node JSON-RPC |
 | TB3 | Backend ↔ Internet | Price fetcher ↔ external price/FX source (the **only** outbound flow) |
 | TB4 | Process ↔ disk | Encrypted volume (sensitive) vs plain disk (public chain data only) |
 | TB5 | Build/supply chain | Third-party packages, build tools, CI, AI coding agents ↔ our code |
@@ -154,7 +154,7 @@ Columns: **ID** · **STRIDE/P** (S spoofing, T tampering, R repudiation, I info 
 |---|---|---|---|---|---|
 | T-201 | I | **RPC credential leakage** (A7) through logs, the DB, error pages or exports | Read the cookie file at startup and keep it in memory only; never persist, log or echo it; the redaction filter covers auth headers | Planned | |
 | T-202 | I, P | **Queries sent to a non-local node**: misconfiguration points RPC at a remote host and leaks every lookup (A1) | Default `127.0.0.1`; a non-loopback RPC host is refused unless `--allow-remote-node` is set, and the UI shows a persistent warning | Planned | |
-| T-203 | E, T | **App misuses the node**: calls wallet or broadcast RPCs that change node state or leak data (e.g. `sendrawtransaction`, `importdescriptors` storing the user's addresses in a node wallet **outside** the volume) | RPC **method allowlist** (read-only chain methods: `getblockchaininfo`, `getindexinfo`, `getblockhash`, `getblockheader`, `getblock`, `getrawtransaction`, `getbestblockhash`, REST block fetch); the node wallet is never used; a unit test asserts the allowlist | Planned | |
+| T-203 | E, T | **App misuses the node**: calls wallet or broadcast RPCs that change node state or leak data (e.g. `sendrawtransaction`, `importdescriptors` storing the user's addresses in a node wallet **outside** the volume) | RPC **method allowlist** (read-only chain methods: `getblockchaininfo`, `getindexinfo`, `getblockhash`, `getblockheader`, `getblock`, `getrawtransaction`, `getbestblockhash`); the node wallet is never used; a unit test asserts the allowlist. The app never uses or requires the unauthenticated REST interface (`rest=1`), and the docs recommend leaving it off | Planned | |
 | T-204 | P | **Node logs reveal which txs the user looked up** (e.g. with `debug=rpc`) | Docs: don't run with `debug=rpc`/`debug=http` while using the app. Core does not log RPC parameters by default | Planned | |
 | T-205 | D, T | **Malformed or adversarial block/tx data (AD7)** crashes the parser, exhausts memory, or corrupts the index | Bounds-checked parser with size/count limits; varint overflow checks; fuzz tests (Hypothesis/Atheris) on the tx/block parser; the indexer fails closed (no partial writes) | Planned | |
 | T-206 | T | **Wrong network**: a testnet/signet/regtest node is used against a mainnet DB, or the reverse | Store `chain` in the user DB and index metadata; refuse to start on mismatch | Planned | |
@@ -222,7 +222,7 @@ Columns: **ID** · **STRIDE/P** (S spoofing, T tampering, R repudiation, I info 
 | Flow | From | To | Content | Notes |
 |---|---|---|---|---|
 | F1 | Browser | Backend `127.0.0.1:<port>` | UI/API | Session token + CSRF |
-| F2 | Backend | Bitcoin Core RPC/REST (loopback by default) | Read-only chain queries | Method allowlist (T-203) |
+| F2 | Backend | Bitcoin Core JSON-RPC (loopback by default) | Read-only chain queries | Method allowlist (T-203) |
 | F3 | Backend (`prices/` only) | Configured price/FX hosts, optionally via SOCKS5 | Bulk historical price/FX download | Manual trigger, date-independent (T-301) |
 
 **Any other flow is a bug.** New flows need an ADR and an update to this table.
@@ -267,3 +267,4 @@ Columns: **ID** · **STRIDE/P** (S spoofing, T tampering, R repudiation, I info 
 | Date | Version | Change |
 |---|---|---|
 | 2026-09-26 | 0.1 | Initial design-stage threat model (all mitigations *Planned*) |
+| 2026-09-27 | 0.2 | Node access is JSON-RPC only; REST (`rest=1`) is no longer used (T-203, F2, DFD) |
