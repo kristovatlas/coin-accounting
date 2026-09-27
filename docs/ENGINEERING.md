@@ -43,33 +43,23 @@ Applies to **runtime and development dependencies alike**: linters, test tools a
 | No source builds | `no-build = true`: only wheels are installed, so no `setup.py` / build backend code runs at install time. An exception per package (`no-build-package`) needs an ADR and a manual review of the sdist |
 | Indexes | PyPI only; no extra or alternative indexes |
 
-### 2.3 Rust (only if the index extension is built — PLAN §1 perf gate)
-
-| Control | Setting |
-|---|---|
-| Lockfile | `Cargo.lock` committed; `cargo build --locked` |
-| Vetting | `cargo-deny` (advisories, licenses, allowed sources: crates.io only) and `cargo-vet` audits in CI |
-| Cooldown | 7-day minimum crate age, enforced by a CI check on the lockfile **(verify at setup)** |
-| Build scripts | Crates with `build.rs` or proc-macros are reviewed during vetting (THREAT_MODEL T-602) |
-| Toolchain | Pinned via `rust-toolchain.toml`; maturin version pinned |
-
-### 2.4 Vetting a new dependency (all ecosystems)
+### 2.3 Vetting a new dependency (all ecosystems)
 
 Before a new direct dependency, or a new transitive one pulled in by an upgrade, is **installed or executed**:
 
 1. **Justify it.** Why can't the standard library or ~100 lines of our own code do the job? Could a package we already use do it?
-2. **Scan it with Socket.dev.** Installs are wrapped by **Socket Firewall** (`sfw pnpm install …`, `sfw uv sync …`, `sfw cargo …`), which blocks known-malicious packages before they reach disk **(verify at setup)**. The Socket report is reviewed for install scripts, network or filesystem access, obfuscated code, telemetry, new maintainers and typosquat signals. The Socket GitHub App (or `socket` CLI in CI) also reports on every PR that changes a lockfile.
+2. **Scan it with Socket.dev.** Installs are wrapped by **Socket Firewall** (`sfw pnpm install …`, `sfw uv sync …`), which blocks known-malicious packages before they reach disk **(verify at setup)**. The Socket report is reviewed for install scripts, network or filesystem access, obfuscated code, telemetry, new maintainers and typosquat signals. The Socket GitHub App (or `socket` CLI in CI) also reports on every PR that changes a lockfile.
 3. **Check its health:** maintainers, release history, open security advisories, download base, transitive dependency count.
 4. **Record it** in [`DEPENDENCIES.md`](DEPENDENCIES.md): name, ecosystem, runtime/dev, purpose, alternatives considered, whether it has network capability, Socket result, date, reviewer.
 5. **Get human approval.** A PR that adds a dependency needs the human reviewer's explicit approval of that dependency. AI agents may propose dependencies, never add them unilaterally.
 
-### 2.5 Updating dependencies
+### 2.4 Updating dependencies
 
 - Updates come in **deliberate batches** (at most monthly, plus urgent security fixes), never as a side effect of other work.
-- Dependabot is configured with a **7-day cooldown** matching §2.1–2.3 **(verify at setup)**. Its PRs go through the same vetting as new dependencies: read the changelog, review the Socket diff.
+- Dependabot is configured with a **7-day cooldown** matching §2.1–2.2 **(verify at setup)**. Its PRs go through the same vetting as new dependencies: read the changelog, review the Socket diff.
 - Security fixes may bypass the cooldown with a recorded justification.
 
-### 2.6 CI and repository
+### 2.5 CI and repository
 
 - GitHub Actions are **pinned to full commit SHAs**, with a version comment. Only actions from GitHub (`actions/*`) or vetted publishers are allowed.
 - Workflow `permissions: contents: read` by default; a job only gets more if it needs it. No `pull_request_target` workflows.
@@ -93,8 +83,8 @@ Before a new direct dependency, or a new transitive one pulled in by an upgrade,
 | Layer | What it proves | Tooling |
 |---|---|---|
 | **E2E** (primary) | A user flow works: real regtest `bitcoind` + backend + browser | `pytest` harness driving `bitcoind -regtest` + **Playwright** |
-| Integration | A component works against real neighbours (RPC client ↔ regtest node, index ↔ store, API ↔ DB) | `pytest` + regtest |
-| Unit | Pure logic is correct at the edges (parser, doxx rules, tax engine, box selection) | `pytest`, Hypothesis for property tests and fuzzing |
+| Integration | A component works against real neighbours (RPC client and scan jobs ↔ regtest node, cache ↔ DB, API ↔ DB) | `pytest` + regtest |
+| Unit | Pure logic is correct at the edges (scan-result processing, doxx rules, tax engine, box selection) | `pytest`, Hypothesis for property tests and fuzzing |
 | Frontend unit | Components with non-trivial logic | `vitest` |
 
 - **Every user-visible feature ships with at least one E2E test** covering its main path. This is part of the Definition of Done (§8).
@@ -107,7 +97,7 @@ Before a new direct dependency, or a new transitive one pulled in by an upgrade,
 | Scope | Floor | Measured by |
 |---|---|---|
 | Backend overall | **≥ 85 %** line + branch | `coverage.py`, combining unit, integration and E2E runs; the backend process is instrumented during E2E |
-| `tax/`, `doxx.py`, `index/parse.py`, `index/store.py` | **≥ 95 %** line + branch | same |
+| `tax/`, `doxx.py`, `chain/` | **≥ 95 %** line + branch | same |
 | Frontend | **≥ 70 %** lines (`vitest`), **plus** the E2E-per-feature rule | `vitest --coverage` |
 
 Floors are minimums, not targets. Coverage cannot drop on `main`, and a PR that lowers coverage in a floored module fails CI.
@@ -146,7 +136,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
   - a new data store, or moving data across the VeraCrypt boundary
   - a new dependency with network, native-code or install-time execution capability
   - changes to tax rules or doxx rules
-  - storage or index format changes
+  - storage format changes, or a change in how chain data is obtained from the node
   - weakening any control in this document or the threat model
   - changes to the architecture diagram
   - supported platform changes
@@ -187,7 +177,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 
 ### 5.3 Error handling
 
-- **Fail closed** on anything touching integrity: indexing, reorgs, storage checks, price imports.
+- **Fail closed** on anything touching integrity: chain-data fetching and caching, reorgs, storage checks, price imports.
 - Never swallow exceptions silently. User-facing errors must not echo sensitive values.
 
 ## 6. AI coding agents
@@ -196,7 +186,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
 
 - **No real data.** Agents never run while a VeraCrypt volume with real data is mounted, and never get access to real DBs, logs, exports or configs. Development and E2E use regtest and synthetic data only. Mainnet smoke tests are run by the human (THREAT_MODEL T-607).
 - **Scope.** Agents don't:
-  - add dependencies without the §2.4 vetting and human approval
+  - add dependencies without the §2.3 vetting and human approval
   - weaken a control
   - change `docs/architecture.md` without an ADR
   - commit to `main` directly
@@ -205,7 +195,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
 
 ## 7. Workflow
 
-- **Branches:** `main` is always releasable. Work happens on short-lived branches (`<type>/<topic>`, e.g. `feat/index-parser`, `docs/adr-0003`).
+- **Branches:** `main` is always releasable. Work happens on short-lived branches (`<type>/<topic>`, e.g. `feat/scan-jobs`, `docs/adr-0003`).
 - **PRs:**
   - small and focused
   - opened as **drafts** for human review on GitHub
