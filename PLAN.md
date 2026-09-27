@@ -12,7 +12,7 @@ Hard constraints:
 
 Decisions made with the user:
 - a local web app
-- Core plus our own full-chain index
+- chain data from Core's own indexes (`txindex`, `blockfilterindex` + `scanblocks`); **no app-side chain index**
 - bulk price download
 - per-account basis with Specific ID recorded in time
 - doxx propagation for any identity-knowing entity
@@ -26,44 +26,39 @@ Browser UI (Vite + TypeScript + React + Cytoscape.js; all assets bundled, no CDN
         │  HTTP on 127.0.0.1 only (Host check, one-time launch token → cookie, CSRF header)
 FastAPI backend (Python 3.12, uv-managed)
    ├── rpc.py ── Bitcoin Core JSON-RPC (dedicated rpcauth user, server-side rpcwhitelist, loopback only)
-   ├── chain index (public data, large, path configurable, not on VeraCrypt; dir mode 0700)
-   └── user DB (SQLite, sensitive, on VeraCrypt volume; file mode 0600)
+   │              node provides txindex + blockfilterindex; scans run via scanblocks
+   └── user DB (SQLite, sensitive, on VeraCrypt volume; file mode 0600), including the chain-data cache
+       (nothing the app writes lives on plain disk)
 ```
 
-### 1. Node + chain index (`backend/coinacct/index/`)
-- **Node requirements, checked at startup:**
+### 1. Chain data from Bitcoin Core (`backend/coinacct/chain/`)
+The app keeps **no chain index of its own**. Bitcoin Core's built-in indexes answer every chain question on demand, and the app caches the answers it needs in the user DB. Maintaining the node (initial sync, pruning, restores, resyncs) is the user's responsibility; the app only checks its settings.
+- **Node requirements, checked at startup** (the app refuses to run with a clear message if any fails):
+  - `txindex=1` and `blockfilterindex=1`, both fully synced (`getindexinfo`)
   - **unpruned** node (`getblockchaininfo.pruned == false`)
   - matching chain
-  - a minimum Core version (chosen in the M0 ADR)
-  - `txindex` is **optional**, because each index entry stores the block height, which is enough to find the block and fetch the tx
+  - a minimum Core version: **≥ 25.0** (first release with a stable `scanblocks`), final choice in the M0 ADR
 - **RPC access:**
   - The app uses a dedicated `rpcauth` user, restricted in Core by `rpcwhitelist=<user>:<methods>` to read-only methods. The app keeps its own allowlist too, as a second layer.
   - Loopback only.
   - At startup the app calls a harmless method that is *not* on the whitelist (e.g. `uptime`). If that call succeeds, the server-side whitelist is missing, and the app refuses to run.
   - The app never uses the node wallet or the REST interface.
-  - Parallel fetches are capped below `rpcthreads`/`rpcworkqueue`.
-- **Blocks:** fetched with `getblock <hash> 0`. If the M1 benchmark shows transfer is the bottleneck, the alternative is reading `blk*.dat` directly. Core ≥28 obfuscates those files with a key stored in `blocks/xor.dat`. That option needs an ADR.
-- **Index content**, full chain from genesis:
-  - address history: scripthash → (height, tx)
-  - spender lookup: outpoint → spending (height, tx)
-  - tx lookup: txid → height
-  - Keys use short prefixes, but **every prefix may map to several values** (dup-sorted), so collisions never overwrite.
-  - Resolution: stored height → `getblockhash` → `getblock <hash> 1` → match the full txid → verify.
-  - Handles the BIP30 duplicate coinbase txids.
-  - Provably unspendable outputs (OP_RETURN) are skipped.
-- **Size and storage engine** are decided by the M1 benchmark and an ADR:
-  - The size estimate is **150–350 GB**, depending on store and key layout.
-  - Candidates:
-    - **LMDB**, with the initial build as externally sorted runs + `MDB_APPEND` bulk load and random inserts only for incremental sync
-    - **RocksDB/LSM** with compression
-  - Parsing runs in parallel worker processes, with a single writer.
-- **Reorgs:**
-  - The undo log stores the exact keys written for each of the last 100 blocks.
-  - A fork deeper than that fails closed and prompts a rebuild from a checkpoint, or a full rebuild.
-- **Perf gate (M1):** time RPC fetch, parsing and writes separately, **with write throughput measured at ≥100 GB DB size**, not only on a small sample.
-  - If parsing is the bottleneck, move it into a Rust extension (PyO3/maturin), subject to the crates supply-chain policy in P0.2.
-  - If writes are the bottleneck, change the store or the build strategy.
-- The UI shows sync progress. The app is usable for heights already indexed.
+  - Parallel calls are capped below `rpcthreads`/`rpcworkqueue`.
+- **How each question is answered:**
+
+  | Question | Core RPC |
+  |---|---|
+  | Transaction details, and backward expansion (the tx that created an input) | `getrawtransaction <txid> 2`: decoded, with prevout values and scripts (`txindex`) |
+  | Address/script history: every tx paying to or spending from a script | `scanblocks start [descriptors] <from> <to>` over the compact block filters → matching block hashes → `getblock <hash> 2`/`3` → keep the txs that touch the script. Scan objects are `addr(...)`, `raw(<script hex>)` for scripts without an address, or ranged descriptors |
+  | Descriptor/xpub discovery | One `scanblocks` call with the ranged descriptor (gap-limit range), plus `deriveaddresses` to map hits to indexes |
+  | Is this output spent? | `gettxout <txid> <n>` |
+  | Forward expansion: which tx spent an output? | If `gettxout` says spent: `scanblocks` for the output's script from the output's height, in chunks, stopping at the first block where it is spent |
+  | Chain tip, headers, confirmations | `getblockchaininfo`, `getbestblockhash`, `getblockheader`, `getblockhash` |
+
+- **Scans run as background jobs.** Core runs one `scanblocks` at a time. The app queues scans, shows progress via `scanblocks status`, and can cancel them (`scanblocks abort`). Results arrive incrementally in the UI.
+- **Caching:** decoded txs, script histories and spender lookups are cached in the user DB (on the volume, since they reveal which scripts the user cares about). Each cached row records the block hash and height it came from.
+- **Reorgs:** on each tip change the app checks the cached rows near the tip against the active chain (`getblockhash`). Rows from blocks no longer on the active chain are invalidated and re-fetched. Nothing depends on an undo log.
+- **Perf check (M1):** measure `scanblocks` time for a single script over the whole chain and over typical ranges, and for a ranged descriptor, on a mainnet node, using public scripts that are not the user's (run by the human, per the agent rules in P0.2). If forward expansion is too slow for interactive use, options include scanning smaller ranges first, running scans ahead of time for owned outputs, and batching scripts into one scan. Any change of approach needs an ADR.
 
 ### 2. User data model (`backend/coinacct/db/`, SQLite + Alembic migrations)
 Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency code. The tax ledger is USD.
@@ -80,7 +75,7 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
   - label, source, confirmed flag
 - `address_client`: many-to-many address↔wallet_client.
 - `descriptor`: descriptor/xpub, gap limit, next index, tax_account, client(s).
-- `tx_cache`, `utxo_cache`: decoded txs and outputs relevant to the user (recomputable). `tx.mixing` flag (auto-detected, user-overridable).
+- Chain-data cache (recomputable from the node): `tx_cache` (decoded txs), `utxo_cache` (outputs relevant to the user), `script_history` (script → txs + scanned height range), `spender` (outpoint → spending tx). Every row records its source block hash and height, for reorg checks. `tx.mixing` flag (auto-detected, user-overridable).
 - `event`: a typed ledger entry. Types:
   - acquisitions: `buy | p2p_buy | income | gift_in | inherit | opening_allocation_2025`
   - movements: `self_transfer | deposit | withdrawal`
@@ -104,7 +99,7 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
   - paste or CSV a list of addresses
   - **descriptors/xpubs (v1)**, derived with Core's `deriveaddresses` (no node wallet) under a gap limit that extends as used addresses are found
   - Each import is assigned to an entity (default "me"), a tax account, and wallet client(s).
-- **Discovery:** look up each scripthash in the index to get all funding and spending txs. Those are cached, and owned UTXOs (current and historical) are derived.
+- **Discovery:** scan each imported script or descriptor with `scanblocks` (batched into as few scans as possible) to get all funding and spending txs. Those are cached, and owned UTXOs (current and historical) are derived.
 - **Third-party tags** work the same way (e.g. an employer's address). Suggestion engine:
   - **Common-input heuristic:** addresses co-spent with a tagged address are suggested as the same entity. This is suppressed for txs flagged `mixing` (CoinJoin/PayJoin-like: many equal-value outputs, or set by the user).
   - A tx that pays the user from a tagged cluster produces a suggested event (e.g. `income` from Employer).
@@ -112,7 +107,7 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
 
 ### 4. Graph UI (`frontend/`)
 - Cytoscape.js with a DAG layout. Nodes are txs and outputs. Outputs are colored by owning entity, and badges show doxx sets, with certain and inferred links drawn differently.
-- Click an output to expand backward (funding tx) or forward (spender, via the index). Expansion is lazy and uses paging for large txs.
+- Click an output to expand backward (funding tx) or forward (spender, via `gettxout` + a `scanblocks` job; progress is shown and the job can be cancelled). Expansion is lazy and uses paging for large txs.
 - A side panel shows address/tx details. From it the user can:
   - tag the owner entity, tax account and clients
   - set the mixing flag
@@ -197,7 +192,7 @@ A pure, deterministic function of events, recomputed on every change. It can com
 
 ## Repo layout
 ```
-backend/coinacct/{config.py, rpc.py, app.py, index/{parse.py, store.py, sync.py},
+backend/coinacct/{config.py, rpc.py, app.py, chain/{node_checks.py, scans.py, cache.py, reorg.py},
                   db/{models.py, migrations/}, discovery.py, tagging.py, doxx.py,
                   prices/{bitstamp.py, fx.py}, tax/{engine.py, rules/, reports.py}, api/*.py}
 backend/tests/{unit/, regtest/}
@@ -228,11 +223,6 @@ Order: design (this plan) → **P0.1 threat model** → **P0.2 engineering pract
   - `uv` with a lockfile containing hashes, `uv sync --locked`
   - a 7-day cooldown via `exclude-newer`, kept rolling by a checked-in script (verify uv's relative-duration support at setup)
   - sdists only when no wheel exists, reviewed by hand
-- **Supply chain (Rust)**, only if the extension is needed:
-  - `Cargo.lock`
-  - `cargo-deny` (advisories, licenses, sources) + `cargo-vet`
-  - an equivalent 7-day cooldown
-  - the maturin toolchain pinned in CI
 - **Dependency vetting:**
   - Every new dependency, direct or transitive, is scanned with Socket.dev (Socket CLI / Socket Firewall `sfw` wrapping installs) **before it is installed or executed**.
   - The dependency is recorded in `docs/DEPENDENCIES.md` with a justification.
@@ -246,9 +236,9 @@ Order: design (this plan) → **P0.1 threat model** → **P0.2 engineering pract
   - `bitcoind` for regtest downloaded with SHA256SUMS + builder-signature verification
   - Playwright browsers pinned
 - **Testing:**
-  - The strategy leans on E2E: regtest `bitcoind` + backend + Playwright UI flows are the primary evidence a feature works, and unit tests back up the parser, doxx and tax engines.
+  - The strategy leans on E2E: regtest `bitcoind` + backend + Playwright UI flows are the primary evidence a feature works, and unit tests back up the doxx and tax engines and the scan/cache logic.
   - E2E runs on both Linux and macOS.
-  - Coverage floors, enforced in CI: overall ≥85% line+branch, and ≥95% for `tax/`, `doxx.py`, `index/parse.py`. These are floors, not targets.
+  - Coverage floors, enforced in CI: overall ≥85% line+branch, and ≥95% for `tax/`, `doxx.py`, `chain/`. These are floors, not targets.
   - A test-time socket guard (patching `socket.connect` **and** `getaddrinfo`) fails any test that opens an unexpected connection. It catches accidental phoning home; it is not a security boundary.
   - **Anti-test-slop:**
     - A review checklist bans tests that only assert mocks, tautologies, snapshot-everything tests, and tests changed to match buggy output.
@@ -274,7 +264,7 @@ Order: design (this plan) → **P0.1 threat model** → **P0.2 engineering pract
   - Definition of Done includes E2E coverage of the feature
 
 ### P0.3 `docs/architecture.md` — architecture diagram (human-reviewed, stays binding)
-- A Mermaid diagram (renders on GitHub and as text in the repo) of components, trust boundaries, data stores (VeraCrypt vs plain disk), and every network flow.
+- A Mermaid diagram (renders on GitHub and as text in the repo) of components, trust boundaries, data stores (all on the VeraCrypt volume), and every network flow.
 - Also a data-flow diagram for "import → discover → tag → lot → report".
 - A change is allowed only through an ADR. A CI check keeps a hash of the approved diagram, and changing it without a new ADR fails.
 
@@ -282,16 +272,16 @@ Order: design (this plan) → **P0.1 threat model** → **P0.2 engineering pract
 Seed ADRs record the decisions already made:
 - local web app
 - supported platforms (Linux + macOS)
-- node access: loopback JSON-RPC, rpcauth + rpcwhitelist, unpruned node, optional txindex, minimum Core version
-- chain index store and key layout (finalized after the M1 benchmark)
+- node access: loopback JSON-RPC, rpcauth + rpcwhitelist, unpruned node, minimum Core version
+- chain data via Core's `txindex` + `blockfilterindex`/`scanblocks`, no app-side index
 - bulk, date-independent price download
 - per-account basis, identification timing, the 2025 transition
 - lot flow and fee treatment by role
 - doxx propagation rules and confidence levels
 - 8949 box selection rules per tax year
-- storage split (user DB on VeraCrypt, public index anywhere)
+- storage: everything the app writes lives on the VeraCrypt volume
 - accepted egress risk
-- pnpm/uv/cargo supply-chain policy
+- pnpm/uv supply-chain policy
 
 ## Milestones
 Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diagram if needed, and it passes the coverage floors and E2E flow on Linux and macOS.
@@ -302,7 +292,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
    - storage checks: VeraCrypt detection on Linux and macOS, file modes
    - FastAPI app with Host check, launch token, CSRF and CSP
    - a regtest harness that uses a verified `bitcoind` download
-2. **M1 chain index:** parser, store, sync/reorg with rollback and a deep-reorg rebuild, and the perf benchmark gate at scale. The storage ADR is finalized here.
+2. **M1 chain access:** node checks, the tx fetch/decode layer, the `scanblocks` job queue (status/abort), the chain-data cache and reorg invalidation, and the mainnet perf check of `scanblocks`.
 3. **M2 user DB + import + discovery:**
    - entities, tax accounts, clients
    - address and **descriptor/xpub** import
@@ -327,8 +317,8 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
 
 ## Verification
 - **Unit tests (pytest):**
-  - block/tx parser against known mainnet raw blocks, plus fuzzing
-  - index keys with forced prefix collisions and BIP30 duplicates
+  - scan-result processing: finding the txs that touch a script in a decoded block, including P2PK/bare multisig via `raw()`, and filter false positives
+  - cache invalidation on reorg
   - doxx rules on hand-built graphs, covering every rule and the mixing exception
   - the lot engine against hand-worked tax scenarios:
     - pro-rata moves
@@ -346,8 +336,8 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
   - pay an "exchange" address and reuse an address
   - make a CoinJoin-like tx
   - spend change
-  - force a shallow and a deep reorg
+  - force a reorg (`invalidateblock` in the test harness, never in the app)
 
-  Then assert that the index, discovery, doxx tags and lot flow all match expectations.
+  Then assert that discovery, forward/backward expansion, cache invalidation, doxx tags and lot flow all match expectations.
 - **End-to-end** (Playwright, Linux + macOS): run the backend + UI against regtest and drive the whole flow: import descriptor → expand graph → tag exchange → record sell with timely identification → export 8949. The socket guard log confirms that no unexpected connections were made.
 - **Mainnet smoke test:** run **by the human** on their node with a small address set once M1–M3 land. Agents do not take part.
