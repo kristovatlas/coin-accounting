@@ -37,7 +37,7 @@ The app keeps **no chain index of its own**. Bitcoin Core's built-in indexes ans
   - `txindex=1` and `blockfilterindex=1`, both fully synced (`getindexinfo`)
   - **unpruned** node (`getblockchaininfo.pruned == false`)
   - matching chain
-  - a minimum Core version: **≥ 29.0**, the first release with `getdescriptoractivity` (`scanblocks` itself exists since 25.0). Final choice in the M0 ADR
+  - a minimum Core version: **≥ 29.0**, the first release with `getdescriptoractivity` (`scanblocks` itself exists since 25.0). Agreed with the user on 2026-09-27; the M0 ADR records it and may raise it if a later RPC is needed
   - Disk cost on the node: `txindex` plus the block-filter index. The filter index was ~4–5 GiB in 2019 and is larger now; M1 measures it
 - **RPC access:**
   - The app uses a dedicated `rpcauth` user, restricted in Core by `rpcwhitelist=<user>:<methods>` to read-only methods. The app keeps its own allowlist too, as a second layer.

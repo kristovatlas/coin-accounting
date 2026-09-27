@@ -294,7 +294,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 1. ~~Non-Linux VeraCrypt detection (macOS/Windows) for T-401: do we support these platforms in v1?~~ **Resolved (2026-09-27):** v1 supports Linux and macOS; Windows is not planned. The macOS detection method is designed in M0 (T-401).
 2. ~~**In-app "lock"** so the volume can be dismounted cleanly without killing the app.~~ **Resolved (2026-09-27): deferred to a future version.** For v1 the documented workflow is to quit the app and close its browser window, then dismount (T-405). The backend should still treat "no DB open" as a clean state where cheap, so a lock is easy to add later.
 3. ~~Should a second price source be added for cross-checking (T-303)?~~ **Resolved (2026-09-27): deferred to a future version.** v1 relies on TLS, sanity checks, content hashes and user overrides (T-303). A second source would add one more outbound flow (§6), so it needs an ADR.
-4. **Minimum Bitcoin Core version** (T-203, PLAN §1): decided in the M0 ADR.
+4. ~~**Minimum Bitcoin Core version**~~ **Resolved (2026-09-27): ≥ 29.0** (needed for `getdescriptoractivity`). The user is fine with any minimum, so it may be raised later if a newer RPC helps.
 
 ## 11. Changelog
 
@@ -306,4 +306,4 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 | 2026-09-27 | 0.3.1 | In-app lock deferred to a future version; v1 dismount workflow documented (T-405, §10) |
 | 2026-09-27 | 0.3.2 | Second price source for cross-checking deferred to a future version (T-303, §10) |
 | 2026-09-27 | 0.4 | No app-side chain index: chain data comes from Core's `txindex` + `blockfilterindex` via `scanblocks` and is cached in the user DB. Nothing the app writes lives on plain disk. A8, T-208, T-211 retired; T-205, T-207, T-209, T-210 rewritten; T-212 added (long scans); whitelist adds `gettxout`, `scanblocks`; Rust/crates removed from supply chain |
-| 2026-09-27 | 0.4.1 | After source-level research on BIP158 and Core's `scanblocks`: silent-skip guard added to T-210; whitelist adds `getdescriptoractivity`, `gettxspendingprevout`; minimum Core version ≥ 29.0 proposed |
+| 2026-09-27 | 0.4.1 | After source-level research on BIP158 and Core's `scanblocks`: silent-skip guard added to T-210; whitelist adds `getdescriptoractivity`, `gettxspendingprevout`; minimum Core version ≥ 29.0 agreed (§10.4) |
