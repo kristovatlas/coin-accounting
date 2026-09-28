@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.4.2 (design stage — no code yet) |
+| Version | 0.5 (design stage — no code yet) |
 | Last updated | 2026-09-27 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -213,12 +213,12 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 
 | ID | STRIDE/P | Threat | Mitigation | Status | Evidence |
 |---|---|---|---|---|---|
-| T-601 | E, I | **Malicious or compromised package** (npm/PyPI typosquat, hijacked maintainer, freshly published malicious version). Because in-process egress is accepted (R-4), **this is the primary exfiltration path** | 7-day minimum release age (pnpm `minimumReleaseAge`, uv `exclude-newer`); Socket.dev scan **before** install/execution; lockfiles with integrity hashes; frozen installs in CI; minimal dependency policy with a justification in `docs/DEPENDENCIES.md` (details in `docs/ENGINEERING.md`) | Planned | |
-| T-602 | E | **Install-time code execution** (postinstall / build scripts) | pnpm lifecycle scripts disabled (empty `onlyBuiltDependencies`, `strictDepBuilds`); Python wheels only (uv `no-build`), with exceptions reviewed by hand | Planned | |
-| T-603 | E, T | **Compromised CI, GitHub Actions or test tooling downloads** | Actions pinned by full commit SHA; `permissions: contents: read` by default; no secrets required; branch protection on `main`. The regtest `bitcoind` is verified against SHA256SUMS and builder signatures; Playwright browser versions are pinned | Planned | |
+| T-601 | E, I | **Malicious or compromised package** (npm/PyPI typosquat, hijacked maintainer, freshly published malicious version, lockfile poisoning). Because in-process egress is accepted (R-4), **this is the primary exfiltration path** | Packages are **resolved, vetted and approved before anything is installed** (ENGINEERING §2.4). 7-day cooldowns (pnpm `minimumReleaseAge` strict, uv relative `exclude-newer`). Every install goes through Socket Firewall via `make` targets, with no fallback. A **lockfile policy check** enforces registry-only sources, hashes and package age on every entry, including transitive ones. Exotic sources are blocked. Monthly batched updates; weekly clean-cache re-scan; `pip-audit`/`pnpm audit` on every PR. Details in `docs/ENGINEERING.md` §2 | Planned | |
+| T-602 | E | **Install-time or load-time code execution**: dependency build scripts, our own lifecycle scripts, `.pnpmfile` hooks, sdist builds, `.pth` files in wheels, package managers auto-installing or auto-downloading | pnpm `allowBuilds: {}` + `strictDepBuilds`; no lifecycle scripts, `.pnpmfile` or `configDependencies` in our repo (CI check); uv `no-build` with no exceptions and `package = false`; `.pth` allowlist check; `verifyDepsBeforeRun: error`, `pmOnFail: error`, `UV_NO_SYNC`, `python-downloads = "never"` | Planned | |
+| T-603 | E, T | **Compromised CI, GitHub Actions or toolchain/test downloads** | Actions pinned by full SHA and checked with `zizmor`/`actionlint`; `contents: read`, read-only default token, `persist-credentials: false`, no secrets, no dependency caches; fork PRs need approval. Toolchain and test binaries (`sfw`, pnpm, uv, Node, Python, `bitcoind`, Playwright browsers) are each verified per ENGINEERING §2.3. **`sfw` itself has no published checksums**, so its committed hash is trust-on-first-use | Planned | |
 | T-604 | I | **Runtime dependency adds network access** (telemetry, update checks) | The socket guard in tests (T-305); dependency review checks for network capability | Planned | |
-| T-605 | T | **AI coding agent introduces insecure code, weak tests, or unvetted dependencies** | `AGENTS.md` binds agents to this document and `ENGINEERING.md`; human review of every PR; test-slop audits; an agent may not add a dependency without the vetting steps | Planned † | |
-| T-606 | T | **Tampered release/source** as distributed to the user | Signed commits/tags (later: reproducible build + checksums for releases) | Planned | |
+| T-605 | T | **AI coding agent introduces insecure code, weak tests or unvetted dependencies, or merges its own PRs** | `AGENTS.md` binds agents to this document and `ENGINEERING.md`; human review of every PR; test-slop audits; agents may propose but never approve dependencies. **Only the human merges**: this is procedural, since agents use the owner's GitHub credentials (user decision, 2026-09-27) | Documented † | |
+| T-606 | T | **Tampered release/source** as distributed to the user | Commit signing is **not** required (user decision, 2026-09-27: agents would need the owner's key). GitHub signs merge commits. If releases are published for other users, release tags will be signed, and a reproducible build with checksums will be considered | Accepted (for now) | |
 | T-607 | I | **Cloud-backed AI coding agents (AD12) read real user data** (DB, logs, exports, terminal output) and send it to a model provider | Agents never run while a volume with real data is mounted, and never get access to real data paths; development and E2E use regtest and synthetic data only; mainnet smoke tests are run by the human; agent-ignore files list the data paths; log redaction is on by default in dev | Documented † | |
 
 ### 5.7 TB6 — User-supplied files
@@ -243,7 +243,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 
 **Any other runtime flow is a bug.** New flows need an ADR and an update to this table.
 
-**Build/dev time only** (never at runtime): package registries (npm, PyPI), Socket.dev, GitHub/CI, the `bitcoind` release download for regtest, and Playwright browser downloads. Each is covered by §5.6.
+**Build/dev time only** (never at runtime): package registries (npm, PyPI), **Socket Firewall** (sfw-free sends the names and versions of packages being installed to Socket), the Socket GitHub App, GitHub/CI, and toolchain and test downloads (`sfw`, pnpm, uv, Node.js, Python, `bitcoind`, Playwright browsers). Each is covered by §5.6 and ENGINEERING §2.
 
 ## 7. Verification plan (how threats become *Verified*)
 
@@ -289,6 +289,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 | R-3 | The doxx model is a lower bound on what adversaries know (T-505) | No local tool can model proprietary chain analysis or off-chain data; mitigated by honest UI wording |
 | R-4 | **In-process egress:** malicious code running inside the backend (e.g. a compromised dependency) could send user data to the internet. Nothing at the OS level blocks it | Decided 2026-09-27: OS-level sandboxing (bwrap/nftables on Linux, sandbox-exec/pf on macOS) adds cross-platform complexity and compatibility risk. Supply-chain controls (T-601–T-604) are the primary defence; the test-time socket guard catches accidental egress only. To be revisited if the dependency count grows or a sandbox becomes portable |
 | R-5 | The browser may still write data outside the volume (crash reports, OS-level caches) when a supported browser can't be launched with a profile on the volume | Best effort with warnings; documented |
+| R-6 | **Dev work and real data on the same machine:** an AI agent or a compromised dev tool can leave code in the working tree (venv, `node_modules`, built bundle, git hooks, Makefile). That code runs later when the user starts the app against real data | User decision, 2026-09-27: no technical dev/live separation. The user docs warn against doing development work, or running AI coding agents, on a machine where real financial data is used. Related: T-607 |
 
 ## 10. Open questions
 
@@ -309,3 +310,4 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 | 2026-09-27 | 0.4 | No app-side chain index: chain data comes from Core's `txindex` + `blockfilterindex` via `scanblocks` and is cached in the user DB. Nothing the app writes lives on plain disk. A8, T-208, T-211 retired; T-205, T-207, T-209, T-210 rewritten; T-212 added (long scans); whitelist adds `gettxout`, `scanblocks`; Rust/crates removed from supply chain |
 | 2026-09-27 | 0.4.1 | After source-level research on BIP158 and Core's `scanblocks`: silent-skip guard added to T-210; whitelist adds `getdescriptoractivity`, `gettxspendingprevout`; minimum Core version ≥ 29.0 agreed (§10.4) |
 | 2026-09-27 | 0.4.2 | PR #4 review fixes (Opus 5.5, Codex): the `scanblocks` silent-skip guard is replaced by a scan protocol (the `to_height` postcheck was ineffective); Core ≥ 31.0 with `txospenderindex` for spender lookups; fork-point reorg handling covers negative results and coverage (T-207); BIP30 keyed by block (T-208); canary `debug.log` trace (T-209); busy-script budgets (T-205); orphaned scans (T-212); private keys in descriptors (new T-703); node indexes named as trusted (§8) |
+| 2026-09-27 | 0.5 | Supply-chain rows updated for ENGINEERING v0.2 (PR #3): vet-before-install, lockfile policy check, load-time execution paths (T-601–T-603); only-human-merges is procedural (T-605); commit signing dropped (T-606, Accepted); sfw telemetry and toolchain downloads added to build-time flows (§6); R-6 dev work and real data on the same machine accepted |
