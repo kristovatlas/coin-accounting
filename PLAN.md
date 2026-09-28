@@ -335,7 +335,12 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
    - exchange CSV import
    - in-app lock (see threat model open questions)
    - a second price source for cross-checking (needs an ADR, since it adds an outbound flow)
-   - lost/stolen and fork/airdrop events
+   - lost/stolen and airdrop events
+   - **hard-fork coins (next after v1):** e.g. BCH from BTC, BSV from BCH.
+     - **Timing:** the forked coins are ordinary income at FMV, and that value is also their cost basis (Rev. Rul. 2019-24). Income is recognized when the user gets *dominion and control*. For self-custody coins this is usually the fork block's time. For coins held on an exchange, it is when the exchange credits them. The app records both dates and lets the user choose.
+     - **Pricing:** just after a launch, prices often spike on thin volume. So valuation won't use the first print. It uses a volume-weighted average over a window, starting when volume or liquidity first crosses a threshold, optionally across several exchanges. The method and window are recorded with the value, and the user can override them.
+     - **Needs:** a forked-chain node or data source, which is a new flow and needs an ADR and a threat-model update. It also needs price history for the forked asset.
+     - **Privacy:** claiming forked coins by moving them on the other chain reveals the same keys and UTXOs there, and can link the user's BTC coins to whoever sees the forked-chain transaction (e.g. an exchange). The doxx model must account for this.
    - other chains (account-based FIFO/LIFO) once their privacy model is settled
 
 ## Verification
