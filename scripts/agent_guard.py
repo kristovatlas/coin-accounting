@@ -89,8 +89,18 @@ def check_make(command: str) -> list[str]:
     return problems
 
 
+def check_self_approval(command: str) -> list[str]:
+    """`toolchain.py install --approved` is how make passes the human's DEPS_APPROVED=1 on;
+    an agent typing it would approve unmerged pins itself (PR #7 review, round 6)."""
+    for seg in segments(command):
+        _, toks = strip_prefix(tokens(seg))
+        if any(os.path.basename(t) == "toolchain.py" for t in toks) and "--approved" in toks:
+            return ["toolchain.py --approved (only the human approves pins)"]
+    return []
+
+
 def check_command(command: str) -> list[str]:
-    return sorted(set(violations(command) + check_make(command)))
+    return sorted(set(violations(command) + check_make(command) + check_self_approval(command)))
 
 
 def pretooluse(payload: dict) -> int:

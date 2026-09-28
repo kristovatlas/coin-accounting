@@ -105,7 +105,9 @@ class AgentGuardTests(unittest.TestCase):
                     "SYS_PYTHON=true make bootstrap", "MAKEFILES=/tmp/x.mk make help", "PATH=/tmp/evil:$PATH make help",
                     "cd /tmp && make bootstrap",
                     # Round 4: only the human installs unmerged dependency changes.
-                    "make bootstrap DEPS_APPROVED=1", "DEPS_APPROVED=1 make bootstrap"):
+                    "make bootstrap DEPS_APPROVED=1", "DEPS_APPROVED=1 make bootstrap",
+                    # Round 6: the flag make uses to pass the human's approval on.
+                    "python3 scripts/toolchain.py install --approved", "scripts/toolchain.py install --only bitcoind --approved"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.bash(cmd), 2)
 
@@ -148,7 +150,7 @@ class MakefileOverrideTests(unittest.TestCase):
     """The Makefile must ignore substitutes for the pinned tools and the verifier (PR #7 review)."""
 
     def dry_run(self, *args: str) -> str:
-        r = subprocess.run(["make", "-n", *args], cwd=HERE.parent, capture_output=True, text=True)
+        r = subprocess.run(["make", "-n", *args], cwd=HERE.parent, env=clean_make_env(), capture_output=True, text=True)
         return r.stdout + r.stderr
 
     def test_command_line_overrides_are_ignored(self):
@@ -160,14 +162,26 @@ class MakefileOverrideTests(unittest.TestCase):
 
     def test_install_targets_are_wired_to_the_approval_gate_and_the_verifier(self):
         # Round 5: removing either prerequisite must fail a test (ENGINEERING §3.5).
-        gate, verify = "differ from origin/main", "toolchain.py verify sfw pnpm uv node python"
-        for args, needs in ((("bootstrap",), (gate, verify)), (("toolchain",), (gate,)), (("test-tools",), (gate,)),
-                            (("propose-js", "PKG=a@1", "WORKSPACE=frontend"), (verify,)),
-                            (("propose-py", "PKG=a==1"), (verify,))):
+        # Round 6: propose-* check install config and never build sdists; the toolchain installer
+        # checks its own lock (its dry run shows the call without --approved).
+        gate, verify = "dependency or toolchain files differ", "toolchain.py verify sfw pnpm uv node python"
+        config = "install config files"
+        for args, needs in ((("bootstrap",), (gate, verify)),
+                            (("toolchain",), ("scripts/toolchain.py install \n",)),
+                            (("propose-js", "PKG=a@1", "WORKSPACE=frontend"), (config, verify)),
+                            (("propose-py", "PKG=a==1"), (config, verify, "add --no-sync --no-build"))):
             out = self.dry_run(*args)
             for text in needs:
                 with self.subTest(target=args[0], needs=text):
                     self.assertIn(text, out)
+
+
+def clean_make_env(**extra: str) -> dict:
+    """No approval or make flags inherited from an outer `make` (MAKEFLAGS carries command-line
+    variables to child makes as if typed there), and no developer git config."""
+    env = {k: v for k, v in os.environ.items() if k not in ("DEPS_APPROVED", "MAKEFLAGS", "MFLAGS", "MAKELEVEL")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", **extra)
+    return env
 
 
 class BootstrapApprovalTests(unittest.TestCase):
@@ -178,8 +192,7 @@ class BootstrapApprovalTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self._tmp.name)
         # Isolated from the developer's git config (signing, hooks, templates).
-        self.env = {k: v for k, v in os.environ.items() if k != "DEPS_APPROVED"}
-        self.env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        self.env = clean_make_env()
         shutil.copy(HERE.parent / "Makefile", self.repo / "Makefile")
         (self.repo / "package.json").write_text("{}\n")
         self.git("init", "-q")
@@ -196,9 +209,47 @@ class BootstrapApprovalTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def gate(self, *make_args: str, **env: str) -> int:
-        return subprocess.run(["make", "-s", "require-approved-deps", *make_args], cwd=self.repo,
+    def gate(self, *make_args: str, target: str = "require-approved-deps", **env: str) -> int:
+        return subprocess.run(["make", "-s", target, *make_args], cwd=self.repo,
                               env={**self.env, **env}, capture_output=True, text=True).returncode
+
+    def test_ignored_files_still_count(self):
+        # Round 6: a global or repo-local ignore must not hide an unapproved file.
+        (self.repo / ".git" / "info" / "exclude").write_text(".npmrc\nuv.lock\n")
+        for rel in (".npmrc", "uv.lock"):
+            with self.subTest(file=rel):
+                (self.repo / rel).write_text("x\n")
+                self.assertNotEqual(self.gate(), 0)
+                (self.repo / rel).unlink()
+
+    def test_deeper_ignored_trees_are_not_scanned(self):
+        # node_modules/*/package.json must not trip the gate once dependencies are installed.
+        pkg = self.repo / "node_modules" / "left-pad"
+        pkg.mkdir(parents=True)
+        (pkg / "package.json").write_text("{}\n")
+        (self.repo / ".gitignore").write_text("node_modules/\n")
+        self.commit()
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertEqual(self.gate(), 0)
+
+    def test_a_tag_named_origin_main_is_not_the_baseline(self):
+        # Round 6: git resolves refs/tags/origin/main before refs/remotes/origin/main.
+        (self.repo / "package.json").write_text('{"dependencies": {"left-pad": "1.3.0"}}\n')
+        self.commit()
+        self.git("tag", "origin/main")
+        self.assertNotEqual(self.gate(), 0)
+
+    def test_propose_refuses_unapproved_install_config_only(self):
+        # Round 6: resolving follows .pnpmfile/.npmrc/uv.toml too; manifests changed by earlier
+        # proposals on the branch must not block the next one.
+        (self.repo / "package.json").write_text('{"dependencies": {"left-pad": "1.3.0"}}\n')
+        self.assertEqual(self.gate(target="require-approved-config"), 0)
+        for rel in ("uv.toml", ".npmrc", ".pnpmfile.cjs", "pnpm-workspace.yaml"):
+            with self.subTest(file=rel):
+                (self.repo / rel).write_text("x\n")
+                self.assertNotEqual(self.gate(target="require-approved-config"), 0)
+                self.assertEqual(self.gate("DEPS_APPROVED=1", target="require-approved-config"), 0)
+                (self.repo / rel).unlink()
 
     def test_merged_dependencies_pass(self):
         self.assertEqual(self.gate(), 0)

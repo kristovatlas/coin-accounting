@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.8 |
+| Version | 0.2.9 |
 | Last updated | 2026-09-28 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -101,12 +101,18 @@ Configured in `pyproject.toml` `[tool.uv]`.
 The same process applies to a new direct dependency, and to a version bump of an existing one:
 
 1. **Justify it.** Why can't the standard library or ~100 lines of our own code do the job? Could a package we already use do it?
-2. **Resolve only.** Run `make propose-js`/`make propose-py`. This updates the manifest and lockfile without installing or running anything.
+2. **Resolve only.** Run `make propose-js`/`make propose-py`. This updates the manifest and lockfile without installing anything, and without building sdists or loading a `.pnpmfile` (step 7).
 3. **Review the Socket verdict** for every new or changed package in the lockfile diff. Use the Socket GitHub App's report on the draft PR (which contains only the manifest/lockfile change), or the package's socket.dev page. Look for install scripts, network or filesystem access, obfuscated code, telemetry, new maintainers and typosquat signals.
 4. **Check its health:** maintainers, release history, open advisories, download base, licence, transitive dependency count.
 5. **Record it** in [`DEPENDENCIES.md`](DEPENDENCIES.md).
 6. **Human approval.** The human explicitly approves the dependency in the PR. AI agents may propose dependencies, never approve them.
-7. **Only then install.** `make bootstrap`, `make toolchain` and `make test-tools` install only what is on `origin/main`, i.e. what the human merged, and refuse anything else. This covers the manifests, lockfiles and `scripts/toolchain.lock`, and also config that changes installs or runs code during them (`.pnpmfile.*`, `.npmrc`, `uv.toml`, `.python-version`, `.node-version`). To install an approved change before it is merged, **the human** adds `DEPS_APPROVED=1` to the make command line. An inherited environment variable doesn't count, agents never set it, and the agent guard blocks it. The one other place that passes it is CI, explicitly in its workflow file, so dependency PRs can be tested before approval on a throwaway machine (from M0.2; THREAT_MODEL §5.6.1, T-608).
+7. **Only then install.** Approval is the human's merge to `main`, compared against `refs/remotes/origin/main`.
+   - `make bootstrap` installs only dependency files that match it: the manifests and lockfiles, plus config that changes installs or runs code during them (`.pnpmfile.*`, `.npmrc`, `uv.toml`, `pnpm-workspace.yaml`, `.python-version`, `.node-version`). Untracked files count even if a gitignore would hide them.
+   - `scripts/toolchain.py install` (behind `make toolchain`/`make test-tools`) refuses pins in `scripts/toolchain.lock` that aren't on `main`, including when run directly.
+   - Step 2 (`make propose-*`) refuses unapproved install config, because resolving follows it too. It resolves with `--no-build`, and pnpm is set to `ignorePnpmfile`, so no package or hook code runs while resolving **(verify at setup)**.
+   - To use an approved change before it is merged, **the human** adds `DEPS_APPROVED=1` to the make command line. CI does the same, explicitly in its workflow file, so dependency PRs can be tested before approval on a throwaway machine (from M0.2; THREAT_MODEL §5.6.1, T-608). Agents never set it, and the agent guard blocks it.
+   - GNU make treats a variable in an inherited `MAKEFLAGS` as a command-line one, so **never put `DEPS_APPROVED` in `MAKEFLAGS`**, a shell profile or agent settings.
+   - The gate checks the files on the current branch; it does not protect against a malicious branch. Don't run `make` targets on branches you don't trust.
 
 **Transitive dependencies** don't each need steps 1, 4 and 5. They are covered by:
 - the Socket diff on the PR
@@ -365,3 +371,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.6 | PR #7 review round 4: `bootstrap` installs only merged dependency changes unless the human sets `DEPS_APPROVED=1`; toolchain verification covers every installed file and Node |
 | 2026-09-28 | 0.2.7 | PR #7 review round 5: the approval gate covers toolchain pins and install-affecting config and accepts only a command-line approval; Python is verified, bytecode included |
 | 2026-09-28 | 0.2.8 | CI passes `DEPS_APPROVED=1` explicitly so dependency PRs are tested before approval (user decision, #44; THREAT_MODEL §5.6.1) |
+| 2026-09-28 | 0.2.9 | PR #7 review round 6: approval checked against `refs/remotes/origin/main`, ignored files included; the toolchain installer checks its own pins; `propose-*` refuse unapproved install config, resolve with `--no-build` and `ignorePnpmfile`; the `MAKEFLAGS` and untrusted-branch limits stated |

@@ -420,6 +420,31 @@ class ToolchainTests(unittest.TestCase):
             with self.assertRaisesRegex(toolchain.ToolchainError, "python was modified"):
                 toolchain.verify_tool("python", lock, "linux-x86_64")
 
+    def test_install_refuses_pins_that_are_not_on_origin_main(self):
+        # Round 6: running `toolchain.py install` directly must not skip the approval gate.
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "scripts").mkdir()
+            lock = root / "scripts" / "toolchain.lock"
+            lock.write_text("{}\n")
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], env=env, check=True, capture_output=True)
+            with mock.patch.object(toolchain, "ROOT", root), mock.patch.object(toolchain, "LOCK", lock), \
+                    mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}):
+                git("init", "-q")
+                with self.assertRaisesRegex(toolchain.ToolchainError, "unknown"):
+                    toolchain.require_approved_lock(root)
+                git("add", "-A")
+                git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x")
+                git("update-ref", "refs/remotes/origin/main", "HEAD")
+                toolchain.require_approved_lock(root)
+                lock.write_text('{"sfw": {}}\n')
+                with self.assertRaisesRegex(toolchain.ToolchainError, "differs from origin/main"):
+                    toolchain.require_approved_lock(root)
+                with mock.patch.object(toolchain, "install_tool") as install:
+                    self.assertEqual(toolchain.main(["install"]), 1)
+                    install.assert_not_called()
+
     def test_verify_without_an_artifact_for_this_platform_is_a_clean_error(self):
         lock = {"sfw": {"version": "1", "darwin-arm64": {}}}
         with self.assertRaisesRegex(toolchain.ToolchainError, "no artifact pinned"):

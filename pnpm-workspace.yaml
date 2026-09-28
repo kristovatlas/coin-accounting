@@ -16,6 +16,9 @@ strictDepBuilds: true
 blockExoticSubdeps: true
 trustPolicy: no-downgrade
 
+# Never load a .pnpmfile: its hooks run code during resolution and install (T-602).
+ignorePnpmfile: true
+
 # Never install or self-download implicitly.
 verifyDepsBeforeRun: error
 pmOnFail: error

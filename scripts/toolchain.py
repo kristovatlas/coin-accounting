@@ -7,7 +7,7 @@ is a hard error. Nothing here goes through Socket Firewall, because these are
 binaries, not registry packages. That is why every one of them is pinned by hash.
 
 Usage:
-    toolchain.py install [--only NAME ...] [--include bitcoind]
+    toolchain.py install [--only NAME ...] [--include bitcoind]  # pins must match origin/main
     toolchain.py verify NAME...  # check .toolchain/bin/NAME is the pinned, unmodified binary
     toolchain.py path            # print the bin directory to put on PATH
     toolchain.py platform        # print the detected platform key
@@ -23,6 +23,7 @@ import os
 import platform
 import shlex
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -43,6 +44,9 @@ HAS_TAR_FILTERS = hasattr(tarfile, "data_filter")
 # bitcoind is only needed for regtest tests; it is installed on request.
 DEFAULT_TOOLS = ("sfw", "pnpm", "uv", "node", "python")
 MAX_DOWNLOAD = 512 * 1024 * 1024
+# Pins are approved by the human's merge (ENGINEERING §2.4); the full ref avoids a tag or
+# branch that happens to be named origin/main (PR #7 review, round 6).
+APPROVED_REF = "refs/remotes/origin/main"
 
 
 class ToolchainError(Exception):
@@ -275,7 +279,28 @@ def link(bin_path: Path, name: str) -> None:
     link_path.symlink_to(bin_path)
 
 
+def require_approved_lock(root: Path = ROOT) -> None:
+    """Refuse to install pins that differ from origin/main (i.e. aren't merged by the human).
+
+    Checked here, not only in the Makefile, so a direct `toolchain.py install` is gated too
+    (PR #7 review, round 6). `make toolchain DEPS_APPROVED=1` passes --approved.
+    """
+    rel = LOCK.relative_to(ROOT).as_posix()
+
+    def git(*args: str) -> int:
+        return subprocess.run(["git", "-C", str(root), *args], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode
+
+    if git("rev-parse", "-q", "--verify", APPROVED_REF) != 0:
+        raise ToolchainError(f"{APPROVED_REF} is unknown, so the pins' approval can't be checked; run 'git fetch origin'")
+    if git("diff", "--quiet", APPROVED_REF, "--", rel) != 0:
+        raise ToolchainError(f"{rel} differs from origin/main; pins are installed only after the human approves them "
+                             "(ENGINEERING §2.4). Human only: rerun with DEPS_APPROVED=1 on the make command line")
+
+
 def cmd_install(args: argparse.Namespace) -> int:
+    if not args.approved:
+        require_approved_lock()
     key = platform_key()
     lock = load_lock()
     tools = list(args.only or DEFAULT_TOOLS) + list(args.include or [])
@@ -298,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
     p_install.add_argument("--only", nargs="+")
     p_install.add_argument("--include", nargs="+")
     p_install.add_argument("--force", action="store_true")
+    p_install.add_argument("--approved", action="store_true", help=argparse.SUPPRESS)
     p_verify = sub.add_parser("verify")
     p_verify.add_argument("names", nargs="+")
     sub.add_parser("path")
