@@ -301,19 +301,23 @@ The practices live in [`docs/ENGINEERING.md`](docs/ENGINEERING.md), and that fil
 - A change is allowed only through an ADR. A CI check compares the file's hash with the one recorded in the ADR, and fails if they differ.
 
 ### P0.4 Initial ADRs
-Seed ADRs record the decisions already made:
+Seed ADRs in [`docs/adr/`](docs/adr/README.md) record the decisions already made: 0001–0014.
+- ADR usage
 - local web app
-- supported platforms (Linux + macOS)
-- node access: loopback JSON-RPC, rpcauth + rpcwhitelist, unpruned node, minimum Core version
-- chain data via Core's `txindex` + `blockfilterindex`/`scanblocks`, no app-side index
-- bulk, date-independent price download
-- per-account basis, identification timing, the 2025 transition
-- lot flow and fee treatment by role
-- doxx propagation rules and confidence levels
-- 8949 box selection rules per tax year
-- storage: everything the app writes lives on the VeraCrypt volume
-- accepted egress risk
-- pnpm/uv supply-chain policy
+- platforms
+- node access
+- chain data via Core's indexes
+- storage on the volume
+- price download
+- per-account basis and identification timing
+- lot flow and fees
+- doxx rules
+- 8949 boxes
+- the accepted egress risk
+- supply-chain policy
+- the architecture baseline, which records the architecture hash
+
+The same PR adds `AGENTS.md` (and the one-line `CLAUDE.md`), which makes all four Phase 0 documents binding for agents.
 
 ## Milestones
 Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diagram if needed, and it passes the coverage floors and E2E flow on Linux and macOS.
