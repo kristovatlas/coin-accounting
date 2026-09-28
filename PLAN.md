@@ -23,8 +23,8 @@ Decisions made with the user:
 ## Architecture
 ```
 Browser UI (Vite + TypeScript + React + Cytoscape.js; all assets bundled, no CDN)
-        │  HTTP on 127.0.0.1 only (Host check, one-time launch token → cookie, CSRF header)
-FastAPI backend (Python 3.12, uv-managed)
+        │  HTTP on 127.0.0.1 only (Host check, one-time token via a bootstrap file → bearer session, no cookies)
+FastAPI backend (Python 3.13, uv-managed)
    ├── rpc.py ── Bitcoin Core JSON-RPC (dedicated rpcauth user, server-side rpcwhitelist, loopback only)
    │              node provides txindex + blockfilterindex + txospenderindex (Core ≥ 31.0)
    └── user DB (SQLite, sensitive, on VeraCrypt volume; file mode 0600), including the chain-data cache
@@ -99,7 +99,7 @@ The app keeps **no chain index of its own**. Bitcoin Core's built-in indexes ans
 
   The range size, window size and activity budget are set from these results. Any change of approach needs an ADR.
 
-### 2. User data model (`backend/coinacct/db/`, SQLite + Alembic migrations)
+### 2. User data model (`backend/coinacct/storage/`, SQLite + versioned migrations; the migration tool is chosen in M0 under the dependency rules)
 Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency code. The tax ledger is USD.
 - `entity`: id, name, kind (`self | exchange | employer | merchant | person | unknown`), **`knows_identity`** flag (default true for exchanges and employers), notes.
 - `tax_account`: the unit for per-wallet/account basis (Rev. Proc. 2024-28).
@@ -135,14 +135,14 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
   - Gifts additionally store donor basis, donor date, FMV at gift, and gift date (dual basis).
   - Inheritance stores FMV at death.
 - `lot_fragment`: (holder = outpoint *or* tax_account, lot_id, sats). The engine can recompute it as of any date.
-- `identification`: disposal/withdrawal → lot choices, `identified_at` timestamp, method (`specific | standing_order | fifo_default`), and a `late` flag.
+- `identification`: disposal/withdrawal → lot choices, `identified_at` timestamp, method (`specific | standing_order | fifo_default`), and a `late` flag (warning only).
 - `disposal_allocation`: disposal → lot_id, sats, basis, proceeds share (net of disposal costs), holding period, and the 8949 box plus the reason it was chosen.
 - `doxx_tag`: outpoint or scripthash, entity_id, **confidence** (`certain | inferred`), reason (`paid_to | change_of | co_spent_with | address_reuse | cluster_backward | received_from | manual`), source txid, `manual_override`.
 - `price`: UTC date, currency, price, source, method, content hash.
 - `change_log`: append-only record of every edit to events, tags, identifications and overrides.
 - `settings`: fee treatment, time zone, proxy, confirmation threshold, etc.
 
-### 3. Import, discovery, clustering (`discovery.py`, `tagging.py`)
+### 3. Import, discovery, clustering (`services/discovery.py`, `services/tagging.py`)
 - **Import:**
   - paste or CSV a list of addresses
   - **descriptors/xpubs (v1), public material only.** A descriptor or key containing private material (xprv, WIF) is **rejected** at import and never sent to the node or stored; the user is shown how to export the public form. Descriptors are derived with Core's `deriveaddresses` (no node wallet) under a gap limit that extends as used addresses are found
@@ -170,7 +170,7 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
   - reports
 - Wording: the doxx UI says "known links", never "private" or "clean", and keeps a persistent note about heuristics the app doesn't model.
 
-### 5. Doxx propagation (`doxx.py`)
+### 5. Doxx propagation (`doxx/`, a pure engine called by `services/`)
 The doxx set of a coin is the set of **identity-knowing entities** (`knows_identity`) that can link that coin to the user. Rules are deterministic from the tagged graph, manual overrides persist, and the rules are recorded in an ADR.
 1. **Paid to K:** a tx pays an output owned by K (a deposit, a purchase, a payment to an employer or KYC'd person). K sees every **owned input** and every **owned output (change)** of that tx, so all of them are doxxed to K (*certain*).
 2. **Received from K:** a withdrawal, salary or other payment the user recorded as coming from K. The received outpoint and its address are doxxed to K (*certain*). This comes from the confirmed event, not from recognizing K's addresses; clustering is only supporting evidence.
@@ -210,7 +210,7 @@ A pure, deterministic function of events, recomputed on every change. It can com
 - **Disposals** (`sell`, `spend`, `gift_out`) draw only from lots in the **same tax account** (per-account basis).
 - **Identification timing:**
   - Specific ID counts only if recorded **no later than the sale**. For exchanges, it goes to the broker; through 12/31/2026, the taxpayer's own books and records are also accepted (Notice 2025-7, extended by Notice 2026-20).
-  - `identified_at` is stored. A pick made after the sale is flagged `late`, and the account's standing order, or else FIFO, applies instead.
+  - `identified_at` is stored. **Warn only** (user decision, 2026-09-27): a pick made after the sale is flagged `late`. The app shows a warning (the IRS may apply FIFO instead) and notes it in the audit trail and on reports, but it **uses the user's choice** and does not block reports.
   - For 2027+ sales the UI warns that the identification must be communicated to the broker.
   - For on-chain disposals, the spent UTXO is itself the identification. Within that UTXO, fragments are consumed by the account's standing method.
 - **Fees by role:**
@@ -220,7 +220,7 @@ A pure, deterministic function of events, recomputed on every change. It can com
   - network fees on `spend`: they reduce proceeds
   - BTC withdrawal fees charged by an exchange: handled as a small disposal (default)
   - A tx mixing owned and third-party outputs splits the fee by role
-- **Blocking conditions:** unknown basis, unconfirmed txs (below the confirmation threshold), or late identifications block report generation. Each needs an explicit user resolution, which is recorded in the change log.
+- **Blocking conditions:** unknown basis or unconfirmed txs (below the confirmation threshold) block report generation. Late identifications only produce a warning. Each needs an explicit user resolution, which is recorded in the change log.
 - **Dates:** events use UTC timestamps. The tax date is converted to the user's configured time zone. Block timestamps can be off by about ±2h, so the user can override them with exchange-recorded times.
 - **Short/long-term:** held for more than one year counts as long-term.
 - **Out of scope for v1** (documented, and the UI warns if they seem to apply): lost/stolen coins, forks/airdrops, state taxes. §1091 wash-sale rules do not apply to BTC (not a security); a future toggle is noted.
@@ -239,16 +239,17 @@ A pure, deterministic function of events, recomputed on every change. It can com
 - **CSV exports are type-aware:** numeric columns are written as numbers, and only free-text columns are escaped against formula injection.
 
 ## Repo layout
+The module structure and import rules are defined in [`docs/architecture.md`](docs/architecture.md) §2, which is authoritative. Top level:
 ```
-backend/coinacct/{config.py, rpc.py, app.py, chain/{node_checks.py, scans.py, cache.py, reorg.py},
-                  db/{models.py, migrations/}, discovery.py, tagging.py, doxx.py,
-                  prices/{bitstamp.py, fx.py}, tax/{engine.py, rules/, reports.py}, api/*.py}
-backend/tests/{unit/, regtest/}
-frontend/{src/{views/, graph/, api.ts}, vite.config.ts}
+backend/coinacct/{launcher.py, config.py, domain/, api/, services/, doxx/, tax/, chain/, rpc.py, prices/, storage/}
+backend/tests/{unit/<module>/, integration/<module>/}
+e2e/ (@playwright/test specs) + e2e/harness/ (regtest + backend launcher)
+frontend/{src/{views/, graph/, api/client.ts}, vite.config.ts}
 docs/{THREAT_MODEL.md, ENGINEERING.md, architecture.md, DEPENDENCIES.md, adr/}
+scripts/, Makefile
 AGENTS.md (vendor-neutral agent instructions; points to the docs above as binding rules)
 CLAUDE.md (one line: `@AGENTS.md`, so Claude Code loads the same rules; no content of its own)
-pyproject.toml, uv.lock, pnpm-workspace.yaml/.npmrc (cooldown, no scripts), README.md
+pyproject.toml, uv.lock, package.json, pnpm-workspace.yaml, pnpm-lock.yaml, README.md
 ```
 
 ## Phase 0 — Gating documents (no application code until the human approves all four)
@@ -286,10 +287,18 @@ The practices live in [`docs/ENGINEERING.md`](docs/ENGINEERING.md), and that fil
   - only the human merges (procedural)
 - **Commit signing is not required.**
 
-### P0.3 `docs/architecture.md` — architecture diagram (human-reviewed, stays binding)
-- A Mermaid diagram (renders on GitHub and as text in the repo) of components, trust boundaries, data stores (all on the VeraCrypt volume), and every network flow.
-- Also a data-flow diagram for "import → discover → tag → lot → report".
-- A change is allowed only through an ADR. A CI check keeps a hash of the approved diagram, and changing it without a new ADR fails.
+### P0.3 `docs/architecture.md` — architecture (human-reviewed, stays binding)
+- **Contents:**
+  - components and trust boundaries
+  - module structure, import rules and capability rules
+  - the runtime model (one process, job worker, tip poller, watchdog, offline mode, shutdown)
+  - local authentication (bootstrap file → bearer session)
+  - runtime network flows
+  - data at rest
+  - the main data flow
+  - chain-access sequences
+  - build flows
+- A change is allowed only through an ADR. A CI check compares the file's hash with the one recorded in the ADR, and fails if they differ.
 
 ### P0.4 Initial ADRs
 Seed ADRs record the decisions already made:
@@ -335,7 +344,12 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
    - exchange CSV import
    - in-app lock (see threat model open questions)
    - a second price source for cross-checking (needs an ADR, since it adds an outbound flow)
-   - lost/stolen and fork/airdrop events
+   - lost/stolen and airdrop events
+   - **hard-fork coins (next after v1):** e.g. BCH from BTC, BSV from BCH.
+     - **Timing:** the forked coins are ordinary income at FMV, and that value is also their cost basis (Rev. Rul. 2019-24). Income is recognized when the user gets *dominion and control*. For self-custody coins this is usually the fork block's time. For coins held on an exchange, it is when the exchange credits them. The app records both dates and lets the user choose.
+     - **Pricing:** just after a launch, prices often spike on thin volume. So valuation won't use the first print. It uses a volume-weighted average over a window, starting when volume or liquidity first crosses a threshold, optionally across several exchanges. The method and window are recorded with the value, and the user can override them.
+     - **Needs:** a forked-chain node or data source, which is a new flow and needs an ADR and a threat-model update. It also needs price history for the forked asset.
+     - **Privacy:** claiming forked coins by moving them on the other chain reveals the same keys and UTXOs there, and can link the user's BTC coins to whoever sees the forked-chain transaction (e.g. an exchange). The doxx model must account for this.
    - other chains (account-based FIFO/LIFO) once their privacy model is settled
 
 ## Verification
@@ -349,7 +363,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
     - pro-rata moves
     - withdrawals moving lots
     - all three gift outcomes
-    - late identification
+    - late identification (flagged and warned, choice kept)
     - the 2025 opening allocation
     - fee roles
     - the 1-year boundary

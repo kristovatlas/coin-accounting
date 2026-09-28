@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2 (proposed, awaiting approval) |
+| Version | 0.2.1 |
 | Last updated | 2026-09-27 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -165,7 +165,7 @@ The cooldown only applies when versions are *resolved*. A hand-edited or bot-gen
 
 | Layer | What it proves | Tooling |
 |---|---|---|
-| **E2E** (primary) | A user flow works: real regtest `bitcoind` + backend + production frontend build, served with the real CSP | `pytest` harness driving `bitcoind -regtest` + **`@playwright/test`** |
+| **E2E** (primary) | A user flow works: real regtest `bitcoind` + backend + production frontend build, served with the real CSP | **`@playwright/test`** specs in `e2e/`, with a Python harness in `e2e/harness/` that starts regtest `bitcoind` and the backend, and reads the bootstrap file (architecture §4) |
 | Integration | A component works against real neighbours (RPC client and scan jobs ↔ regtest node, cache ↔ DB, API ↔ DB) | `pytest` + regtest |
 | Unit | Pure logic is correct at the edges (scan-result processing, doxx rules, tax engine, box selection) | `pytest`, Hypothesis for property tests and fuzzing |
 | Frontend unit | Components with non-trivial logic | `vitest` |
@@ -173,7 +173,7 @@ The cooldown only applies when versions are *resolved*. A hand-edited or bot-gen
 - **Every user-visible feature ships with at least one E2E test** covering its main path. This is part of the Definition of Done (§8).
 - **E2E runs against the production build under the real CSP.** Any `securitypolicyviolation` event or CSP console error fails the test. This is how inline styles injected by Cytoscape or libraries get caught.
 - **Regtest `bitcoind`** runs at both the minimum supported and the latest Core version.
-- **Mocks only at process boundaries we can't run.** The Bitcoin node is *not* mocked; tests use regtest. Mocking our own modules is not allowed in `tax/` and `doxx.py` tests.
+- **Mocks only at process boundaries we can't run.** The Bitcoin node is *not* mocked; tests use regtest. Mocking our own modules is not allowed in `tax/` and `doxx/` tests.
 - Tax scenarios use **hand-worked expected values derived from IRS rules**. Each test cites the rule, e.g. `# Treas. Reg. §1.1012-1(j)`, `# 2025 i8949 box I`.
 - **Fixtures use public chain data or synthetic data only.** Never use the developer's own transactions or addresses as fixtures, because choosing them reveals ownership.
 - **pytest plugins** are loaded explicitly: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` plus `-p` for each allowed plugin, so no dev dependency can inject one.
@@ -191,7 +191,7 @@ Price-fetch tests use a local stub server. The guard catches accidental phoning 
 | Scope | Floor | Measured from |
 |---|---|---|
 | Backend overall | **≥ 85 %** line + branch | Unit + integration + E2E combined |
-| `tax/`, `doxx.py`, `chain/` | **≥ 95 %** line + branch | **Unit + integration only**, so incidental execution during E2E doesn't count |
+| `tax/`, `doxx/`, `chain/` | **≥ 95 %** line + branch | **Unit + integration only**, so incidental execution during E2E doesn't count |
 | Frontend | **≥ 70 %** lines | `vitest` unit coverage; E2E flows are required separately (§3.1) |
 
 - **E2E backend coverage:**
@@ -203,7 +203,7 @@ Price-fetch tests use a local stub server. The guard catches accidental phoning 
 
 ### 3.4 Mutation testing
 
-`mutmut` runs on `tax/` and `doxx.py`, using unit and integration tests only:
+`mutmut` runs on `tax/` and `doxx/`, using unit and integration tests only:
 - **on every PR that changes those files**, limited to the changed files
 - weekly in full, and before each milestone is closed
 
@@ -215,12 +215,12 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 
 1. **Assert nothing meaningful:** `assert result`, `assert x is not None`, or `assert True` alone; asserting only that a function was called.
 2. **Mirror the implementation:** expected values computed by the same logic under test.
-3. **Mock the thing under test,** or mock our own modules in `tax/`/`doxx.py` tests. *Automated:* ruff `TID251` bans `unittest.mock` in those test directories.
+3. **Mock the thing under test,** or mock our own modules in `tax/`/`doxx/` tests. *Automated:* ruff `TID251` bans `unittest.mock` in `backend/tests/{unit,integration}/{tax,doxx,domain}/` (tests are organised per module, architecture §2).
 4. **Snapshot everything:** whole-report snapshots are allowed only as hand-reviewed golden files, with a README explaining how each value was derived.
 5. **Were changed to match new output** without an explanation in the PR of why the old expectation was wrong.
 6. **Depend on timing or order:** `sleep`-based waits, wall-clock dates, test order, or network access (the socket guard, §3.2, fails these). *Automated:* `time.sleep` is banned in tests.
 7. **Duplicate another test** without adding a distinct case.
-8. **Have unclear names.** Names must state the behaviour and, where relevant, the threat or rule ID in the form `t508`, e.g. `test_late_identification_falls_back_to_fifo_t508`.
+8. **Have unclear names.** Names must state the behaviour and, where relevant, the threat or rule ID in the form `t508`, e.g. `test_late_identification_is_flagged_not_overridden_t508`.
 
 **Test audits:** at each milestone close, and at least monthly while coding is active, a test-audit pass reviews the suite against these rules plus the mutation report. It deletes or strengthens weak tests, and its findings go into the milestone PR. An AI reviewer may do a first pass; a human approves the result.
 
@@ -269,9 +269,9 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 
 | Rule | Why | Enforcement |
 |---|---|---|
-| Network-capable modules (`socket`, `ssl`, `http.client`, `urllib.request`, `httpx`, `asyncio` streams, `webbrowser`) only in: `rpc.py`, `prices/`, the server launcher (uvicorn bind, opening the browser) and `tests/` (socket guard, test client) | T-305 | ruff `banned-api` with a per-path allowlist |
+| Import edges and capabilities (network, `webbrowser`, `subprocess`, filesystem, clock, `importlib`/`__import__`) follow the per-path rules in [architecture §2](architecture.md#2-module-structure-dependency-rules-and-capability-rules) | T-305, T-402, purity of `tax/`/`doxx/`/`domain/` | `scripts/check-architecture` (custom AST check, no dependency) + ruff `banned-api` per path. Hygiene, not a security boundary |
 | No floats in `tax/`: no float literals, no `/` on integer sats, no `float()`; money arrives as strings or `Decimal`; the `decimal` context in `tax/` traps `FloatOperation`; property tests check that no intermediate value is a float | T-502 | custom AST check + runtime trap + tests |
-| No `eval`/`exec`, `pickle`, `shell=True`. `subprocess` only in an allowlisted module (macOS volume detection via `diskutil`/`mount`, and the regtest harness in tests) | Code execution | ruff (`S` rules) + banned-api |
+| No `eval`/`exec`, `pickle`, `shell=True` | Code execution | ruff (`S` rules) + banned-api |
 | No `dangerouslySetInnerHTML`; no runtime CSS-in-JS (it injects `<style>` tags that the CSP blocks); no `setAttribute('style', …)` | T-104 | ESLint rules + E2E CSP-violation check (§3.1) |
 | No navigation or `window.open` to external origins; no network sinks (`fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`) outside the API client module | T-106 | ESLint rules + a bundle scan for network sinks. Plain URL strings such as React's error-doc links are allowlisted, since they are inert |
 | Timestamps are timezone-aware UTC; conversion to local time only for display and for tax dates | Tax dates (PLAN §7) | lint + review |
@@ -319,7 +319,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
 A change is done only when:
 
 - [ ] Behaviour is covered by an **E2E test** (for user-visible features) and by unit/integration tests where logic warrants them
-- [ ] Coverage floors hold; the PR mutation run holds for changed `tax/`/`doxx.py` files; CI is green on Linux and macOS
+- [ ] Coverage floors hold; the PR mutation run holds for changed `tax/`/`doxx/` files; CI is green on Linux and macOS
 - [ ] Tests comply with §3.5, with no slop
 - [ ] `THREAT_MODEL.md` statuses and evidence links are updated (or explicitly "no change")
 - [ ] ADR written or updated if §4.1 applies; the architecture diagram still matches
@@ -341,6 +341,7 @@ A change is done only when:
 | Coverage floors and ratchet | CI (`coverage.py`, `vitest`, merge-base comparison) |
 | Mutation budget | Per-PR targeted run + weekly full run |
 | Banned APIs, float ban, CSP/XSS rules | ruff / AST check / `FloatOperation` trap / ESLint / bundle scan / E2E CSP check |
+| Module import edges and capability rules | `scripts/check-architecture` (architecture §2) |
 | ADR immutability, diagram hash | CI checks |
 | Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review |
 | Test-slop rules | Partly automated (§3.5) + review checklist + periodic test audit |
@@ -353,3 +354,4 @@ A change is done only when:
 |---|---|---|
 | 2026-09-27 | 0.1 | Initial proposal (P0.2), including the rule that all installs go through `sfw` via the repo's `make` targets (§2.3) |
 | 2026-09-27 | 0.2 | Incorporates the Opus 5.5 and Codex (gpt-5.6-sol) reviews and the user's decisions: two-phase dependency adds (resolve → vet → approve → install); pnpm 12 settings (`allowBuilds`, `pmOnFail`, `verifyDepsBeforeRun`, `blockExoticSubdeps`, `trustPolicy`); uv `package = false`, `python-downloads = "never"`, `UV_NO_SYNC`, no sdist exceptions, relative `exclude-newer`; lockfile policy check; sfw trust-on-first-use + telemetry; verification table for non-package downloads; audits, reproducible build, Actions hardening restored or added; socket guard defined; coverage mechanics and ratchet; per-PR mutation runs; corrected CSP rationale; float ban hardened; ADR immutability check. **Signed commits dropped** and **only-the-human-merges kept procedural** by user decision |
+| 2026-09-27 | 0.2.1 | Aligned with architecture v0.2: `doxx/` is a pure package; E2E lives in `e2e/` with a Python harness; import and capability rules are defined in architecture §2 and checked by `scripts/check-architecture`; the subprocess allowlist moves there |
