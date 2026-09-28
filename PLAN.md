@@ -23,7 +23,7 @@ Decisions made with the user:
 ## Architecture
 ```
 Browser UI (Vite + TypeScript + React + Cytoscape.js; all assets bundled, no CDN)
-        │  HTTP on 127.0.0.1 only (Host check, one-time launch token → cookie, CSRF header)
+        │  HTTP on 127.0.0.1 only (Host check, one-time token via a bootstrap file → bearer session, no cookies)
 FastAPI backend (Python 3.13, uv-managed)
    ├── rpc.py ── Bitcoin Core JSON-RPC (dedicated rpcauth user, server-side rpcwhitelist, loopback only)
    │              node provides txindex + blockfilterindex + txospenderindex (Core ≥ 31.0)
@@ -170,7 +170,7 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
   - reports
 - Wording: the doxx UI says "known links", never "private" or "clean", and keeps a persistent note about heuristics the app doesn't model.
 
-### 5. Doxx propagation (`services/doxx.py`)
+### 5. Doxx propagation (`doxx/`, a pure engine called by `services/`)
 The doxx set of a coin is the set of **identity-knowing entities** (`knows_identity`) that can link that coin to the user. Rules are deterministic from the tagged graph, manual overrides persist, and the rules are recorded in an ADR.
 1. **Paid to K:** a tx pays an output owned by K (a deposit, a purchase, a payment to an employer or KYC'd person). K sees every **owned input** and every **owned output (change)** of that tx, so all of them are doxxed to K (*certain*).
 2. **Received from K:** a withdrawal, salary or other payment the user recorded as coming from K. The received outpoint and its address are doxxed to K (*certain*). This comes from the confirmed event, not from recognizing K's addresses; clustering is only supporting evidence.
@@ -241,8 +241,9 @@ A pure, deterministic function of events, recomputed on every change. It can com
 ## Repo layout
 The module structure and import rules are defined in [`docs/architecture.md`](docs/architecture.md) §2, which is authoritative. Top level:
 ```
-backend/coinacct/{launcher.py, config.py, api/, services/, tax/, chain/, rpc.py, prices/, storage/}
-backend/tests/{unit/, integration/, e2e/}
+backend/coinacct/{launcher.py, config.py, domain/, api/, services/, doxx/, tax/, chain/, rpc.py, prices/, storage/}
+backend/tests/{unit/<module>/, integration/<module>/}
+e2e/ (@playwright/test specs) + e2e/harness/ (regtest + backend launcher)
 frontend/{src/{views/, graph/, api/client.ts}, vite.config.ts}
 docs/{THREAT_MODEL.md, ENGINEERING.md, architecture.md, DEPENDENCIES.md, adr/}
 scripts/, Makefile
@@ -286,10 +287,18 @@ The practices live in [`docs/ENGINEERING.md`](docs/ENGINEERING.md), and that fil
   - only the human merges (procedural)
 - **Commit signing is not required.**
 
-### P0.3 `docs/architecture.md` — architecture diagram (human-reviewed, stays binding)
-- A Mermaid diagram (renders on GitHub and as text in the repo) of components, trust boundaries, data stores (all on the VeraCrypt volume), and every network flow.
-- Also a data-flow diagram for "import → discover → tag → lot → report".
-- A change is allowed only through an ADR. A CI check keeps a hash of the approved diagram, and changing it without a new ADR fails.
+### P0.3 `docs/architecture.md` — architecture (human-reviewed, stays binding)
+- **Contents:**
+  - components and trust boundaries
+  - module structure, import rules and capability rules
+  - the runtime model (one process, job worker, tip poller, watchdog, offline mode, shutdown)
+  - local authentication (bootstrap file → bearer session)
+  - runtime network flows
+  - data at rest
+  - the main data flow
+  - chain-access sequences
+  - build flows
+- A change is allowed only through an ADR. A CI check compares the file's hash with the one recorded in the ADR, and fails if they differ.
 
 ### P0.4 Initial ADRs
 Seed ADRs record the decisions already made:

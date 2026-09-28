@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.5.1 (design stage — no code yet) |
+| Version | 0.6 (design stage — no code yet) |
 | Last updated | 2026-09-27 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -27,9 +27,9 @@ A threat may only move to **Verified** when a test exists that fails if the miti
 ## 1. System overview
 
 The app is a single-user tool running on the user's own machine (Linux or macOS). Its parts:
-- **Backend:** a FastAPI process bound to `127.0.0.1`.
-- **UI:** a React + Cytoscape.js single-page app served by the backend and opened in the user's browser.
-- **Chain data:** comes only from the user's Bitcoin Core node over **loopback** JSON-RPC, as a dedicated, server-side-whitelisted RPC user. The app keeps **no chain index of its own**: Core's `txindex` and `blockfilterindex` (via `scanblocks`) answer chain queries, and the answers are cached in the user DB.
+- **Launcher + backend:** one process. The launcher applies the process hardening and starts a FastAPI server bound to `127.0.0.1` (architecture §3).
+- **UI:** a React + Cytoscape.js single-page app served by the backend and opened in the user's default browser through a one-time bootstrap file (architecture §4).
+- **Chain data:** comes only from the user's Bitcoin Core node over **loopback** JSON-RPC, as a dedicated, server-side-whitelisted RPC user. The app keeps **no chain index of its own**: Core's `txindex`, `blockfilterindex` (via `scanblocks`/`getdescriptoractivity`) and `txospenderindex` (via `gettxspendingprevout`) answer chain queries, and the answers are cached in the user DB.
 - **Sensitive user data:** stored in a SQLite database kept on a VeraCrypt volume.
 - **Outbound internet:** the only allowed flow is a bulk, date-independent download of historical fiat prices, optionally via Tor/SOCKS5.
 
@@ -38,39 +38,44 @@ The app is a single-user tool running on the user's own machine (Linux or macOS)
 ```mermaid
 flowchart LR
   subgraph TB0["TB0 · User's machine (OS user account)"]
-    direction LR
+    BOOT[("Bootstrap file 0600<br/>one-time token")]
     subgraph TB1["TB1 · User's default browser"]
       UI["SPA (bundled assets)"]
-      OtherTabs["Other websites / tabs<br/>(untrusted)"]
+      OtherTabs["Other websites / tabs /<br/>other localhost apps (untrusted)"]
+      EXT["Browser extensions<br/>(untrusted, R-7)"]
     end
-    FILES[/"TB6 · Imported files<br/>(address lists, descriptors)"/]
-    subgraph APP["Backend process"]
-      API["FastAPI :127.0.0.1"]
-      SCAN["Scan jobs / chain cache"]
-      TAX["Lot / tax / doxx engines"]
-      PRC["Price fetcher"]
+    FILES[/"TB6 · Uploads<br/>(address lists, descriptors, price CSV)"/]
+    subgraph APP["Launcher + backend process"]
+      API["api/ :127.0.0.1"]
+      SVC["services/ + pure engines<br/>(tax/, doxx/)"]
+      CHAIN["chain/ → rpc.py"]
+      PRC["prices/"]
+      STORE["storage/"]
     end
     subgraph TB4V["TB4 · VeraCrypt volume (encrypted at rest)"]
-      UDB[("User DB (SQLite)<br/>tags, lots, events, prices")]
-      LOGS[("Logs, exports, app config<br/>(incl. RPC credentials)")]
+      UDB[("User DB (SQLite)<br/>tags, lots, events, prices, chain cache")]
+      LOGS[("Logs, exports, config.toml<br/>(incl. RPC credentials)")]
     end
     NODE["Bitcoin Core<br/>(unpruned; txindex + blockfilterindex<br/>+ txospenderindex; rpcwhitelist)"]
   end
   NET(("Internet<br/>price source"))
   SUPPLY(("TB5 · npm / PyPI / GitHub<br/>AI coding agents<br/>(build/dev time)"))
 
-  UI -- "TB1: HTTP loopback + session cookie + CSRF header" --> API
-  OtherTabs -. "blocked: Host check, CSRF, no CORS" .-> API
-  FILES -- "TB6: import parser" --> API
-  API --> TAX
-  TAX --> UDB
-  API --> LOGS
-  SCAN -- "TB2: JSON-RPC scanblocks / getdescriptoractivity /<br/>gettxspendingprevout / getrawtransaction (rpcauth, loopback)" --> NODE
-  API -- "TB2: JSON-RPC (whitelisted methods)" --> NODE
-  API --> SCAN
-  SCAN --> UDB
-  PRC -- "TB3: HTTPS, optional SOCKS5/Tor<br/>bulk, date-independent request" --> NET
-  PRC --> UDB
+  BOOT -. "file:// open, token claimed once" .-> UI
+  UI -- "TB1: HTTP loopback, Authorization: Bearer" --> API
+  OtherTabs -. "blocked: Host check, no ambient credential, no CORS" .-> API
+  EXT -. "can read the SPA's DOM (accepted, R-7)" .-> UI
+  FILES -- "TB6: upload + validation" --> API
+  API --> SVC
+  SVC --> CHAIN
+  SVC --> PRC
+  SVC --> STORE
+  CHAIN -- "TB2: JSON-RPC, whitelisted methods (rpcauth, loopback)" --> NODE
+  CHAIN --> STORE
+  PRC -- "TB3: HTTPS, optional local SOCKS5/Tor<br/>bulk, date-independent request" --> NET
+  PRC --> STORE
+  STORE --> UDB
+  STORE --> LOGS
   SUPPLY -. "TB5: dependencies, CI, agents" .-> APP
 ```
 
@@ -140,16 +145,17 @@ Columns: **ID** · **STRIDE/P** (S spoofing, T tampering, R repudiation, I info 
 
 | ID | STRIDE/P | Threat | Mitigation | Status | Evidence |
 |---|---|---|---|---|---|
-| T-101 | I, T | **DNS rebinding**: an AD1 page rebinds its hostname to 127.0.0.1 and reads or modifies the API as a same-origin request | Strict `Host` header allowlist: exactly `127.0.0.1:<port>` (one canonical hostname, never `localhost`, to avoid cookie mismatches). Every other Host is rejected before routing | Planned | |
-| T-102 | T | **CSRF**: an AD1 page sends state-changing requests to the API | Every non-GET request needs an `X-CSRF-Token` header matching a token that only our SPA can read (served in the bootstrap response). **This header check is the primary control.** Cookies are scoped to a host, not a port, so `SameSite` does not isolate us from other apps on 127.0.0.1. Only JSON bodies are accepted; **no CORS headers ever** | Planned | |
-| T-103 | I, S | **Other local users (AD2)**, or other local web apps on 127.0.0.1, reach the API | Bind `127.0.0.1` only (never `0.0.0.0`); random port. Auth: a **one-time launch token** is exchanged once for an `HttpOnly; SameSite=Strict` session cookie, with a unique cookie name per launch; the token is invalidated immediately | Planned | |
+| T-101 | I, T | **DNS rebinding**: an AD1 page rebinds its hostname to 127.0.0.1 and reads or modifies the API as a same-origin request | Strict `Host` header allowlist: exactly `127.0.0.1:<port>` (one canonical hostname, never `localhost`, so the SPA origin, and with it the `sessionStorage` session, is always the same). Every other Host is rejected before routing | Planned | |
+| T-102 | T | **CSRF**: an AD1 page, or another app on `127.0.0.1`, sends state-changing requests to the API | **No ambient credentials:** no cookies. Every request needs `Authorization: Bearer <session>`, and the session token is held in `sessionStorage`, which is scoped to the full origin including the port, so other pages can't read it or attach it. Only JSON bodies are accepted; **no CORS headers ever** (architecture §4) | Planned | |
+| T-103 | I, S | **Other local users (AD2)**, or other web apps on `127.0.0.1`, reach the API or steal the session | Bind `127.0.0.1` only (never `0.0.0.0`); random port. **Bootstrap:** the launcher writes a one-time token (60 s TTL, single use) into a mode-0600 file (Linux: `$XDG_RUNTIME_DIR`; macOS: the data directory), and opens that *file* in the browser. So the token never appears in any process's argv (`/proc/<pid>/cmdline`, `ps` are readable by other users). The SPA exchanges it once for a session token that lives until the backend exits. Cookies are not used, because they are shared by every port on the host | Planned | |
 | T-104 | T, E | **XSS via attacker-controlled chain data (AD7)**, e.g. OP_RETURN text or crafted labels rendered in the graph or tables | React escaping only (lint bans `dangerouslySetInnerHTML` and inline styles); Cytoscape labels as text. Strict CSP: `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'` | Planned | |
 | T-105 | I | **Browser leaks sensitive data to plain disk (AD3)**: history, HTTP cache, autofill, session restore, crash reports, thumbnails | App-side, browser-independent controls: no sensitive values in URLs, including the launch token (T-110); opaque IDs; queries in POST bodies; `Cache-Control: no-store` on all API responses; autocomplete off on sensitive fields. v1 opens the user's **default browser** and does **not** manage a dedicated profile. Whatever the browser still writes is accepted as **R-5** (user decision, 2026-09-27) | Planned (app-side) / Accepted (browser-side) | |
 | T-106 | I, P | **UI pulls third-party resources** (fonts, CDN, analytics), leaking usage (A11) or data | All assets bundled at build time; CSP `connect-src 'self'`; a CI test fails if the built bundle references external URLs | Planned | |
 | T-107 | T | **Clickjacking**: an AD1 page frames the UI | `frame-ancestors 'none'` + `X-Frame-Options: DENY` | Planned | |
-| T-108 | I | **Browser downloads of exports go to `~/Downloads`** (plain disk) | Exports are written server-side to an export directory on the volume by default; downloading through the browser needs an explicit confirmation that warns about the destination | Planned | |
+| T-108 | I | **Browser downloads of exports go to `~/Downloads`** (plain disk) | Exports are written server-side only to `<data>/exports/` on the volume. A browser download is the only other destination: it needs an explicit confirmation that warns about the destination, and uses a POST with the bearer header that returns a blob (never a GET link that another localhost app could trigger). The browser, not the app, writes the downloaded file (R-5) | Planned | |
 | T-109 | I | **Clipboard and screen exposure**: copied addresses or txids reach clipboard managers or sync (plain disk, cloud); screenshots or screen sharing | Copy actions show a notice; clipboard sync and screen recording are covered in the user docs | Documented † | |
-| T-110 | I | **Launch credential leaks** via browser history, session restore or referrer | The token travels in the URL **fragment** (never sent to servers or in the Referer), is single-use, and is removed with `history.replaceState` before rendering; `Referrer-Policy: no-referrer` | Planned | |
+| T-110 | I | **Launch credential leaks** via process arguments, browser history, session restore or referrer | The token comes from the bootstrap file, not argv. It travels in the URL **fragment** (never sent to servers or in the Referer), is single-use with a 60 s TTL, and is removed with `history.replaceState` before rendering. `Referrer-Policy: no-referrer`. A second claim is refused, logged, and shows "Session already claimed. Restart the app." The bootstrap file is deleted on claim or expiry | Planned | |
+| T-111 | I | **Browser extensions** in the user's default profile, with access to all sites, can read the SPA's pages (ownership map, doxx map, tax data) and send them anywhere | Not preventable by the app. The docs recommend a **private window or a clean profile with extensions disabled**; Chromium incognito and Firefox private windows disable most extensions by default. Accepted as **R-7** | Accepted † | |
 
 ### 5.2 TB2 — Backend ↔ Bitcoin Core
 
@@ -182,11 +188,11 @@ Columns: **ID** · **STRIDE/P** (S spoofing, T tampering, R repudiation, I info 
 
 | ID | STRIDE/P | Threat | Mitigation | Status | Evidence |
 |---|---|---|---|---|---|
-| T-401 | I | **User DB created on plain disk by mistake (AD9 → AD3)** | At startup, resolve the real path of the DB (following symlinks) and identify the block device it lives on. **Linux:** `stat().st_dev` → `/sys/dev/block/<maj>:<min>/dm/{name,uuid}`; accept `veracrypt*` names and `CRYPT-TCRYPT*` / `CRYPT-LUKS*` uuids. **macOS:** detection method to be designed in M0 (VeraCrypt mounts through macFUSE/FUSE-T); if it can't be done reliably, the user confirms the path explicitly and the confirmation is stored per path. Otherwise refuse to start unless `--allow-unencrypted-storage` is set, with a persistent warning. Warn on FAT/exFAT (no permission bits). DB and side files use mode 0600 with a restrictive umask | Planned | |
+| T-401 | I | **User DB created on plain disk by mistake (AD9 → AD3)** | At startup, resolve the real path of the DB (following symlinks) and identify the block device it lives on. **Linux:** `stat().st_dev` → `/sys/dev/block/<maj>:<min>/dm/{name,uuid}`; accept `veracrypt*` names and `CRYPT-TCRYPT*` / `CRYPT-LUKS*` uuids. **macOS:** detection method to be designed in M0 (VeraCrypt mounts through macFUSE/FUSE-T); if it can't be done reliably, the user confirms the path explicitly and the confirmation is stored per path. Otherwise refuse to start. `--allow-unencrypted-storage` is accepted **only for regtest, signet and testnet** (development and CI), never on mainnet. The data directory is passed with `--data-dir` or `COINACCT_DATA_DIR` each time and is never saved on plain disk. Warn on FAT/exFAT (no permission bits). DB and side files use mode 0600 with a restrictive umask | Planned | |
 | T-402 | I | **SQLite side files and temp data spill** (WAL, journal, temp B-trees, sort files, HTTP download buffers) | Side files live next to the DB on the volume; `PRAGMA temp_store=MEMORY`; `TMPDIR`/`SQLITE_TMPDIR` for the process point to a directory on the volume | Planned | |
-| T-403 | I | **Logs contain addresses/txids/amounts** (A6) | Logs are written only to the volume; a redaction filter masks addresses, txids, outpoints, descriptors, amounts and fiat values by default; a debug mode that disables redaction is explicit and writes only to the volume; tests assert that redaction works | Planned | |
+| T-403 | I | **Logs contain addresses/txids/amounts** (A6) | Logs are written only to the volume; a redaction filter masks addresses, txids, outpoints, descriptors, amounts and fiat values by default; a debug mode that disables redaction is explicit and writes only to the volume; uvicorn, framework and library loggers, `sys.excepthook` and `threading.excepthook` all go through the redacting handler, and the access log is off; tests assert that redaction works | Planned | |
 | T-404 | I | **Swap, hibernation or core dumps** write memory with A1–A4 to plain disk | `RLIMIT_CORE=0`, plus `prctl(PR_SET_DUMPABLE, 0)` on Linux. Docs require encrypted swap and hibernation, or none (macOS encrypts swap by default) | Planned † | |
-| T-405 | I | **Data remains accessible after the volume is dismounted** | The watchdog detects that the volume or DB path has disappeared and makes the backend exit immediately; the UI shows that it is disconnected. **Partial:** the OS page cache and freed memory may still hold data until overwritten. VeraCrypt refuses a normal dismount while files are open, so the documented v1 workflow is: quit the app, close its browser window, then dismount. An in-app lock is deferred (§10) | Planned | |
+| T-405 | I | **Data remains accessible after the volume is dismounted** | The watchdog detects that the volume or DB path has disappeared and makes the backend exit immediately; the UI shows that it is disconnected. **Partial:** the OS page cache and freed memory may still hold data until overwritten. VeraCrypt refuses a normal dismount while files are open, so the documented v1 workflow is: quit the app (its browser tab shows it is disconnected), then dismount. An in-app lock is deferred (§10) | Planned | |
 | T-406 | I | **User data accidentally committed to git or synced**, e.g. a data dir inside the repo checkout, or a volume container placed in cloud sync | The default data dir is outside the repo; `.gitignore` and agent-ignore files cover `*.sqlite*`, `data/`, `exports/`; docs cover backups and cloud sync of the container | Planned † | |
 | T-407 | I | **Plaintext exports on plain disk** (see T-108) | The export dir defaults to the volume; the warning covers every alternative path | Planned | |
 | T-408 | T, R | **Silent tampering or accidental edits of records** | Append-only change log for events, tags, identifications and overrides (what, when, old → new); `PRAGMA integrity_check` on startup; a documented backup procedure (copy while the volume is mounted) | Planned | |
@@ -237,7 +243,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 
 | Flow | From | To | Content | Notes |
 |---|---|---|---|---|
-| F1 | Browser | Backend `127.0.0.1:<port>` | UI/API | Session cookie + CSRF header |
+| F1 | Browser | Backend `127.0.0.1:<port>` | UI/API | Bearer session from the bootstrap file; no cookies |
 | F2 | Backend | Bitcoin Core JSON-RPC on **loopback only** | Whitelisted read-only chain queries | T-202, T-203 |
 | F3 | Backend (`prices/` only) | Configured price/FX hosts, optionally via SOCKS5 | Bulk historical price/FX download | Manual trigger, date-independent (T-301) |
 
@@ -290,6 +296,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 | R-4 | **In-process egress:** malicious code running inside the backend (e.g. a compromised dependency) could send user data to the internet. Nothing at the OS level blocks it | Decided 2026-09-27: OS-level sandboxing (bwrap/nftables on Linux, sandbox-exec/pf on macOS) adds cross-platform complexity and compatibility risk. Supply-chain controls (T-601–T-604) are the primary defence; the test-time socket guard catches accidental egress only. To be revisited if the dependency count grows or a sandbox becomes portable |
 | R-5 | **Browser-side disk leakage:** the user's own browser may keep app content on plain disk despite `no-store` (session restore, crash reports, OS-level caches, history of the loopback URL) | User decision, 2026-09-27: v1 doesn't manage a browser profile. Launching specific browsers with a profile on the volume, or packaging a desktop shell (Electron, Tauri, pywebview), added complexity and supply-chain surface. The docs mention private windows as an optional precaution. To be revisited in a future version, via an ADR |
 | R-6 | **Dev work and real data on the same machine:** an AI agent or a compromised dev tool can leave code in the working tree (venv, `node_modules`, built bundle, git hooks, Makefile). That code runs later when the user starts the app against real data | User decision, 2026-09-27: no technical dev/live separation. The user docs warn against doing development work, or running AI coding agents, on a machine where real financial data is used. Related: T-607 |
+| R-7 | **Browser extensions can read the app's pages** (T-111) | This follows from the decision to use the user's default browser (R-5): a managed profile or desktop shell would have had no extensions. It is mitigated by docs advice (private window or clean profile). To be revisited together with R-5 |
 
 ## 10. Open questions
 
@@ -312,3 +319,4 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 | 2026-09-27 | 0.4.2 | PR #4 review fixes (Opus 5.5, Codex): the `scanblocks` silent-skip guard is replaced by a scan protocol (the `to_height` postcheck was ineffective); Core ≥ 31.0 with `txospenderindex` for spender lookups; fork-point reorg handling covers negative results and coverage (T-207); BIP30 keyed by block (T-208); canary `debug.log` trace (T-209); busy-script budgets (T-205); orphaned scans (T-212); private keys in descriptors (new T-703); node indexes named as trusted (§8) |
 | 2026-09-27 | 0.5 | Supply-chain rows updated for ENGINEERING v0.2 (PR #3): vet-before-install, lockfile policy check, load-time execution paths (T-601–T-603); only-human-merges is procedural (T-605); commit signing dropped (T-606, Accepted); sfw telemetry and toolchain downloads added to build-time flows (§6); R-6 dev work and real data on the same machine accepted |
 | 2026-09-27 | 0.5.1 | No managed browser profile in v1: T-105 is split into app-side controls (Planned) and browser-side leakage (Accepted, R-5 widened) |
+| 2026-09-27 | 0.6 | Architecture review fixes (PR #5): DFD matches architecture §1 (launcher, services → chain → rpc, pure engines, no API→node edge); bootstrap-file launch and cookie-less bearer session (T-102, T-103, T-110); download via POST blob (T-108); browser extensions (new T-111, R-7); unencrypted storage only off mainnet, data dir never saved (T-401); redaction covers uvicorn and exception hooks (T-403) |
