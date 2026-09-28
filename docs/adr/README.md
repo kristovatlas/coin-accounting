@@ -11,7 +11,7 @@ MADR-format records of significant decisions (see [ADR 0001](0001-record-decisio
 | [0005](0005-chain-data-via-core-indexes.md) | Chain data from Core's own indexes; no app-side chain index | proposed |
 | [0006](0006-storage-on-veracrypt-volume.md) | Everything the app writes lives on the VeraCrypt volume | proposed |
 | [0007](0007-price-data-bulk-download.md) | Fiat prices by bulk, date-independent download | proposed |
-| [0008](0008-per-account-basis-and-identification.md) | Track cost basis per account, and record lot selection at the time of sale | proposed |
+| [0008](0008-per-account-basis-and-identification.md) | Lot assignment for exchange sales | proposed |
 | [0009](0009-lot-flow-and-fees.md) | Lot flow across on-chain hops, and fees by role | proposed |
 | [0010](0010-doxx-propagation.md) | Doxx propagation rules and confidence levels | proposed |
 | [0011](0011-form-8949-box-selection.md) | Form 8949 box selection per disposal and tax year | proposed |

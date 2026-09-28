@@ -4,7 +4,7 @@ date: 2026-09-27
 deciders: repository owner (human), drafted by Claude Code
 ---
 
-# 0008: Track cost basis per account, and record lot selection at the time of sale
+# 0008: Lot assignment for exchange sales
 
 _Written in Simplified Technical English (ASD-STE100 style): short sentences, active voice, one idea per sentence._
 
@@ -15,54 +15,44 @@ _Written in Simplified Technical English (ASD-STE100 style): short sentences, ac
 | **Account** | One place that holds coins. It is a self-custody wallet or an exchange account. The data model calls it a `tax_account`. |
 | **Lot** | A quantity of coins with one acquisition date and one cost basis. |
 | **Cost basis** | The USD amount that the user paid for a lot, including fees. |
-| **Lot selection** | The choice of which lots a sale uses. The IRS calls this "identification". |
+| **Lot assignment** | The user's choice of which lots an exchange sale uses. The IRS calls this "identification". |
 
-## Why the year 2025 is important
+## Where tax law applies in this app
 
-The app calculates US tax. US rules for digital assets changed on 1 January 2025. The app must use the correct rules for each tax year. Otherwise, the gains are wrong, and they do not agree with the forms from exchanges.
+- **On-chain, tax law adds nothing.** The app follows each UTXO from its source. Each coin's history is its lot. This is already the most exact lot tracking.
+- **Tax law applies at one step: when the user sells coins on an exchange.** Coins that go into an exchange lose their UTXO identity. The user tells the app which deposited lots each sale uses. This is lot assignment. US tax law has three rules for this step.
 
-Three changes started in 2025:
+## The three rules
 
-1. **Cost basis is per account.**
-   - Before 2025, the rules did not clearly say how to track cost basis. Many people put all their coins, in all wallets and exchanges, into one pool.
-   - From 1 January 2025, Treasury regulations require cost basis for each account separately. A sale from account A can use only lots in account A.
-2. **A one-time move from the pool to accounts.**
-   - A person with coins at the end of 2024 must assign the cost basis from the old pool to each account.
-   - Rev. Proc. 2024-28 gives the method for this assignment, and the person must document it.
-   - The app cannot calculate this assignment. The user must supply it.
-3. **Exchanges send Form 1099-DA.**
-   - For sales in 2025 and later, exchanges report the sale proceeds to the IRS.
-   - For coins bought in 2026 and later, exchanges also report the cost basis.
-   - If the app uses different lots than the exchange, the user's return does not agree with the IRS copy.
+1. **Use only lots in the same exchange account.**
+   - A sale on exchange X can use only lots that the user deposited into exchange X.
+   - This rule starts on 1 January 2025. Before 2025, many people used one pool for all wallets and exchanges.
+   - The app's model is per account, so this rule costs nothing extra.
+2. **Assign the lots by the time of the sale.**
+   - The IRS accepts a lot assignment only if the user made it before or at the time of the sale (Treas. Reg. §1.1012-1(j)).
+   - If the assignment is late, the IRS can apply its default instead: FIFO (first in, first out) in that account.
+   - Until 31 December 2026, the user's own records can hold the assignment (Notice 2025-7, extended by Notice 2026-20). From 1 January 2027, the user must give the assignment to the exchange.
+3. **A one-time step for coins held before 2025.**
+   - A person with coins at the end of 2024 must split the cost basis of the old pool across their accounts, as of 1 January 2025 (Rev. Proc. 2024-28).
+   - The app cannot calculate this split. The user enters it.
+   - A user with no coins before 2025 does not do this step.
 
-## Rule for lot selection
-
-The IRS rule (Treas. Reg. §1.1012-1(j)) is simple: **the user must select the lots before or at the time of the sale.** A selection made later does not count. If there is no valid selection, the IRS uses FIFO (first in, first out) for that account.
-
-- Until 31 December 2026, the user can record the selection in their own records (Notice 2025-7, extended by Notice 2026-20).
-- From 1 January 2027, the user must give the selection to the exchange for exchange sales.
+These rules also make the user's numbers agree with Form 1099-DA. Exchanges send this form for sales from 2025.
 
 ## Decision
 
-1. The app tracks cost basis **per account**. A sale uses only lots from the same account.
-2. The app records **when** the user made each lot selection (`identified_at`).
-3. If `identified_at` is after the sale, the app marks the selection as **late**. The app then uses the account's standing method (the method on file at the exchange) or FIFO.
-4. For a sale in 2027 or later, the app shows a warning: the user must give the selection to the exchange.
-5. For an on-chain spend, the spent coin (UTXO) is the selection. Inside that UTXO, the app uses the account's standing method.
-6. The app has an **opening allocation** event for 1 January 2025 (`opening_allocation_2025`). The user enters it for each account, from their documented assignment.
-7. The app does not make a report if one of these conditions is true:
-   - A lot has an unknown cost basis.
-   - A transaction is not yet confirmed.
-   - A late selection is not resolved.
-
-   The user must resolve each condition. The app records each resolution in the change log.
+1. For an exchange sale, the app offers only lots from that exchange account.
+2. The app records when the user makes each lot assignment (`identified_at`).
+3. **If the assignment is after the sale, the app warns the user.** The warning says that the IRS can apply FIFO instead, and shows the FIFO result for comparison. The app marks the sale as `late` in the audit trail and on the report. **The app uses the user's assignment.** The app does not block the report. (User decision, 2026-09-27.)
+4. For a sale in 2027 or later, the app reminds the user to give the assignment to the exchange.
+5. The app has an optional **opening allocation** event for 1 January 2025 (`opening_allocation_2025`), for users who held coins before 2025.
+6. The app does not make a report while a lot has an unknown cost basis or a transaction is not confirmed. The user must resolve each condition. The app records each resolution in the change log.
 
 ## Consequences
 
-- Good: the gains agree with current IRS rules and with Form 1099-DA.
-- Good: each number has a record of its source.
-- Bad: the user must record lot selections at the time of the sale, not later.
-- Bad: the user must enter the 1 January 2025 allocation.
+- Good: the app follows the IRS rules without blocking the user.
+- Good: the report shows each late assignment, so the user or a tax preparer can review it.
+- Bad: a late assignment can give a result that the IRS does not accept. The app warns, but it does not prevent this.
 
 ## References
 
