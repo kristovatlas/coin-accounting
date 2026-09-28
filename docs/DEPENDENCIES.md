@@ -71,6 +71,8 @@ Verified as described in [`ENGINEERING.md` §2.3](ENGINEERING.md#23-all-installs
 | Node.js | 24.21.0 (LTS) | same | in `scripts/toolchain.lock` | nodejs.org `SHASUMS256.txt` (GPG check of the `.asc` against the Node release keys: M0.2) | 2026-09-28, M0.1 |
 | CPython (python-build-standalone) | 3.13.15 (20260901) | same | in `scripts/toolchain.lock` | Publisher `SHA256SUMS` | 2026-09-28, M0.1 |
 | `bitcoind` (regtest only) | 31.1 | same | in `scripts/toolchain.lock` | bitcoincore.org `SHA256SUMS` (builder-signature threshold: M0.2); 31.0 is added for minimum-version tests in M0.2 | 2026-09-28, M0.1 |
+
+**Approved by the human** on 2026-09-28 in PR #7: the pins above, exactly as committed in `scripts/toolchain.lock`. A change to any pin needs a new approval (ENGINEERING §2.4).
 | Playwright browsers | — | — | — | Pinned with `@playwright/test` (M0.2) | — |
 
 ## GitHub Actions and Apps
