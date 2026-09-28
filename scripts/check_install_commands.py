@@ -42,12 +42,18 @@ def check(root: Path) -> list[str]:
             lines = path.read_text().splitlines()
         except UnicodeDecodeError:
             continue
+        code_lines = []
         for n, line in enumerate(lines, 1):
             stripped = line.strip()
             if stripped.startswith("#"):
                 continue
+            code_lines.append(line)
             for rule in violations(line, allow_sfw=allow_sfw):
                 errors.append(f"{rel}:{n}: banned command ({rule}): {stripped}")
+        # A download on one line and a run on another (e.g. a multi-line workflow step).
+        if not any("fetch and run" in e for e in errors if e.startswith(rel + ":")):
+            if "fetch and run" in violations("\n".join(code_lines), allow_sfw=allow_sfw):
+                errors.append(f"{rel}: banned command (fetch and run across lines)")
     return errors
 
 

@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.4 |
+| Version | 0.2.5 |
 | Last updated | 2026-09-27 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -87,13 +87,14 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | Artifact | Verification |
   |---|---|
   | `sfw` | Committed SHA-256 (trust-on-first-use, as above) |
-  | pnpm, uv | Release artifacts checked against the publisher's checksums, and our committed SHA-256 |
+  | pnpm | npm registry tarball checked against the registry's sha512 integrity, committed in the lock (registry signature and provenance: M0.2) |
+  | uv | Release artifacts checked against the publisher's checksums, and our committed SHA-256 |
   | Node.js | `SHASUMS256.txt` verified against the Node release keys |
   | Python | Pinned interpreter build checked against a committed SHA-256 |
   | `bitcoind` (regtest) | `SHA256SUMS` plus a threshold of builder signatures (pinned `guix.sigs` builder keys), minimum and latest supported versions |
   | Playwright browsers | Pinned `@playwright/test` version; each downloaded browser archive checked against a committed per-platform SHA-256; fails closed if no hash is recorded |
 
-- **Enforcement:** a CI check (`scripts/check-install-commands`) scans the `Makefile`, `scripts/`, `.github/workflows/` and config files for install or fetch-and-run commands without the `sfw` wrapper. It can be bypassed by obfuscation, so it is **hygiene, not a security boundary**, and it allowlists documentation files that quote the banned commands. `AGENTS.md` repeats the rule for agents.
+- **Enforcement:** a CI check (`scripts/check-install-commands`) scans the `Makefile`, `scripts/`, `.github/workflows/` and config files for install or fetch-and-run commands without the `sfw` wrapper. It can be bypassed by obfuscation, so it is **hygiene, not a security boundary** (ADR 0022: the Claude Code guard and this check catch accidental or habitual installs; deliberate evasion is accepted risk R-8), and it allowlists documentation files that quote the banned commands. `AGENTS.md` repeats the rule for agents.
 
 ### 2.4 Adding a dependency: vet before anything is installed
 
@@ -360,3 +361,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.2 | M0.1: the toolchain installer is `scripts/toolchain.py` with `scripts/toolchain.lock`; `check-lockfiles` arrives with the first lockfile (M0.2) |
 | 2026-09-28 | 0.2.3 | `/` is banned outright in `tax/` (#10); enforced by `scripts/check_architecture.py` |
 | 2026-09-28 | 0.2.4 | PR #7 review round 2: verify sfw, pnpm and uv before every install; non-overridable verifier interpreter; `WORKSPACE` for `propose-js`; host Python 3.9+; Linux ARM64 |
+| 2026-09-28 | 0.2.5 | Install-command guard scope: hygiene against accidental installs (ADR 0022) |

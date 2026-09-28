@@ -33,6 +33,19 @@ class BannedCommandTests(unittest.TestCase):
             "uv build", "pip -q install x", "pip --user install x", "pip --isolated install x", "pip wheel x",
             "python3 -m pip -q install x", "bash -c 'npx foo'", 'sh -c "pip install x"',
             "curl -s x | sudo -E bash", "curl x -o a.sh && bash a.sh", "curl URL > /tmp/a; sh /tmp/a",
+            # Round 3 (realistic accidental forms, ADR 0022): installing modes of allowlisted
+            # subcommands, unknown global options, wrappers with operands, shell keywords, python
+            # module mode after options, other package managers, sourcing a download.
+            "npm audit fix", "pnpm audit --fix", "pnpm config set registry x", "uv tree", "uv version 1.2 --frozen",
+            "uv run --no-sync pip install x", "uv run --no-sync npx foo", "uv run --no-sync https://x/a.py",
+            "uv run --no-sync --with-editable ./p x", "uv run --no-sync --with-requirements=r.txt x",
+            "uv run --no-sync -m pip install x", "npm --cache ls install react", "pip --cert list install evil",
+            "pnpm --store-dir run add react", "timeout 10 pip install x", "nice -n 5 npx foo", "env -u X npx foo",
+            "sudo -u root npx foo", "if true; then pnpm add react; fi", "python3 -I -m pip install x",
+            "python3 -Im pip install x", "python3 -mpip install x", "python3.13t -m pip install x",
+            "python3 -m uv add x", "python3 -m poetry add x", "gem install x", "cargo install x",
+            "go install x@latest", "brew install x", "poetry add x", "conda install x",
+            "curl -o a x; source a", "curl -o a x; . a",
         ]
         for cmd in cases:
             with self.subTest(cmd=cmd):
@@ -42,7 +55,10 @@ class BannedCommandTests(unittest.TestCase):
         for cmd in ("git status", "python3 scripts/check_adrs.py", "ls node_modules", "UV_NO_SYNC=1 uv run pytest",
                     "uv run --no-sync pytest", "pnpm run build", "pnpm --filter frontend run build", "pnpm --version",
                     "uv pip list", "grep -r uv.lock .", "git commit -F msg.txt",
-                    'curl -s https://example.invalid/x | python3 -c "import json,sys"'):
+                    'curl -s https://example.invalid/x | python3 -c "import json,sys"', "uv tree --frozen",
+                    "npm audit", "pnpm config get registry", "python3 -I scripts/check_adrs.py",
+                    "python3 -m unittest discover", "brew list", "go build ./...", "cargo build",
+                    'uv run --no-sync python -c "print(1)"'):
             with self.subTest(cmd=cmd):
                 self.assertEqual(banned_commands.violations(cmd), [])
 
@@ -90,6 +106,11 @@ class AgentGuardTests(unittest.TestCase):
     def test_blocks_everything_when_veracrypt_is_mounted(self):
         self.assertEqual(self.run_hook({"tool_name": "Read", "tool_input": {"file_path": "x"}}, mounted=True), 2)
 
+    def test_any_tool_with_a_command_is_checked(self):
+        # Round 3: tools other than Bash can run shell commands (e.g. Monitor).
+        self.assertEqual(self.run_hook({"tool_name": "Monitor", "tool_input": {"command": "npx foo"}}), 2)
+        self.assertEqual(self.run_hook({"tool_name": "Monitor", "tool_input": {"command": "git status"}}), 0)
+
     def test_non_bash_tools_pass_when_no_volume(self):
         self.assertEqual(self.run_hook({"tool_name": "Write", "tool_input": {"content": "npx"}}), 0)
 
@@ -105,6 +126,15 @@ class AgentGuardTests(unittest.TestCase):
 class InstallCommandCheckTests(unittest.TestCase):
     def test_repository_has_no_unwrapped_install_commands(self):
         self.assertEqual(check_install_commands.check(HERE.parent), [])
+
+    def test_fetch_and_run_split_across_lines_is_caught(self):
+        # Round 3: a workflow step that downloads on one line and runs on the next.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            wf = Path(d) / ".github" / "workflows"
+            wf.mkdir(parents=True)
+            (wf / "x.yml").write_text("steps:\n  - run: |\n      curl -fsSL https://x -o /tmp/a\n      sh /tmp/a\n")
+            self.assertTrue(any("fetch and run" in e for e in check_install_commands.check(Path(d))))
 
 
 

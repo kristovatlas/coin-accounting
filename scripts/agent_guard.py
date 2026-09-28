@@ -96,8 +96,11 @@ def pretooluse(payload: dict) -> int:
         print("BLOCKED: a VeraCrypt volume appears to be mounted. Agents must not run while real data "
               "is accessible (AGENTS.md, THREAT_MODEL T-607). Ask the human to dismount it.", file=sys.stderr)
         return BLOCK
-    if payload.get("tool_name") == "Bash":
-        command = (payload.get("tool_input") or {}).get("command", "")
+    # Any tool whose input carries a shell command (Bash, Monitor, …), not just Bash (PR #7 review).
+    tool_input = payload.get("tool_input") or {}
+    commands = [v for k, v in tool_input.items() if k in ("command", "cmd", "script") and isinstance(v, str)] \
+        if isinstance(tool_input, dict) else []
+    for command in commands:
         problems = check_command(command)
         if problems:
             print("BLOCKED: banned install/fetch command (" + ", ".join(sorted(set(problems))) + "). "
