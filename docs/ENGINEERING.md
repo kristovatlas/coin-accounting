@@ -220,7 +220,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 5. **Were changed to match new output** without an explanation in the PR of why the old expectation was wrong.
 6. **Depend on timing or order:** `sleep`-based waits, wall-clock dates, test order, or network access (the socket guard, §3.2, fails these). *Automated:* `time.sleep` is banned in tests.
 7. **Duplicate another test** without adding a distinct case.
-8. **Have unclear names.** Names must state the behaviour and, where relevant, the threat or rule ID in the form `t508`, e.g. `test_late_identification_falls_back_to_fifo_t508`.
+8. **Have unclear names.** Names must state the behaviour and, where relevant, the threat or rule ID in the form `t508`, e.g. `test_late_identification_is_flagged_not_overridden_t508`.
 
 **Test audits:** at each milestone close, and at least monthly while coding is active, a test-audit pass reviews the suite against these rules plus the mutation report. It deletes or strengthens weak tests, and its findings go into the milestone PR. An AI reviewer may do a first pass; a human approves the result.
 

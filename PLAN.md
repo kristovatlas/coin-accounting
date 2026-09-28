@@ -135,7 +135,7 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
   - Gifts additionally store donor basis, donor date, FMV at gift, and gift date (dual basis).
   - Inheritance stores FMV at death.
 - `lot_fragment`: (holder = outpoint *or* tax_account, lot_id, sats). The engine can recompute it as of any date.
-- `identification`: disposal/withdrawal → lot choices, `identified_at` timestamp, method (`specific | standing_order | fifo_default`), and a `late` flag.
+- `identification`: disposal/withdrawal → lot choices, `identified_at` timestamp, method (`specific | standing_order | fifo_default`), and a `late` flag (warning only).
 - `disposal_allocation`: disposal → lot_id, sats, basis, proceeds share (net of disposal costs), holding period, and the 8949 box plus the reason it was chosen.
 - `doxx_tag`: outpoint or scripthash, entity_id, **confidence** (`certain | inferred`), reason (`paid_to | change_of | co_spent_with | address_reuse | cluster_backward | received_from | manual`), source txid, `manual_override`.
 - `price`: UTC date, currency, price, source, method, content hash.
@@ -210,7 +210,7 @@ A pure, deterministic function of events, recomputed on every change. It can com
 - **Disposals** (`sell`, `spend`, `gift_out`) draw only from lots in the **same tax account** (per-account basis).
 - **Identification timing:**
   - Specific ID counts only if recorded **no later than the sale**. For exchanges, it goes to the broker; through 12/31/2026, the taxpayer's own books and records are also accepted (Notice 2025-7, extended by Notice 2026-20).
-  - `identified_at` is stored. A pick made after the sale is flagged `late`, and the account's standing order, or else FIFO, applies instead.
+  - `identified_at` is stored. **Warn only** (user decision, 2026-09-27): a pick made after the sale is flagged `late`. The app shows a warning (the IRS may apply FIFO instead) and notes it in the audit trail and on reports, but it **uses the user's choice** and does not block reports.
   - For 2027+ sales the UI warns that the identification must be communicated to the broker.
   - For on-chain disposals, the spent UTXO is itself the identification. Within that UTXO, fragments are consumed by the account's standing method.
 - **Fees by role:**
@@ -220,7 +220,7 @@ A pure, deterministic function of events, recomputed on every change. It can com
   - network fees on `spend`: they reduce proceeds
   - BTC withdrawal fees charged by an exchange: handled as a small disposal (default)
   - A tx mixing owned and third-party outputs splits the fee by role
-- **Blocking conditions:** unknown basis, unconfirmed txs (below the confirmation threshold), or late identifications block report generation. Each needs an explicit user resolution, which is recorded in the change log.
+- **Blocking conditions:** unknown basis or unconfirmed txs (below the confirmation threshold) block report generation. Late identifications only produce a warning. Each needs an explicit user resolution, which is recorded in the change log.
 - **Dates:** events use UTC timestamps. The tax date is converted to the user's configured time zone. Block timestamps can be off by about ±2h, so the user can override them with exchange-recorded times.
 - **Short/long-term:** held for more than one year counts as long-term.
 - **Out of scope for v1** (documented, and the UI warns if they seem to apply): lost/stolen coins, forks/airdrops, state taxes. §1091 wash-sale rules do not apply to BTC (not a security); a future toggle is noted.
@@ -363,7 +363,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
     - pro-rata moves
     - withdrawals moving lots
     - all three gift outcomes
-    - late identification
+    - late identification (flagged and warned, choice kept)
     - the 2025 opening allocation
     - fee roles
     - the 1-year boundary

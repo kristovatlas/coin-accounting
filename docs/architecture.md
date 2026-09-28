@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2 (proposed, awaiting approval) |
+| Version | 0.2.1 (proposed, awaiting approval) |
 | Last updated | 2026-09-27 |
 | Scope | v1: Bitcoin (Bitcoin Core), single user, Linux + macOS |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) (IDs such as TB1, T-203, F2 refer to it) · [`ENGINEERING.md`](ENGINEERING.md) |
@@ -252,7 +252,7 @@ flowchart LR
 ```
 
 - The engines recompute everything from events and cached chain data. Nothing derived is edited by hand. Manual changes are events or overrides, recorded in the change log (T-408).
-- Reports are blocked while there is unknown basis, an unconfirmed tx or a late identification that hasn't been resolved (PLAN §7).
+- Reports are blocked while there is unknown basis or an unconfirmed tx that hasn't been resolved. A late lot identification only produces a warning (PLAN §7).
 
 ## 8. Chain-access sequences
 
@@ -390,3 +390,4 @@ flowchart LR
 | 2026-09-27 | 0.1 | Initial architecture (P0.3) |
 | 2026-09-27 | 0.1.1 | v1 opens the user's default browser; there is no managed browser profile (user decision, R-5) |
 | 2026-09-27 | 0.2 | Opus 5.5 + Codex review fixes: bootstrap-file launch and bearer session without cookies (§4); in-process runtime model with job worker, tip poller, watchdog, offline mode and shutdown (§3); `domain/` and a pure `doxx/`; `api/` → `services/` only; capability rules and a dependency-free architecture check (§2); data directory never saved, unencrypted storage only off mainnet, exports and downloads specified (§6); price CSV upload; scan sequence checks `completed`, retries, budget, errors and the in-flight marker (§8.2); local Tor hop in F3 |
+| 2026-09-27 | 0.2.1 | A late lot identification warns and doesn't block reports (user decision) |
