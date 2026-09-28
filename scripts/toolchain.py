@@ -2,13 +2,13 @@
 """Install the pinned toolchain into .toolchain/ (ENGINEERING §2.3).
 
 Standard library only. Every artifact is checked against the SHA-256 pinned in
-scripts/toolchain.lock before it is unpacked or made executable, and any mismatch
+scripts/toolchain.lock (JSON) before it is unpacked or made executable, and any mismatch
 is a hard error. Nothing here goes through Socket Firewall, because these are
 binaries, not registry packages. That is why every one of them is pinned by hash.
 
 Usage:
     toolchain.py install [--only NAME ...] [--include bitcoind]
-    toolchain.py verify NAME     # check .toolchain/bin/NAME is the pinned, unmodified binary
+    toolchain.py verify NAME...  # check .toolchain/bin/NAME is the pinned, unmodified binary
     toolchain.py path            # print the bin directory to put on PATH
     toolchain.py platform        # print the detected platform key
 """
@@ -24,15 +24,19 @@ import shutil
 import sys
 import tarfile
 import tempfile
-import tomllib
 import urllib.request
 from pathlib import Path
+
+if sys.version_info < (3, 9):  # noqa: UP036 - this script runs on the host Python, before the pinned one exists
+    sys.exit("toolchain.py needs Python 3.9 or newer on the host (it installs the pinned Python 3.13).")
 
 ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / "scripts" / "toolchain.lock"
 TOOLCHAIN = ROOT / ".toolchain"
 BIN = TOOLCHAIN / "bin"
 MARKER = ".installed.json"
+# tarfile extraction filters exist from 3.12 (and some security backports); older hosts use our own checks.
+HAS_TAR_FILTERS = hasattr(tarfile, "data_filter")
 
 # bitcoind is only needed for regtest tests; it is installed on request.
 DEFAULT_TOOLS = ("sfw", "pnpm", "uv", "node", "python")
@@ -48,6 +52,8 @@ def platform_key() -> str:
     machine = platform.machine().lower()
     if system == "Linux" and machine in ("x86_64", "amd64"):
         return "linux-x86_64"
+    if system == "Linux" and machine in ("aarch64", "arm64"):
+        return "linux-arm64"
     if system == "Darwin" and machine in ("arm64", "aarch64"):
         return "darwin-arm64"
     if system == "Darwin" and machine in ("x86_64", "amd64"):
@@ -56,8 +62,10 @@ def platform_key() -> str:
 
 
 def load_lock(path: Path = LOCK) -> dict:
-    with path.open("rb") as f:
-        return tomllib.load(f)
+    with path.open() as f:
+        data = json.load(f)
+    data.pop("_comment", None)
+    return data
 
 
 def sha256_file(path: Path) -> str:
@@ -85,7 +93,23 @@ def download(url: str, dest: Path) -> None:
 def safe_extract(archive: Path, target: Path) -> None:
     """Extract a tarball, refusing absolute paths, `..` and links that escape."""
     with tarfile.open(archive) as tar:
-        tar.extractall(target, filter="data")
+        if HAS_TAR_FILTERS:
+            tar.extractall(target, filter="data")
+            return
+        # Older host Pythons (e.g. macOS's 3.9) lack extraction filters: check each member ourselves.
+        root = target.resolve()
+        for m in tar.getmembers():
+            dest = (target / m.name).resolve()
+            if m.name.startswith(("/", "\\")) or ".." in Path(m.name).parts or not (dest == root or root in dest.parents):
+                raise tarfile.TarError(f"unsafe path in archive: {m.name!r}")
+            if not (m.isfile() or m.isdir() or m.issym()):
+                raise tarfile.TarError(f"unsupported member type in archive: {m.name!r}")
+            if m.issym():
+                link_dest = (dest.parent / m.linkname).resolve()
+                if Path(m.linkname).is_absolute() or not (link_dest == root or root in link_dest.parents):
+                    raise tarfile.TarError(f"symlink escapes the archive: {m.name!r} -> {m.linkname!r}")
+            m.mode &= 0o755
+        tar.extractall(target)
 
 
 def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
@@ -205,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     p_install.add_argument("--include", nargs="+")
     p_install.add_argument("--force", action="store_true")
     p_verify = sub.add_parser("verify")
-    p_verify.add_argument("name")
+    p_verify.add_argument("names", nargs="+")
     sub.add_parser("path")
     sub.add_parser("platform")
     args = parser.parse_args(argv)
@@ -213,7 +237,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "install":
             return cmd_install(args)
         if args.cmd == "verify":
-            print(verify_tool(args.name))
+            for name in args.names:
+                print(verify_tool(name))
             return 0
         if args.cmd == "path":
             print(BIN)

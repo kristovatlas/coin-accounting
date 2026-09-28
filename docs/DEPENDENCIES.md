@@ -65,7 +65,7 @@ Verified as described in [`ENGINEERING.md` §2.3](ENGINEERING.md#23-all-installs
 
 | Artifact | Version | Platform | SHA-256 (committed) | Verification method | Added (date, PR) |
 |---|---|---|---|---|---|
-| `sfw` (Socket Firewall Free) | 1.15.2 | linux-x86_64, darwin-arm64, darwin-x86_64 | in `scripts/toolchain.lock` | GitHub release asset digest; Socket publishes no checksums, so this is **trust-on-first-use** | 2026-09-28, M0.1 |
+| `sfw` (Socket Firewall Free) | 1.15.2 | linux-x86_64, linux-arm64, darwin-arm64, darwin-x86_64 | in `scripts/toolchain.lock` | GitHub release asset digest; Socket publishes no checksums, so this is **trust-on-first-use** | 2026-09-28, M0.1 |
 | pnpm (standalone) | 12.5.1 | same | in `scripts/toolchain.lock` | GitHub release asset digest (no publisher checksums) | 2026-09-28, M0.1 |
 | uv | 0.12.17 | same | in `scripts/toolchain.lock` | Publisher `sha256.sum`; matches the GitHub asset digest | 2026-09-28, M0.1 |
 | Node.js | 24.21.0 (LTS) | same | in `scripts/toolchain.lock` | nodejs.org `SHASUMS256.txt` (GPG check of the `.asc` against the Node release keys: M0.2) | 2026-09-28, M0.1 |

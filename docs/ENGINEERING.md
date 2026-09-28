@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.3 |
+| Version | 0.2.4 |
 | Last updated | 2026-09-27 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -66,7 +66,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   |---|---|
   | `make toolchain` | Installs the pinned `sfw` (see below), then the pinned pnpm, uv, Node and Python, each verified by checksum |
   | `make bootstrap` | `sfw pnpm install --frozen-lockfile` and `sfw uv sync --locked`, from a clean cache in CI |
-  | `make propose-js PKG=<name@version> [DEV=1]` / `make propose-py …` | **Resolve only**: `sfw pnpm add --lockfile-only …` / `sfw uv add --no-sync …`. Nothing is installed. Prints the lockfile diff and the list of new packages to vet (§2.4) |
+  | `make propose-js PKG=<name@version> WORKSPACE=frontend\|e2e [DEV=1]` / `make propose-py …` | **Resolve only**: `sfw pnpm add --lockfile-only …` / `sfw uv add --no-sync …`. Nothing is installed. Prints the lockfile diff and the list of new packages to vet (§2.4) |
   | `make update-deps` | Batch update (§2.6), lockfile-only, then the same review |
   | `make update-sfw` | Reviewed update of the pinned `sfw` version and checksum |
   | `make test-tools` | Pinned, verified test tooling downloads (see "Non-package downloads") |
@@ -75,6 +75,8 @@ Configured in `pyproject.toml` `[tool.uv]`.
   Contributors, AI agents and CI all use these targets. CI jobs call `make toolchain` and `make bootstrap`, never raw installers.
 - **No silent fallback:** if `sfw` is missing, not the pinned version, or fails to start, the scripts **stop with an error**. They never drop through to an unwrapped install. Whether `sfw` fails open when the Socket API is unreachable must be tested at setup. If it does, the wrapper detects that and stops **(verify at setup)**.
 - **Fetch-and-run commands are banned:** `npx`, `pnpm dlx`, `pnpm exec` of packages not in the lockfile, `uvx`/`uv tool run`, `pip install`, `curl … | sh`, the `pre-commit` framework (it clones and builds hook environments). The same applies to IDE and agent configuration, e.g. `.mcp.json` servers started with `npx -y`. Tools we need become locked dev dependencies. Git hooks, if any, are `repo`-local scripts that call locked tools.
+- **Verifying before use:** every install target first runs `toolchain.py verify sfw pnpm uv`, with a host interpreter the caller can't override, and then calls the tools by absolute path. A missing or modified binary stops the command; there's no fallback to a host `pnpm`/`uv`.
+- **Host requirement:** `python3` 3.9 or newer to run the repository scripts; the lock is JSON so no `tomllib` is needed.
 - **Bootstrapping `sfw` itself:** `make toolchain` (`scripts/toolchain.py`) downloads the pinned sfw-free release binary and checks it against the SHA-256 in `scripts/toolchain.lock`. **Socket publishes no checksums or signatures for sfw-free**, so that committed hash is trust-on-first-use. It is recorded when the version is first adopted, and changes only through `make update-sfw` in a reviewed PR. macOS binaries are unsigned. CI uses the same script, not `socketdev/action`, which installs the latest version.
 - **What `sfw` does and doesn't do:**
   - It blocks packages Socket has *confirmed* as malware.
@@ -357,3 +359,4 @@ A change is done only when:
 | 2026-09-27 | 0.2.1 | Aligned with architecture v0.2: `doxx/` is a pure package; E2E lives in `e2e/` with a Python harness; import and capability rules are defined in architecture §2 and checked by `scripts/check-architecture`; the subprocess allowlist moves there |
 | 2026-09-28 | 0.2.2 | M0.1: the toolchain installer is `scripts/toolchain.py` with `scripts/toolchain.lock`; `check-lockfiles` arrives with the first lockfile (M0.2) |
 | 2026-09-28 | 0.2.3 | `/` is banned outright in `tax/` (#10); enforced by `scripts/check_architecture.py` |
+| 2026-09-28 | 0.2.4 | PR #7 review round 2: verify sfw, pnpm and uv before every install; non-overridable verifier interpreter; `WORKSPACE` for `propose-js`; host Python 3.9+; Linux ARM64 |

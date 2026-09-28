@@ -14,6 +14,7 @@ Standard library only. Hygiene, not a security boundary.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import subprocess
@@ -21,7 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from banned_commands import segments, violations  # noqa: E402
+from banned_commands import segments, strip_prefix, tokens, violations  # noqa: E402
 
 BLOCK = 2
 
@@ -41,18 +42,53 @@ def veracrypt_mounted() -> bool:
 
 # Only these repository targets, with only these variables, count as "via make".
 # No -f/-C/--eval, no other options, no SFW=/TOOLBIN=/PATH= overrides (PR #7 review).
-MAKE_TARGETS = ("help", "toolchain", "test-tools", "propose-js", "propose-py", "bootstrap", "audit", "check")
-_MAKE_OK = re.compile(
-    r"^make(\s+(" + "|".join(MAKE_TARGETS) + r"|(PKG|DEV|BASE)=[A-Za-z0-9@._/+=:-]*))*\s*$"
-)
+MAKE_TARGETS = {"help", "toolchain", "test-tools", "propose-js", "propose-py", "bootstrap", "audit", "check"}
+MAKE_VARS = {"PKG", "DEV", "BASE", "WORKSPACE"}
+_SAFE_VALUE = re.compile(r"^[A-Za-z0-9@._/+=:-]*$")
+# Variables that change what make runs or which interpreter verifies the toolchain.
+DANGEROUS_VARS = {"MAKEFILES", "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "PATH", "SYS_PYTHON", "SFW", "TOOLBIN",
+                  "PNPM", "UV", "SHELL", "BASH_ENV", "ENV"}
+
+
+def _project_dir() -> str:
+    return os.path.realpath(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+
+
+def check_make(command: str) -> list[str]:
+    """`make` counts as "via make" only for an exact repository target, run from the project dir,
+    with no dangerous variables anywhere in the command (PR #7 review, round 2)."""
+    problems: list[str] = []
+    has_make = False
+    for seg in segments(command):
+        assigns, toks = strip_prefix(tokens(seg))
+        for a in assigns:
+            if a.split("=", 1)[0] in DANGEROUS_VARS:
+                problems.append(f"sets {a.split('=', 1)[0]}")
+        if not toks:
+            continue
+        tool = os.path.basename(toks[0])
+        if tool in ("make", "gmake"):
+            has_make = True
+            for arg in toks[1:]:
+                if arg in MAKE_TARGETS:
+                    continue
+                key, eq, val = arg.partition("=")
+                if eq and key in MAKE_VARS and _SAFE_VALUE.match(val):
+                    continue
+                problems.append("make with arguments outside the repository targets")
+                break
+    if has_make:
+        for seg in segments(command):
+            _, toks = strip_prefix(tokens(seg))
+            if toks and toks[0] in ("cd", "pushd"):
+                target = toks[1] if len(toks) > 1 else os.path.expanduser("~")
+                if os.path.realpath(os.path.expanduser(target)) != _project_dir():
+                    problems.append("make run from outside the project directory")
+    return problems
 
 
 def check_command(command: str) -> list[str]:
-    problems = list(violations(command))
-    for seg in segments(command):
-        if re.match(r"^(\S*/)?g?make\b", seg) and not _MAKE_OK.match(seg):
-            problems.append("make with arguments outside the repository targets")
-    return sorted(set(problems))
+    return sorted(set(violations(command) + check_make(command)))
 
 
 def pretooluse(payload: dict) -> int:

@@ -30,7 +30,7 @@ If a request conflicts with these documents, stop and ask the human instead of w
 - Prefix every direct `uv` command with `UV_NO_SYNC=1`, or use `make`. Environment variables don't persist between agent shell calls.
 
 ### Dependencies
-- Propose them with `make propose-js` / `make propose-py`, which only resolve the lockfile.
+- Propose them with `make propose-js PKG=name@version WORKSPACE=frontend|e2e` / `make propose-py PKG=name==version`, which only resolve the lockfile.
 - Nothing is installed until the human has approved the Socket verdict and the lockfile diff (ENGINEERING §2.4).
 - Agents never approve dependencies.
 

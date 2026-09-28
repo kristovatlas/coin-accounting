@@ -1,5 +1,6 @@
 import hashlib
 import io
+import os
 import subprocess
 import sys
 import tarfile
@@ -96,7 +97,10 @@ class AdrBaseComparisonTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def git(self, *args):
-        return subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True, text=True).stdout
+        # Isolated from the developer's git config (commit signing, hooks paths, …).
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        return subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True, text=True,
+                              env=env).stdout
 
     def check(self):
         errors, metas, _ = check_adrs.check_files(self.root / "docs" / "adr")
@@ -154,7 +158,7 @@ class ToolchainTests(unittest.TestCase):
     def test_lock_has_every_tool_for_every_platform(self):
         lock = toolchain.load_lock()
         for name in ("sfw", "pnpm", "uv", "node", "python", "bitcoind"):
-            for key in ("linux-x86_64", "darwin-arm64", "darwin-x86_64"):
+            for key in ("linux-x86_64", "linux-arm64", "darwin-arm64", "darwin-x86_64"):
                 with self.subTest(tool=name, platform=key):
                     entry = lock[name][key]
                     self.assertTrue(entry["url"].startswith("https://"))
@@ -254,6 +258,40 @@ class ToolchainTests(unittest.TestCase):
             path.write_bytes(b"tampered")
             with self.assertRaisesRegex(toolchain.ToolchainError, "modified"):
                 toolchain.verify_tool("sfw", lock, "linux-x86_64")
+
+    def test_extraction_without_tarfile_filters_still_refuses_unsafe_members(self):
+        # Older host Pythons (e.g. macOS's 3.9) have no tarfile.data_filter (PR #7 review, round 2).
+        def archive_with(name, linkname=None):
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                info = tarfile.TarInfo(name)
+                if linkname:
+                    info.type, info.linkname = tarfile.SYMTYPE, linkname
+                    tar.addfile(info)
+                else:
+                    info.size = 1
+                    tar.addfile(info, io.BytesIO(b"x"))
+            return buf.getvalue()
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(toolchain, "HAS_TAR_FILTERS", False):
+            for name, link in (("../escape", None), ("/abs", None), ("ok/link", "/etc/passwd"), ("ok/l2", "../../x")):
+                with self.subTest(name=name):
+                    archive = Path(d) / "a.tar.gz"
+                    archive.write_bytes(archive_with(name, link))
+                    target = Path(d) / f"out-{abs(hash(name))}"
+                    target.mkdir()
+                    with self.assertRaises(tarfile.TarError):
+                        toolchain.safe_extract(archive, target)
+            archive = Path(d) / "good.tar.gz"
+            archive.write_bytes(archive_with("pkg/bin/tool"))
+            target = Path(d) / "good"
+            target.mkdir()
+            toolchain.safe_extract(archive, target)
+            self.assertTrue((target / "pkg" / "bin" / "tool").is_file())
+
+    def test_linux_arm64_is_a_supported_platform(self):
+        with mock.patch.object(toolchain.platform, "system", return_value="Linux"), \
+                mock.patch.object(toolchain.platform, "machine", return_value="aarch64"):
+            self.assertEqual(toolchain.platform_key(), "linux-arm64")
 
     def test_non_https_url_is_refused(self):
         with tempfile.TemporaryDirectory() as d:

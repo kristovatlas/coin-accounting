@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.7.1 (M0 in progress) |
+| Version | 0.7.2 (M0 in progress) |
 | Last updated | 2026-09-27 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -324,3 +324,4 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 | 2026-09-27 | 0.6.2 | PR #6 review fixes: T-508 covers exchange withdrawals and self-custody (standing order before FIFO; merged UTXOs oldest-first); T-406 no default data dir; T-605 evidence = AGENTS.md + ADR 0018; §7 tests use the bearer session |
 | 2026-09-28 | 0.7 | M0.1: first implemented mitigations: toolchain hash verification and a SHA-pinned CI action (T-603, partly); the Claude Code guard hook (T-605, T-607) |
 | 2026-09-28 | 0.7.1 | PR #7 review round 1: T-603/T-607 rows restored with their mitigations (the 0.7 edit had dropped them) and the hook's limits stated; the Socket Firewall path hardened (no make overrides, the pinned binary is hash-verified, strict guard for make, `uv run` and other implicit installs banned, `UV_NO_SYNC` for agents) |
+| 2026-09-28 | 0.7.2 | PR #7 review round 2: installer detection tokenizes commands and uses per-tool subcommand allowlists; the make guard sees through wrappers, `VAR=` prefixes and `cd`; sfw, pnpm and uv are verified before every install with a non-overridable verifier (T-601, T-603) |

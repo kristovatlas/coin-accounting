@@ -7,8 +7,21 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
-# `override`: a command-line SFW=/TOOLBIN= must never replace Socket Firewall (PR #7 review).
+
+# The host interpreter that runs our scripts, including the toolchain verifier. It is
+# resolved once, here, before PATH is changed, and can't be overridden from the command
+# line or the environment: a substitute (e.g. SYS_PYTHON=true) would make every
+# verification pass (PR #7 review).
+override SYS_PYTHON := $(shell command -v python3)
+ifeq ($(SYS_PYTHON),)
+$(error python3 (3.9 or newer) is required on the host to run the repository scripts)
+endif
+
+# `override`: a command-line SFW=/TOOLBIN= must never replace the pinned tools (PR #7 review).
 override TOOLBIN := $(ROOT)/.toolchain/bin
+override SFW := $(TOOLBIN)/sfw
+override PNPM := $(TOOLBIN)/pnpm
+override UV := $(TOOLBIN)/uv
 export PATH := $(TOOLBIN):$(PATH)
 
 # uv: never sync, lock or download an interpreter implicitly (ENGINEERING §2.2).
@@ -19,12 +32,12 @@ export UV_CACHE_DIR := $(ROOT)/.uv-cache
 # pytest plugins load only when named explicitly (ENGINEERING §3.1).
 export PYTEST_DISABLE_PLUGIN_AUTOLOAD := 1
 
-SYS_PYTHON ?= python3
-override SFW := $(TOOLBIN)/sfw
-# PKG/DEV reach recipes only as environment variables and are validated there, never
-# pasted into shell text (no injection through PKG).
+# PKG/DEV/WORKSPACE/BASE reach recipes only as environment variables and are validated or
+# quoted there, never pasted into shell text (no injection).
 export PKG
 export DEV
+export WORKSPACE
+export BASE
 # A package spec must be name@version (JS) or name==version (Python), nothing else.
 PKG_RE := ^(@[a-z0-9._-]+/)?[A-Za-z0-9._-]+(@|==)[A-Za-z0-9.+_-]+$$
 
@@ -36,15 +49,17 @@ help: ## List targets
 
 .PHONY: toolchain
 toolchain: ## Install the pinned sfw, pnpm, uv, Node and Python into .toolchain/ (hash-verified)
-	$(SYS_PYTHON) scripts/toolchain.py install
+	"$(SYS_PYTHON)" scripts/toolchain.py install
 
 .PHONY: test-tools
 test-tools: ## Install the pinned bitcoind for regtest tests (hash-verified)
-	$(SYS_PYTHON) scripts/toolchain.py install --only bitcoind
+	"$(SYS_PYTHON)" scripts/toolchain.py install --only bitcoind
 
-.PHONY: require-sfw
-require-sfw:
-	@$(SYS_PYTHON) scripts/toolchain.py verify sfw >/dev/null || { echo "Refusing to continue: there is no install path without the pinned Socket Firewall (no fallback)." >&2; exit 1; }
+# sfw and the package managers it wraps must all be the pinned, unmodified binaries.
+# A missing link must not fall back to a host pnpm/uv on PATH (PR #7 review).
+.PHONY: require-toolchain
+require-toolchain:
+	@"$(SYS_PYTHON)" scripts/toolchain.py verify sfw pnpm uv >/dev/null || { echo "Refusing to continue: the pinned Socket Firewall and package managers must be installed and unmodified (no fallback). Run 'make toolchain'." >&2; exit 1; }
 
 .PHONY: require-pkg
 require-pkg:
@@ -53,21 +68,22 @@ require-pkg:
 # --- dependencies (ENGINEERING §2.4: resolve -> vet -> approve -> install) ---
 
 .PHONY: propose-js
-propose-js: require-pkg require-sfw ## Resolve a JS dependency into the lockfile only. Usage: make propose-js PKG=name@version [DEV=1]
-	"$(SFW)" pnpm add --lockfile-only $${DEV:+--save-dev} --filter frontend "$$PKG"
+propose-js: require-pkg require-toolchain ## Resolve a JS dependency into the lockfile only. Usage: make propose-js PKG=name@version WORKSPACE=frontend|e2e [DEV=1]
+	@case "$$WORKSPACE" in frontend|e2e) ;; *) echo "WORKSPACE must be frontend or e2e" >&2; exit 1;; esac
+	"$(SFW)" "$(PNPM)" add --lockfile-only $${DEV:+--save-dev} --filter "./$$WORKSPACE" "$$PKG"
 	@git --no-pager diff --stat -- package.json '*/package.json' pnpm-lock.yaml
 	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry, human approval, then 'make bootstrap'."
 
 .PHONY: propose-py
-propose-py: require-pkg require-sfw ## Resolve a Python dependency into uv.lock only. Usage: make propose-py PKG=name==version [DEV=1]
-	"$(SFW)" uv add --no-sync $${DEV:+--dev} "$$PKG"
+propose-py: require-pkg require-toolchain ## Resolve a Python dependency into uv.lock only. Usage: make propose-py PKG=name==version [DEV=1]
+	"$(SFW)" "$(UV)" add --no-sync $${DEV:+--dev} "$$PKG"
 	@git --no-pager diff --stat -- pyproject.toml uv.lock
 	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry, human approval, then 'make bootstrap'."
 
 .PHONY: bootstrap
-bootstrap: require-sfw ## Install exactly what the lockfiles say, through sfw
-	@if [ -f uv.lock ]; then $(SFW) uv sync --locked; else echo "no uv.lock yet (no Python dependencies approved)"; fi
-	@if [ -f pnpm-lock.yaml ]; then $(SFW) pnpm install --frozen-lockfile; else echo "no pnpm-lock.yaml yet (no JS dependencies approved)"; fi
+bootstrap: require-toolchain ## Install exactly what the lockfiles say, through sfw
+	@if [ -f uv.lock ]; then "$(SFW)" "$(UV)" sync --locked; else echo "no uv.lock yet (no Python dependencies approved)"; fi
+	@if [ -f pnpm-lock.yaml ]; then "$(SFW)" "$(PNPM)" install --frozen-lockfile; else echo "no pnpm-lock.yaml yet (no JS dependencies approved)"; fi
 
 .PHONY: audit
 audit: ## Vulnerability audit of both lockfiles (enabled once the audit tools are approved; M0.2)
@@ -77,7 +93,7 @@ audit: ## Vulnerability audit of both lockfiles (enabled once the audit tools ar
 
 .PHONY: check
 check: ## Run all repository checks
-	$(SYS_PYTHON) scripts/check_adrs.py $(if $(BASE),--base $(BASE),)
-	$(SYS_PYTHON) scripts/check_install_commands.py
-	$(SYS_PYTHON) scripts/check_architecture.py
-	$(SYS_PYTHON) -m unittest discover -s scripts/tests -p 'test_*.py'
+	"$(SYS_PYTHON)" scripts/check_adrs.py $${BASE:+--base "$$BASE"}
+	"$(SYS_PYTHON)" scripts/check_install_commands.py
+	"$(SYS_PYTHON)" scripts/check_architecture.py
+	"$(SYS_PYTHON)" -m unittest discover -s scripts/tests -p 'test_*.py'
