@@ -1,6 +1,6 @@
 ---
-status: proposed
-date: 2026-09-27
+status: accepted
+date: 2026-09-28
 deciders: repository owner (human), drafted by Claude Code
 ---
 
