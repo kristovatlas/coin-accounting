@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from banned_commands import violations  # noqa: E402
+from banned_commands import segments, violations  # noqa: E402
 
 BLOCK = 2
 
@@ -38,14 +39,20 @@ def veracrypt_mounted() -> bool:
         return True
 
 
+# Only these repository targets, with only these variables, count as "via make".
+# No -f/-C/--eval, no other options, no SFW=/TOOLBIN=/PATH= overrides (PR #7 review).
+MAKE_TARGETS = ("help", "toolchain", "test-tools", "propose-js", "propose-py", "bootstrap", "audit", "check")
+_MAKE_OK = re.compile(
+    r"^make(\s+(" + "|".join(MAKE_TARGETS) + r"|(PKG|DEV|BASE)=[A-Za-z0-9@._/+=:-]*))*\s*$"
+)
+
+
 def check_command(command: str) -> list[str]:
-    problems = []
-    for part in command.replace("&&", "\n").replace("||", "\n").replace(";", "\n").splitlines():
-        part = part.strip()
-        if not part or part.startswith("make ") or part == "make":
-            continue
-        problems += violations(part)
-    return problems
+    problems = list(violations(command))
+    for seg in segments(command):
+        if re.match(r"^(\S*/)?g?make\b", seg) and not _MAKE_OK.match(seg):
+            problems.append("make with arguments outside the repository targets")
+    return sorted(set(problems))
 
 
 def pretooluse(payload: dict) -> int:

@@ -51,8 +51,17 @@ def adr_files(adr_dir: Path) -> dict[str, Path]:
     for p in sorted(adr_dir.glob("*.md")):
         m = ADR_NAME.match(p.name)
         if m and m.group(1) != "0000":
-            out[m.group(1)] = p
+            out.setdefault(m.group(1), p)
     return out
+
+
+def duplicate_numbers(adr_dir: Path) -> list[str]:
+    seen: dict[str, list[str]] = {}
+    for p in sorted(adr_dir.glob("*.md")):
+        m = ADR_NAME.match(p.name)
+        if m and m.group(1) != "0000":
+            seen.setdefault(m.group(1), []).append(p.name)
+    return [f"ADR number {n} is used by several files: {', '.join(v)}" for n, v in seen.items() if len(v) > 1]
 
 
 def check_files(adr_dir: Path) -> tuple[list[str], dict[str, dict[str, str]], dict[str, str]]:
@@ -124,21 +133,48 @@ def git(root: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout
 
 
+def status_of(text: str) -> str:
+    try:
+        return front_matter(text)[0].get("status", "")
+    except ValueError:
+        return ""
+
+
 def check_against_base(root: Path, base: str, metas: dict[str, dict[str, str]]) -> list[str]:
+    """ADR 0001: an ADR on the base branch is decided. It can't be removed or renamed,
+    and only its status line may change, to `deprecated` or `superseded by NNNN`
+    (where NNNN exists and says `supersedes: <this number>`)."""
     errors = []
-    base_files = set(git(root, "ls-tree", "-r", "--name-only", base, "docs/adr/").split())
-    added_with_hash = []
-    for num, meta in metas.items():
-        rel = next(p for p in (root / "docs" / "adr").glob(f"{num}-*.md")).relative_to(root).as_posix()
-        if rel not in base_files:
-            if "architecture_sha256" in meta:
-                added_with_hash.append(num)
+    adr_dir = root / "docs" / "adr"
+    current = adr_files(adr_dir)
+    base_paths = [p for p in git(root, "ls-tree", "-r", "--name-only", base, "docs/adr/").split()
+                  if ADR_NAME.match(Path(p).name) and not Path(p).name.startswith("0000")]
+    base_by_num = {ADR_NAME.match(Path(p).name).group(1): p for p in base_paths}
+    for num, rel in sorted(base_by_num.items()):
+        if num not in current:
+            errors.append(f"{rel}: a decided ADR was removed (ADR 0001)")
+            continue
+        new_rel = current[num].relative_to(root).as_posix()
+        if new_rel != rel:
+            errors.append(f"{rel}: a decided ADR was renamed to {new_rel} (ADR 0001)")
             continue
         old = git(root, "show", f"{base}:{rel}")
-        new = (root / rel).read_text()
+        new = current[num].read_text()
         strip = lambda t: re.sub(r"^status:.*$", "status:", t, count=1, flags=re.M)  # noqa: E731
         if strip(old) != strip(new):
             errors.append(f"{rel}: a decided ADR may only change its status line (ADR 0001); write a new ADR instead")
+        old_status, new_status = status_of(old), status_of(new)
+        if new_status != old_status:
+            ok = new_status == "deprecated"
+            m = re.fullmatch(r"superseded by (\d{4})", new_status)
+            if m:
+                succ = metas.get(m.group(1), {})
+                ok = succ.get("supersedes") == num
+            if old_status == "proposed" and new_status in ("accepted", "rejected"):
+                ok = True
+            if not ok:
+                errors.append(f"{rel}: status may not change from {old_status!r} to {new_status!r} (ADR 0001)")
+    added_with_hash = [n for n, m in metas.items() if n not in base_by_num and "architecture_sha256" in m]
     arch_changed = git(root, "diff", "--name-only", base, "--", "docs/architecture.md").strip() != ""
     if arch_changed and len(added_with_hash) != 1:
         errors.append(
@@ -155,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     adr_dir = args.root / "docs" / "adr"
     errors, metas, titles = check_files(adr_dir)
+    errors += duplicate_numbers(adr_dir)
     errors += check_index(adr_dir, titles)
     errors += check_hash(args.root, metas)
     if args.base:

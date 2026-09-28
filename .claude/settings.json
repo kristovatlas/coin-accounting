@@ -1,4 +1,9 @@
 {
+  "env": {
+    "UV_NO_SYNC": "1",
+    "UV_PYTHON_DOWNLOADS": "never",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"
+  },
   "hooks": {
     "SessionStart": [
       {

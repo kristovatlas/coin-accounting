@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.2 |
+| Version | 0.2.3 |
 | Last updated | 2026-09-27 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -270,7 +270,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 | Rule | Why | Enforcement |
 |---|---|---|
 | Import edges and capabilities (network, `webbrowser`, `subprocess`, filesystem, clock, `importlib`/`__import__`) follow the per-path rules in [architecture §2](architecture.md#2-module-structure-dependency-rules-and-capability-rules) | T-305, T-402, purity of `tax/`/`doxx/`/`domain/` | `scripts/check-architecture` (custom AST check, no dependency) + ruff `banned-api` per path. Hygiene, not a security boundary |
-| No floats in `tax/`: no float literals, no `/` on integer sats, no `float()`; money arrives as strings or `Decimal`; the `decimal` context in `tax/` traps `FloatOperation`; property tests check that no intermediate value is a float | T-502 | custom AST check + runtime trap + tests |
+| No floats in `tax/`: no float literals, **no true division `/` or `/=` at all** (`//` for exact integer division; Decimal division only through a named helper in `domain/`), no `float()`, no `math`; money arrives as strings or `Decimal`; the `decimal` context in `tax/` traps `FloatOperation`; property tests check that no intermediate value is a float | T-502 | custom AST check + runtime trap + tests |
 | No `eval`/`exec`, `pickle`, `shell=True` | Code execution | ruff (`S` rules) + banned-api |
 | No `dangerouslySetInnerHTML`; no runtime CSS-in-JS (it injects `<style>` tags that the CSP blocks); no `setAttribute('style', …)` | T-104 | ESLint rules + E2E CSP-violation check (§3.1) |
 | No navigation or `window.open` to external origins; no network sinks (`fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`) outside the API client module | T-106 | ESLint rules + a bundle scan for network sinks. Plain URL strings such as React's error-doc links are allowlisted, since they are inert |
@@ -356,3 +356,4 @@ A change is done only when:
 | 2026-09-27 | 0.2 | Incorporates the Opus 5.5 and Codex (gpt-5.6-sol) reviews and the user's decisions: two-phase dependency adds (resolve → vet → approve → install); pnpm 12 settings (`allowBuilds`, `pmOnFail`, `verifyDepsBeforeRun`, `blockExoticSubdeps`, `trustPolicy`); uv `package = false`, `python-downloads = "never"`, `UV_NO_SYNC`, no sdist exceptions, relative `exclude-newer`; lockfile policy check; sfw trust-on-first-use + telemetry; verification table for non-package downloads; audits, reproducible build, Actions hardening restored or added; socket guard defined; coverage mechanics and ratchet; per-PR mutation runs; corrected CSP rationale; float ban hardened; ADR immutability check. **Signed commits dropped** and **only-the-human-merges kept procedural** by user decision |
 | 2026-09-27 | 0.2.1 | Aligned with architecture v0.2: `doxx/` is a pure package; E2E lives in `e2e/` with a Python harness; import and capability rules are defined in architecture §2 and checked by `scripts/check-architecture`; the subprocess allowlist moves there |
 | 2026-09-28 | 0.2.2 | M0.1: the toolchain installer is `scripts/toolchain.py` with `scripts/toolchain.lock`; `check-lockfiles` arrives with the first lockfile (M0.2) |
+| 2026-09-28 | 0.2.3 | `/` is banned outright in `tax/` (#10); enforced by `scripts/check_architecture.py` |

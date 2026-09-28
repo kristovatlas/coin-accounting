@@ -7,7 +7,8 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
-TOOLBIN := $(ROOT)/.toolchain/bin
+# `override`: a command-line SFW=/TOOLBIN= must never replace Socket Firewall (PR #7 review).
+override TOOLBIN := $(ROOT)/.toolchain/bin
 export PATH := $(TOOLBIN):$(PATH)
 
 # uv: never sync, lock or download an interpreter implicitly (ENGINEERING §2.2).
@@ -19,9 +20,13 @@ export UV_CACHE_DIR := $(ROOT)/.uv-cache
 export PYTEST_DISABLE_PLUGIN_AUTOLOAD := 1
 
 SYS_PYTHON ?= python3
-SFW := $(TOOLBIN)/sfw
-PKG ?=
-DEV ?=
+override SFW := $(TOOLBIN)/sfw
+# PKG/DEV reach recipes only as environment variables and are validated there, never
+# pasted into shell text (no injection through PKG).
+export PKG
+export DEV
+# A package spec must be name@version (JS) or name==version (Python), nothing else.
+PKG_RE := ^(@[a-z0-9._-]+/)?[A-Za-z0-9._-]+(@|==)[A-Za-z0-9.+_-]+$$
 
 .PHONY: help
 help: ## List targets
@@ -39,22 +44,23 @@ test-tools: ## Install the pinned bitcoind for regtest tests (hash-verified)
 
 .PHONY: require-sfw
 require-sfw:
-	@test -x "$(SFW)" || { echo "sfw missing: run 'make toolchain' first. There is no install path without Socket Firewall." >&2; exit 1; }
-	@"$(SFW)" --version >/dev/null 2>&1 || { echo "sfw failed to start; refusing to continue (no fallback)." >&2; exit 1; }
+	@$(SYS_PYTHON) scripts/toolchain.py verify sfw >/dev/null || { echo "Refusing to continue: there is no install path without the pinned Socket Firewall (no fallback)." >&2; exit 1; }
+
+.PHONY: require-pkg
+require-pkg:
+	@printf '%s\n' "$$PKG" | grep -Eq '$(PKG_RE)' || { echo "PKG must look like name@version or name==version" >&2; exit 1; }
 
 # --- dependencies (ENGINEERING §2.4: resolve -> vet -> approve -> install) ---
 
 .PHONY: propose-js
-propose-js: require-sfw ## Resolve a JS dependency into the lockfile only. Usage: make propose-js PKG=name@version [DEV=1]
-	@test -n "$(PKG)" || { echo "usage: make propose-js PKG=name@version [DEV=1]" >&2; exit 1; }
-	$(SFW) pnpm add --lockfile-only $(if $(DEV),--save-dev,) --filter "$${FILTER:-frontend}" "$(PKG)"
+propose-js: require-pkg require-sfw ## Resolve a JS dependency into the lockfile only. Usage: make propose-js PKG=name@version [DEV=1]
+	"$(SFW)" pnpm add --lockfile-only $${DEV:+--save-dev} --filter frontend "$$PKG"
 	@git --no-pager diff --stat -- package.json '*/package.json' pnpm-lock.yaml
 	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry, human approval, then 'make bootstrap'."
 
 .PHONY: propose-py
-propose-py: require-sfw ## Resolve a Python dependency into uv.lock only. Usage: make propose-py PKG=name==version [DEV=1]
-	@test -n "$(PKG)" || { echo "usage: make propose-py PKG=name==version [DEV=1]" >&2; exit 1; }
-	$(SFW) uv add --no-sync $(if $(DEV),--dev,) "$(PKG)"
+propose-py: require-pkg require-sfw ## Resolve a Python dependency into uv.lock only. Usage: make propose-py PKG=name==version [DEV=1]
+	"$(SFW)" uv add --no-sync $${DEV:+--dev} "$$PKG"
 	@git --no-pager diff --stat -- pyproject.toml uv.lock
 	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry, human approval, then 'make bootstrap'."
 

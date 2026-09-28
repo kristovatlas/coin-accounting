@@ -8,6 +8,7 @@ binaries, not registry packages. That is why every one of them is pinned by hash
 
 Usage:
     toolchain.py install [--only NAME ...] [--include bitcoind]
+    toolchain.py verify NAME     # check .toolchain/bin/NAME is the pinned, unmodified binary
     toolchain.py path            # print the bin directory to put on PATH
     toolchain.py platform        # print the detected platform key
 """
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import platform
 import shutil
@@ -30,6 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 LOCK = ROOT / "scripts" / "toolchain.lock"
 TOOLCHAIN = ROOT / ".toolchain"
 BIN = TOOLCHAIN / "bin"
+MARKER = ".installed.json"
 
 # bitcoind is only needed for regtest tests; it is installed on request.
 DEFAULT_TOOLS = ("sfw", "pnpm", "uv", "node", "python")
@@ -90,9 +93,12 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
     if entry is None:
         raise ToolchainError(f"{name}: no artifact pinned for {key}")
     tool_dir = TOOLCHAIN / name / spec["version"]
-    marker = tool_dir / ".sha256"
-    if marker.exists() and marker.read_text().strip() == entry["sha256"] and not force:
-        return tool_dir / entry["bin"]
+    cached = read_marker(tool_dir)
+    if cached and cached["artifact_sha256"] == entry["sha256"] and not force:
+        binary = tool_dir / cached["bin"]
+        if binary.is_file() and sha256_file(binary) == cached["bin_sha256"]:
+            return binary
+        # Missing or modified since install: reinstall from the pinned artifact.
 
     with tempfile.TemporaryDirectory(dir=TOOLCHAIN) as tmp:
         tmpdir = Path(tmp)
@@ -120,12 +126,51 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
                 raise ToolchainError(f"{name}: expected binary {entry['bin']!r} not found in artifact")
             binary = matches[0]
         binary.chmod(0o755)
+        rel_bin = binary.relative_to(staging).as_posix()
+        bin_sha = sha256_file(binary)
         if tool_dir.exists():
             shutil.rmtree(tool_dir)
         tool_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(staging), str(tool_dir))
-        (tool_dir / ".sha256").write_text(entry["sha256"] + "\n")
-        return tool_dir / binary.relative_to(staging)
+        (tool_dir / MARKER).write_text(json.dumps(
+            {"artifact_sha256": entry["sha256"], "bin": rel_bin, "bin_sha256": bin_sha}) + "\n")
+        return tool_dir / rel_bin
+
+
+def read_marker(tool_dir: Path) -> dict | None:
+    try:
+        data = json.loads((tool_dir / MARKER).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not {"artifact_sha256", "bin", "bin_sha256"} <= data.keys():
+        return None
+    return data
+
+
+def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> Path:
+    """Check that .toolchain/bin/<name> is the pinned, unmodified binary; return its path.
+
+    Used by `make require-sfw` so a stale or replaced sfw can never authorize an install
+    (ENGINEERING §2.3, "no silent fallback").
+    """
+    lock = lock or load_lock()
+    key = key or platform_key()
+    if name not in lock:
+        raise ToolchainError(f"unknown tool {name!r}")
+    spec = lock[name]
+    tool_dir = TOOLCHAIN / name / spec["version"]
+    cached = read_marker(tool_dir)
+    if not cached or cached["artifact_sha256"] != spec[key]["sha256"]:
+        raise ToolchainError(f"{name} {spec['version']} is not installed from the pinned artifact; run 'make toolchain'")
+    expected = (tool_dir / cached["bin"]).resolve()
+    link_path = BIN / {"python": "python3"}.get(name, name)
+    if not link_path.is_symlink() or link_path.resolve() != expected:
+        raise ToolchainError(f"{link_path} does not point at the pinned {name} {spec['version']}; run 'make toolchain'")
+    if sha256_file(expected) != cached["bin_sha256"]:
+        raise ToolchainError(f"{name} binary was modified after install; run 'make toolchain --force' after checking why")
+    if spec[key].get("kind") == "binary" and cached["bin_sha256"] != spec[key]["sha256"]:
+        raise ToolchainError(f"{name} binary hash differs from the pinned artifact")
+    return expected
 
 
 def link(bin_path: Path, name: str) -> None:
@@ -159,12 +204,17 @@ def main(argv: list[str] | None = None) -> int:
     p_install.add_argument("--only", nargs="+")
     p_install.add_argument("--include", nargs="+")
     p_install.add_argument("--force", action="store_true")
+    p_verify = sub.add_parser("verify")
+    p_verify.add_argument("name")
     sub.add_parser("path")
     sub.add_parser("platform")
     args = parser.parse_args(argv)
     try:
         if args.cmd == "install":
             return cmd_install(args)
+        if args.cmd == "verify":
+            print(verify_tool(args.name))
+            return 0
         if args.cmd == "path":
             print(BIN)
             return 0
