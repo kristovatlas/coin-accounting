@@ -24,7 +24,7 @@ Decisions made with the user:
 ```
 Browser UI (Vite + TypeScript + React + Cytoscape.js; all assets bundled, no CDN)
         │  HTTP on 127.0.0.1 only (Host check, one-time launch token → cookie, CSRF header)
-FastAPI backend (Python 3.12, uv-managed)
+FastAPI backend (Python 3.13, uv-managed)
    ├── rpc.py ── Bitcoin Core JSON-RPC (dedicated rpcauth user, server-side rpcwhitelist, loopback only)
    │              node provides txindex + blockfilterindex + txospenderindex (Core ≥ 31.0)
    └── user DB (SQLite, sensitive, on VeraCrypt volume; file mode 0600), including the chain-data cache
@@ -99,7 +99,7 @@ The app keeps **no chain index of its own**. Bitcoin Core's built-in indexes ans
 
   The range size, window size and activity budget are set from these results. Any change of approach needs an ADR.
 
-### 2. User data model (`backend/coinacct/db/`, SQLite + Alembic migrations)
+### 2. User data model (`backend/coinacct/storage/`, SQLite + versioned migrations; the migration tool is chosen in M0 under the dependency rules)
 Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency code. The tax ledger is USD.
 - `entity`: id, name, kind (`self | exchange | employer | merchant | person | unknown`), **`knows_identity`** flag (default true for exchanges and employers), notes.
 - `tax_account`: the unit for per-wallet/account basis (Rev. Proc. 2024-28).
@@ -142,7 +142,7 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
 - `change_log`: append-only record of every edit to events, tags, identifications and overrides.
 - `settings`: fee treatment, time zone, proxy, confirmation threshold, etc.
 
-### 3. Import, discovery, clustering (`discovery.py`, `tagging.py`)
+### 3. Import, discovery, clustering (`services/discovery.py`, `services/tagging.py`)
 - **Import:**
   - paste or CSV a list of addresses
   - **descriptors/xpubs (v1), public material only.** A descriptor or key containing private material (xprv, WIF) is **rejected** at import and never sent to the node or stored; the user is shown how to export the public form. Descriptors are derived with Core's `deriveaddresses` (no node wallet) under a gap limit that extends as used addresses are found
@@ -170,7 +170,7 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
   - reports
 - Wording: the doxx UI says "known links", never "private" or "clean", and keeps a persistent note about heuristics the app doesn't model.
 
-### 5. Doxx propagation (`doxx.py`)
+### 5. Doxx propagation (`services/doxx.py`)
 The doxx set of a coin is the set of **identity-knowing entities** (`knows_identity`) that can link that coin to the user. Rules are deterministic from the tagged graph, manual overrides persist, and the rules are recorded in an ADR.
 1. **Paid to K:** a tx pays an output owned by K (a deposit, a purchase, a payment to an employer or KYC'd person). K sees every **owned input** and every **owned output (change)** of that tx, so all of them are doxxed to K (*certain*).
 2. **Received from K:** a withdrawal, salary or other payment the user recorded as coming from K. The received outpoint and its address are doxxed to K (*certain*). This comes from the confirmed event, not from recognizing K's addresses; clustering is only supporting evidence.
@@ -239,16 +239,16 @@ A pure, deterministic function of events, recomputed on every change. It can com
 - **CSV exports are type-aware:** numeric columns are written as numbers, and only free-text columns are escaped against formula injection.
 
 ## Repo layout
+The module structure and import rules are defined in [`docs/architecture.md`](docs/architecture.md) §2, which is authoritative. Top level:
 ```
-backend/coinacct/{config.py, rpc.py, app.py, chain/{node_checks.py, scans.py, cache.py, reorg.py},
-                  db/{models.py, migrations/}, discovery.py, tagging.py, doxx.py,
-                  prices/{bitstamp.py, fx.py}, tax/{engine.py, rules/, reports.py}, api/*.py}
-backend/tests/{unit/, regtest/}
-frontend/{src/{views/, graph/, api.ts}, vite.config.ts}
+backend/coinacct/{launcher.py, config.py, api/, services/, tax/, chain/, rpc.py, prices/, storage/}
+backend/tests/{unit/, integration/, e2e/}
+frontend/{src/{views/, graph/, api/client.ts}, vite.config.ts}
 docs/{THREAT_MODEL.md, ENGINEERING.md, architecture.md, DEPENDENCIES.md, adr/}
+scripts/, Makefile
 AGENTS.md (vendor-neutral agent instructions; points to the docs above as binding rules)
 CLAUDE.md (one line: `@AGENTS.md`, so Claude Code loads the same rules; no content of its own)
-pyproject.toml, uv.lock, pnpm-workspace.yaml/.npmrc (cooldown, no scripts), README.md
+pyproject.toml, uv.lock, package.json, pnpm-workspace.yaml, pnpm-lock.yaml, README.md
 ```
 
 ## Phase 0 — Gating documents (no application code until the human approves all four)
