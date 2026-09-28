@@ -257,6 +257,9 @@ class BootstrapApprovalTests(unittest.TestCase):
     def test_unmerged_changes_are_refused_unless_the_human_approves(self):
         (self.repo / "package.json").write_text('{"dependencies": {"left-pad": "1.3.0"}}\n')
         self.assertNotEqual(self.gate(), 0)
+        # Round 7: the refusal tells agents to stop, not only how the human overrides it.
+        r = subprocess.run(["make", "-s", "require-approved-deps"], cwd=self.repo, env=self.env, capture_output=True, text=True)
+        self.assertIn("AI agents: stop and ask the human", r.stderr)
         self.assertNotEqual(self.gate("DEPS_APPROVED=0"), 0)
         self.assertEqual(self.gate("DEPS_APPROVED=1"), 0)
 

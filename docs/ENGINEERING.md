@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.9 |
+| Version | 0.2.10 |
 | Last updated | 2026-09-28 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -110,7 +110,7 @@ The same process applies to a new direct dependency, and to a version bump of an
    - `make bootstrap` installs only dependency files that match it: the manifests and lockfiles, plus config that changes installs or runs code during them (`.pnpmfile.*`, `.npmrc`, `uv.toml`, `pnpm-workspace.yaml`, `.python-version`, `.node-version`). Untracked files count even if a gitignore would hide them.
    - `scripts/toolchain.py install` (behind `make toolchain`/`make test-tools`) refuses pins in `scripts/toolchain.lock` that aren't on `main`, including when run directly.
    - Step 2 (`make propose-*`) refuses unapproved install config, because resolving follows it too. It resolves with `--no-build`, and pnpm is set to `ignorePnpmfile`, so no package or hook code runs while resolving **(verify at setup)**.
-   - To use an approved change before it is merged, **the human** adds `DEPS_APPROVED=1` to the make command line. CI does the same, explicitly in its workflow file, so dependency PRs can be tested before approval on a throwaway machine (from M0.2; THREAT_MODEL §5.6.1, T-608). Agents never set it, and the agent guard blocks it.
+   - To use an approved change before it is merged, **the human** adds `DEPS_APPROVED=1` to the make command line. CI does the same, explicitly in its workflow file, so dependency PRs can be tested before approval on a throwaway machine (from M0.2; THREAT_MODEL §5.6.1, T-608). Agents never set it (AGENTS.md); the Claude Code guard blocks it, while other agents are bound by the AGENTS.md rule alone.
    - GNU make treats a variable in an inherited `MAKEFLAGS` as a command-line one, so **never put `DEPS_APPROVED` in `MAKEFLAGS`**, a shell profile or agent settings.
    - The gate checks the files on the current branch; it does not protect against a malicious branch. Don't run `make` targets on branches you don't trust.
 
@@ -372,3 +372,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.7 | PR #7 review round 5: the approval gate covers toolchain pins and install-affecting config and accepts only a command-line approval; Python is verified, bytecode included |
 | 2026-09-28 | 0.2.8 | CI passes `DEPS_APPROVED=1` explicitly so dependency PRs are tested before approval (user decision, #44; THREAT_MODEL §5.6.1) |
 | 2026-09-28 | 0.2.9 | PR #7 review round 6: approval checked against `refs/remotes/origin/main`, ignored files included; the toolchain installer checks its own pins; `propose-*` refuse unapproved install config, resolve with `--no-build` and `ignorePnpmfile`; the `MAKEFLAGS` and untrusted-branch limits stated |
+| 2026-09-28 | 0.2.10 | PR #7 review round 7: the `DEPS_APPROVED` rule is stated for all agents in AGENTS.md; only Claude Code has a technical block |

@@ -295,7 +295,8 @@ def require_approved_lock(root: Path = ROOT) -> None:
         raise ToolchainError(f"{APPROVED_REF} is unknown, so the pins' approval can't be checked; run 'git fetch origin'")
     if git("diff", "--quiet", APPROVED_REF, "--", rel) != 0:
         raise ToolchainError(f"{rel} differs from origin/main; pins are installed only after the human approves them "
-                             "(ENGINEERING §2.4). Human only: rerun with DEPS_APPROVED=1 on the make command line")
+                             "(ENGINEERING §2.4). AI agents: stop and ask the human (AGENTS.md). The human, after approving, "
+                             "may rerun with DEPS_APPROVED=1 on the make command line")
 
 
 def cmd_install(args: argparse.Namespace) -> int:

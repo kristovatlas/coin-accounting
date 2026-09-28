@@ -109,7 +109,7 @@ define approval_gate
 	@if [ "$(DEPS_OK)" = 1 ]; then exit 0; fi; \
 	git rev-parse -q --verify "$(APPROVED_REF)" >/dev/null || { echo "Refusing: $(APPROVED_REF) is unknown, so approval can't be checked. Run 'git fetch origin'." >&2; exit 1; }; \
 	if ! git diff --quiet "$(APPROVED_REF)" -- $(1) || [ -n "$$(git ls-files --others -- $(1))" ]; then \
-	  echo "Refusing: $(2) differ from origin/main, and changes are used only after the human approves them (ENGINEERING §2.4). Human only: rerun with DEPS_APPROVED=1 on the make command line" >&2; exit 1; \
+	  echo "Refusing: $(2) differ from origin/main, and changes are used only after the human approves them (ENGINEERING §2.4). AI agents: stop and ask the human (AGENTS.md). The human, after approving, may rerun with DEPS_APPROVED=1 on the make command line" >&2; exit 1; \
 	fi
 endef
 

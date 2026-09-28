@@ -439,7 +439,7 @@ class ToolchainTests(unittest.TestCase):
                 git("update-ref", "refs/remotes/origin/main", "HEAD")
                 toolchain.require_approved_lock(root)
                 lock.write_text('{"sfw": {}}\n')
-                with self.assertRaisesRegex(toolchain.ToolchainError, "differs from origin/main"):
+                with self.assertRaisesRegex(toolchain.ToolchainError, "differs from origin/main.*AI agents: stop"):
                     toolchain.require_approved_lock(root)
                 with mock.patch.object(toolchain, "install_tool") as install:
                     self.assertEqual(toolchain.main(["install"]), 1)
