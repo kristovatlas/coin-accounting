@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.3 (design stage — no code yet) |
+| Version | 0.4.2 (design stage — no code yet) |
 | Last updated | 2026-09-27 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -29,7 +29,7 @@ A threat may only move to **Verified** when a test exists that fails if the miti
 The app is a single-user tool running on the user's own machine (Linux or macOS). Its parts:
 - **Backend:** a FastAPI process bound to `127.0.0.1`.
 - **UI:** a React + Cytoscape.js single-page app served by the backend and opened in the user's browser.
-- **Chain data:** comes only from the user's Bitcoin Core node over **loopback** JSON-RPC, as a dedicated, server-side-whitelisted RPC user, plus a local full-chain index built by the app.
+- **Chain data:** comes only from the user's Bitcoin Core node over **loopback** JSON-RPC, as a dedicated, server-side-whitelisted RPC user. The app keeps **no chain index of its own**: Core's `txindex` and `blockfilterindex` (via `scanblocks`) answer chain queries, and the answers are cached in the user DB.
 - **Sensitive user data:** stored in a SQLite database kept on a VeraCrypt volume.
 - **Outbound internet:** the only allowed flow is a bulk, date-independent download of historical fiat prices, optionally via Tor/SOCKS5.
 
@@ -46,7 +46,7 @@ flowchart LR
     FILES[/"TB6 · Imported files<br/>(address lists, descriptors)"/]
     subgraph APP["Backend process"]
       API["FastAPI :127.0.0.1"]
-      IDX["Indexer"]
+      SCAN["Scan jobs / chain cache"]
       TAX["Lot / tax / doxx engines"]
       PRC["Price fetcher"]
     end
@@ -54,13 +54,10 @@ flowchart LR
       UDB[("User DB (SQLite)<br/>tags, lots, events, prices")]
       LOGS[("Logs, exports, app config<br/>(incl. RPC credentials)")]
     end
-    subgraph TB4P["TB4 · Plain disk (public data only)"]
-      CIDX[("Chain index")]
-    end
-    NODE["Bitcoin Core<br/>(unpruned; rpcwhitelist)"]
+    NODE["Bitcoin Core<br/>(unpruned; txindex + blockfilterindex<br/>+ txospenderindex; rpcwhitelist)"]
   end
   NET(("Internet<br/>price source"))
-  SUPPLY(("TB5 · npm / PyPI / crates / GitHub<br/>AI coding agents<br/>(build/dev time)"))
+  SUPPLY(("TB5 · npm / PyPI / GitHub<br/>AI coding agents<br/>(build/dev time)"))
 
   UI -- "TB1: HTTP loopback + session cookie + CSRF header" --> API
   OtherTabs -. "blocked: Host check, CSRF, no CORS" .-> API
@@ -68,10 +65,10 @@ flowchart LR
   API --> TAX
   TAX --> UDB
   API --> LOGS
-  IDX -- "TB2: JSON-RPC (rpcauth, loopback)" --> NODE
+  SCAN -- "TB2: JSON-RPC scanblocks / getdescriptoractivity /<br/>gettxspendingprevout / getrawtransaction (rpcauth, loopback)" --> NODE
   API -- "TB2: JSON-RPC (whitelisted methods)" --> NODE
-  IDX --> CIDX
-  API --> CIDX
+  API --> SCAN
+  SCAN --> UDB
   PRC -- "TB3: HTTPS, optional SOCKS5/Tor<br/>bulk, date-independent request" --> NET
   PRC --> UDB
   SUPPLY -. "TB5: dependencies, CI, agents" .-> APP
@@ -83,7 +80,7 @@ flowchart LR
 | TB1 | Browser ↔ backend | Our SPA, and any other web origin the browser loads, ↔ the loopback API |
 | TB2 | Backend ↔ Bitcoin Core | Our process ↔ node JSON-RPC (loopback only) |
 | TB3 | Backend ↔ Internet | Price fetcher ↔ external price/FX source (the **only** runtime outbound flow) |
-| TB4 | Process ↔ disk | Encrypted volume (sensitive) vs plain disk (public chain data only) |
+| TB4 | Process ↔ disk | Encrypted volume (**everything the app writes**) vs plain disk (nothing the app writes; only OS or browser spill, see §5.4) |
 | TB5 | Build/dev supply chain | Third-party packages, build tools, CI, AI coding agents ↔ our code and dev environment |
 | TB6 | User-supplied files | Imported address lists / descriptors / CSVs ↔ parser |
 
@@ -96,11 +93,11 @@ flowchart LR
 | A1 | **Ownership map**: owned addresses/descriptors, address↔tax-account and ↔wallet-client mapping, entity tags (self, exchanges, employer, …) | **Critical** (full deanonymization of the user's holdings and counterparties) | User DB (TB4V) |
 | A2 | **Doxx map**: which coins are linked to which identity-knowing entity | Critical | User DB |
 | A3 | **Tax records**: lots, basis, identifications, disposals, income, exchange accounts | Critical (financial + identity) | User DB, exports |
-| A4 | **Derived tx/UTXO cache** for the user's coins | Critical (equivalent to A1) | User DB |
+| A4 | **Chain-data cache**: decoded txs, UTXOs, script histories and spender lookups for the scripts the user cares about | Critical (equivalent to A1) | User DB |
 | A5 | **Report exports** (8949 CSV, income, summaries, audit trail) | Critical | Export dir (TB4V) |
 | A6 | **Logs** | High if they contain A1–A4 values | TB4V |
 | A7 | **Node RPC credentials** (dedicated `rpcauth` user) | Medium: the account is whitelisted to read-only methods, but it still grants query access | App config on TB4V; app memory |
-| A8 | **Chain index** | Public data. **Integrity-sensitive** (missing or altered entries corrupt A2/A3); confidentiality matters only if it reveals which scripts the user queried | Plain disk (TB4P) |
+| A8 | ~~Chain index~~ | *Removed in v0.4:* there is no app-side chain index. Cached chain data (decoded txs, script histories, spenders) reveals which scripts the user cares about, so it is part of **A4** | — |
 | A9 | **Price history cache** | Public data; integrity-sensitive | User DB |
 | A10 | **Correctness of tax output** | High: wrong figures mean legal/financial harm | Engines, rule sets, tests |
 | A11 | **Fact of usage**: that this IP / person runs a BTC accounting tool | Medium | Network metadata |
@@ -126,7 +123,7 @@ flowchart LR
 | AD4 | **Network observer** (ISP, Wi-Fi, state, price-source operator) | Sees outbound connections, DNS, TLS metadata, request timing | Yes |
 | AD5 | **Compromised/malicious price source** or MITM | Serves wrong prices | Yes |
 | AD6 | **Supply-chain attacker** (typosquat, hijacked maintainer, malicious GitHub Action, tampered release/`bitcoind` download) | Code execution at install/build/runtime | Yes |
-| AD7 | **Adversarial on-chain data** (crafted tx/script/OP_RETURN content by any payer) | Controls bytes that our parser and UI render | Yes |
+| AD7 | **Adversarial on-chain data** (crafted tx/script/OP_RETURN content by any payer) | Controls bytes that Core decodes and our result processing and UI handle | Yes |
 | AD8 | **Chain-analysis firm / exchange / identity-knowing counterparty** correlating the user's coins | Public blockchain + KYC or other identity data | Yes (as a *privacy* adversary the doxx model informs against) |
 | AD9 | **The user themself** (mistakes, mis-tagging, wrong paths, accidental export, late identification) | Legitimate access | Yes (safety rails) |
 | AD12 | **Cloud-backed AI coding agent** used during development | Reads files and terminal output on the dev machine and sends them to a remote model provider | Yes (as a dev-process exfiltration path) |
@@ -160,15 +157,16 @@ Columns: **ID** · **STRIDE/P** (S spoofing, T tampering, R repudiation, I info 
 |---|---|---|---|---|---|
 | T-201 | I | **RPC credential leakage** (A7) through logs, the DB, error pages or exports | A dedicated `rpcauth` user whose password is stored only in the app config on the volume; never logged or echoed; the redaction filter covers auth headers. The app does **not** read Core's cookie file, which is unrestricted | Planned | |
 | T-202 | I, P | **Queries sent to a non-local node**: RPC has no TLS, so credentials and every lookup (A1) would cross the network in plaintext | **Loopback only; non-loopback RPC endpoints are refused, with no override.** For a node elsewhere, the docs cover an SSH tunnel (`ssh -L`) that terminates on loopback | Planned | |
-| T-203 | E, T | **App (or code inside it) misuses the node**: wallet, broadcast or other state-changing RPCs (e.g. `sendrawtransaction`, or `importdescriptors` storing the user's addresses in a node wallet **outside** the volume) | **Server-side `rpcwhitelist`** for the app's rpcauth user, limited to read-only methods: `getblockchaininfo`, `getnetworkinfo`, `getindexinfo`, `getblockcount`, `getbestblockhash`, `getblockhash`, `getblockheader`, `getblock`, `getrawtransaction`, `getchaintips`, `deriveaddresses`, `getdescriptorinfo`. A client-side allowlist adds defence in depth. **Canary at startup:** the app calls a harmless method that is *not* whitelisted (`uptime`) and refuses to run if it succeeds. REST (`rest=1`) is never used, and the docs recommend leaving it off | Planned | |
+| T-203 | E, T | **App (or code inside it) misuses the node**: wallet, broadcast or other state-changing RPCs (e.g. `sendrawtransaction`, or `importdescriptors` storing the user's addresses in a node wallet **outside** the volume) | **Server-side `rpcwhitelist`** for the app's rpcauth user, limited to read-only methods: `getblockchaininfo`, `getnetworkinfo`, `getindexinfo`, `getblockcount`, `getbestblockhash`, `getblockhash`, `getblockheader`, `getblock`, `getrawtransaction`, `gettxout`, `gettxspendingprevout`, `scanblocks`, `getdescriptoractivity`, `getchaintips`, `deriveaddresses`, `getdescriptorinfo`. A client-side allowlist adds defence in depth. **Canary at startup:** the app calls a harmless method that is *not* whitelisted (`uptime`) and refuses to run if it succeeds. REST (`rest=1`) is never used, and the docs recommend leaving it off | Planned | |
 | T-204 | P | **Node logs reveal lookup activity** | With `debug=rpc`, Core logs method names and users but not parameters. The docs recommend not running with `debug=rpc`/`debug=http` | Documented † | |
-| T-205 | D, T | **Malformed or adversarial block/tx data (AD7)** crashes the parser, exhausts memory, or corrupts the index | Bounds-checked parser with size/count limits; varint overflow checks; fuzz tests (Hypothesis/Atheris) on the tx/block parser; the indexer fails closed (no partial writes) | Planned | |
-| T-206 | T | **Wrong network**: a testnet/signet/regtest node is used against a mainnet DB, or the reverse | Store `chain` in the user DB and index metadata; refuse to start on mismatch | Planned | |
-| T-207 | T | **Reorg leaves the index stale or wrong**, including forks deeper than the undo window | Tip-hash check each sync. The undo log stores the exact keys written for each of the last 100 blocks. A fork deeper than that **fails closed** and prompts a rebuild from a checkpoint or a full rebuild. Tax events only become final after a configurable number of confirmations (default 6) | Planned | |
-| T-208 | T | **Index prefix collisions** give wrong address history or spender; BIP30 duplicate txids | Short-prefix keys are dup-sorted and never overwrite. Every candidate is resolved via stored height → `getblock` → full txid match before use. Explicit BIP30 handling. Tests with forced collisions | Planned | |
-| T-209 | I, P | **Chain index reveals the user's interests (A8)**: e.g. if it were built only for the user's scripts, or kept a read cache or access log | The index is built **uniformly** for the whole chain with no user-specific keys; nothing about queries is written to TB4P. Any per-user cache lives in the user DB. A test checks that queries never write to the index | Planned | |
-| T-210 | D, T | **Pruned node or missing blocks** make the index incomplete, silently omitting history | Refuse to run unless `getblockchaininfo.pruned == false`; a `getblock` failure during sync is a hard error, never a skip | Planned | |
-| T-211 | T | **Chain index tampered with or truncated on plain disk** (AD2/AD3): entries deleted or altered, so history and spends go missing and doxx/lot results are wrong | Index directory mode 0700; per-batch metadata (height range, entry counts, checksum); periodic spot-checks that re-derive sampled blocks from the node; a user-triggered "verify/rebuild index" action. Wrong entries are caught by T-208 verification | Planned | |
+| T-205 | D, T | **Adversarial or oversized chain data (AD7)**: huge blocks/txs or **very busy scripts** (e.g. a tagged exchange hot wallet with 100k+ blocks of activity) exhaust memory, time or disk; unusual scripts break processing; crafted text reaches the UI (T-104) | No custom binary parser: Core decodes. Response size limits and streaming JSON decoding; `getdescriptoractivity` calls capped at a few hundred blocks; a per-script activity budget (candidate count from `scanblocks` first; above a threshold, warn and ask); clustering never auto-expands busy scripts; property/fuzz tests on result processing; fails closed (no partial cache writes) | Planned | |
+| T-206 | T | **Wrong network**: a testnet/signet/regtest node is used against a mainnet DB, or the reverse | Store `chain` in the user DB; refuse to start on mismatch | Planned | |
+| T-207 | T | **Reorgs or new blocks leave cached chain data stale or incomplete**: rows from orphaned blocks, **"nothing found" results and scanned ranges** that no longer reflect the active chain, reorgs that happened while the app was closed, stale mempool results | Every block-backed row stores its block hash and height; each script's coverage stores its range and stop-block hash; negative answers are **snapshots** tagged with the tip hash. A persisted last-seen tip: on startup and every tip change, find the fork point (walk `getblockheader` while `confirmations == -1`), invalidate every row, coverage range and snapshot above it **at any depth**, then extend coverage to the new tip. Mempool results are kept separately and rebuilt on every refresh. Tax events become final only after a configurable number of confirmations (default 6) | Planned | |
+| T-208 | T | ~~Index prefix collisions~~ → **BIP30 duplicate txids** | Prefix collisions are *N/A since v0.4* (no app-side index). **BIP30:** Core's `txindex` keeps only the later of each duplicate coinbase txid, so the app keys cached txs by (txid, block hash) and always fetches with the block hash from the activity event. Duplicate outpoints are resolved chronologically. The earlier outputs are unspendable | Planned | |
+| T-209 | I, P | **Queries leave traces outside the volume**: the node or the app records which scripts or txs the user looked up, or that the tool is in use | App side: all cached chain data lives in the user DB on the volume. Node side: no node wallet is used, and Core doesn't persist RPC parameters or scan descriptors. `debug=rpc` would log method, user and request `id`, so the app uses counter `id`s. **Known trace:** the startup canary's refused call writes an unconditional warning to `debug.log` naming the RPC user. The docs recommend a generic username (fact-of-usage leak, A11). **M0 check:** after a regtest run, search the node's datadir for the scanned descriptors and txids; the only expected hit is that canary line | Planned | |
+| T-210 | D, T | **Incomplete chain data**: a pruned node, a missing or lagging index, or **`scanblocks` silently skipping filter ranges it can't read**. Core returns `completed: true` and `to_height == stop` anyway, so neither signals the gap | Startup: unpruned; `txindex`, `blockfilterindex`, `txospenderindex` each `synced` with `best_block_height == getblockcount()`. **Scan protocol** (PLAN §1): stop height ≤ the filter index height and ≤ tip − 100; bounded ranges; after each range, the index height and `getblockhash(stop)` are re-checked, else discard and retry; the newest ~100 blocks are only ever read via `getdescriptoractivity`, which errors rather than skips; "Block is not in main chain" triggers a rescan; any other failure is a hard error. Forward expansion uses `txospenderindex` (no filters, waits for index sync, errors loudly). **Residual:** read errors or corruption inside the node's filter index are still skipped silently. Covered by trusting the node's indexes (§8); reported upstream | Planned | |
+| T-211 | T | ~~Chain index tampered with on plain disk~~ | *N/A since v0.4:* the app writes nothing to plain disk. The node's indexes are trusted (§8). The chain cache on the volume is recomputable and is kept consistent by T-207/T-210 | N/A | |
+| T-212 | D | **Long-running or orphaned scans**: Core runs one `scanblocks` at a time **for all RPC users**, a scan keeps running after a client disconnect or crash, and `status`/`abort` can't tell whose scan it is | Scans are queued background jobs over bounded ranges, with `status`/`abort` on a second connection. "Scan already in progress" means *queue busy* and is retried with backoff. At startup and after any client error, the app checks `status` and aborts a scan it left running. Client timeouts are long but finite. Forward expansion doesn't use scans at all (`txospenderindex`) | Planned | |
 
 ### 5.3 TB3 — Backend ↔ Internet (price data)
 
@@ -215,8 +213,8 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 
 | ID | STRIDE/P | Threat | Mitigation | Status | Evidence |
 |---|---|---|---|---|---|
-| T-601 | E, I | **Malicious or compromised package** (npm/PyPI/crates typosquat, hijacked maintainer, freshly published malicious version). Because in-process egress is accepted (R-4), **this is the primary exfiltration path** | 7-day minimum release age (pnpm `minimumReleaseAge`, uv `exclude-newer`, cargo equivalent); Socket.dev scan **before** install/execution; lockfiles with integrity hashes; frozen installs in CI; minimal dependency policy with a justification in `docs/DEPENDENCIES.md` (details in `docs/ENGINEERING.md`) | Planned | |
-| T-602 | E | **Install-time code execution** (postinstall / build scripts / `build.rs`) | pnpm lifecycle scripts disabled (empty `onlyBuiltDependencies`); Python wheels preferred, sdists reviewed by hand; crates with build scripts reviewed via `cargo-vet` | Planned | |
+| T-601 | E, I | **Malicious or compromised package** (npm/PyPI typosquat, hijacked maintainer, freshly published malicious version). Because in-process egress is accepted (R-4), **this is the primary exfiltration path** | 7-day minimum release age (pnpm `minimumReleaseAge`, uv `exclude-newer`); Socket.dev scan **before** install/execution; lockfiles with integrity hashes; frozen installs in CI; minimal dependency policy with a justification in `docs/DEPENDENCIES.md` (details in `docs/ENGINEERING.md`) | Planned | |
+| T-602 | E | **Install-time code execution** (postinstall / build scripts) | pnpm lifecycle scripts disabled (empty `onlyBuiltDependencies`, `strictDepBuilds`); Python wheels only (uv `no-build`), with exceptions reviewed by hand | Planned | |
 | T-603 | E, T | **Compromised CI, GitHub Actions or test tooling downloads** | Actions pinned by full commit SHA; `permissions: contents: read` by default; no secrets required; branch protection on `main`. The regtest `bitcoind` is verified against SHA256SUMS and builder signatures; Playwright browser versions are pinned | Planned | |
 | T-604 | I | **Runtime dependency adds network access** (telemetry, update checks) | The socket guard in tests (T-305); dependency review checks for network capability | Planned | |
 | T-605 | T | **AI coding agent introduces insecure code, weak tests, or unvetted dependencies** | `AGENTS.md` binds agents to this document and `ENGINEERING.md`; human review of every PR; test-slop audits; an agent may not add a dependency without the vetting steps | Planned † | |
@@ -229,6 +227,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 |---|---|---|---|---|---|
 | T-701 | D, T | **Malformed or huge import files** (address lists, descriptors, future exchange CSVs) | Size/row limits; strict address validation (checksum, network); descriptors validated via `getdescriptorinfo` with a gap-limit cap; reject rather than guess; the import preview must be confirmed | Planned | |
 | T-702 | T | **CSV/formula injection in exports**: a label or chain-derived text starting with `= + - @` executes when the file is opened in a spreadsheet | Type-aware export: numeric columns are written as numbers, so negative gains stay intact; free-text columns (labels, descriptions, notes) have leading `= + - @`, tab and CR neutralised; unit test | Planned | |
+| T-703 | I | **Private keys in imported descriptors**: an xprv/WIF descriptor would be sent to the node over RPC (`scanblocks`, `getdescriptoractivity` and `deriveaddresses` all accept private material), could reach logs or error paths, and would be stored in the DB | Import rejects any descriptor or key containing private material, before it is stored, sent or logged, and tells the user how to export the public form. The redaction filter also masks xprv/WIF patterns. Unit and E2E tests cover it | Planned | |
 
 ---
 
@@ -244,14 +243,14 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 
 **Any other runtime flow is a bug.** New flows need an ADR and an update to this table.
 
-**Build/dev time only** (never at runtime): package registries (npm, PyPI, crates.io), Socket.dev, GitHub/CI, the `bitcoind` release download for regtest, and Playwright browser downloads. Each is covered by §5.6.
+**Build/dev time only** (never at runtime): package registries (npm, PyPI), Socket.dev, GitHub/CI, the `bitcoind` release download for regtest, and Playwright browser downloads. Each is covered by §5.6.
 
 ## 7. Verification plan (how threats become *Verified*)
 
 - **Network (T-106, T-301, T-305, T-604):** the socket guard runs across the whole test suite. The E2E run performs the whole flow against regtest, from descriptor import through the 8949 export, and asserts that no unexpected connections or DNS lookups happened. A bundle scan checks for external URLs. A test checks that price requests are the same regardless of the user DB.
 - **HTTP hardening (T-101–T-110):** integration tests send a forged Host, a missing or wrong CSRF token, a cross-origin request, and a reused launch token, and check the CSP, cache and referrer headers.
-- **Node (T-202, T-203, T-206, T-210):** the regtest node is configured with and without `rpcwhitelist`; a non-loopback endpoint is refused; a pruned regtest node is refused; a wrong-chain DB is refused.
-- **Index (T-205, T-207, T-208, T-211):** parser fuzzing (time-boxed in CI, longer on a schedule); forced prefix collisions and BIP30 cases; shallow and deep reorgs on regtest; the tamper-detection spot-check.
+- **Node (T-202, T-203, T-206):** the regtest node is configured with and without `rpcwhitelist`; a non-loopback endpoint is refused; a pruned regtest node is refused; a wrong-chain DB is refused.
+- **Chain access (T-205, T-207, T-209, T-210, T-212):** property/fuzz tests on scan-result processing; a regtest reorg (`invalidateblock` in the test harness) invalidates the affected cache rows; the node is refused when an index is missing, still syncing, or pruned; scans are aborted and cover the full range; the node-datadir trace check.
 - **Storage (T-401–T-408):**
   - the DB is refused on a non-encrypted path, on Linux and macOS
   - side files and temp files are asserted to live on the volume path
@@ -273,7 +272,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 
 - **In scope for protection, but not app-enforced:** VeraCrypt is correctly configured by the user (strong passphrase, volume dismounted when not in use).
 - **Trusted:**
-  - the user's Bitcoin Core node, for consensus-valid chain data
+  - the user's Bitcoin Core node, for consensus-valid chain data, **and its indexes** (`txindex`, `blockfilterindex`, `txospenderindex`). These are not consensus-validated. Filter-index corruption would show up as silently skipped ranges (T-210 residual)
   - the OS, kernel, browser engine and hardware (AD10)
 - **Out of scope:**
   - malware running as the same OS user, or root, while the volume is mounted (it can read everything the app can)
@@ -296,7 +295,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 1. ~~Non-Linux VeraCrypt detection (macOS/Windows) for T-401: do we support these platforms in v1?~~ **Resolved (2026-09-27):** v1 supports Linux and macOS; Windows is not planned. The macOS detection method is designed in M0 (T-401).
 2. ~~**In-app "lock"** so the volume can be dismounted cleanly without killing the app.~~ **Resolved (2026-09-27): deferred to a future version.** For v1 the documented workflow is to quit the app and close its browser window, then dismount (T-405). The backend should still treat "no DB open" as a clean state where cheap, so a lock is easy to add later.
 3. ~~Should a second price source be added for cross-checking (T-303)?~~ **Resolved (2026-09-27): deferred to a future version.** v1 relies on TLS, sanity checks, content hashes and user overrides (T-303). A second source would add one more outbound flow (§6), so it needs an ADR.
-4. **Minimum Bitcoin Core version** (T-203, PLAN §1): decided in the M0 ADR.
+4. ~~**Minimum Bitcoin Core version**~~ **Resolved (2026-09-27): ≥ 31.0**, for `txospenderindex` (raised from 29.0 after the PR #4 reviews). The user accepts any minimum.
 
 ## 11. Changelog
 
@@ -307,3 +306,6 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 | 2026-09-27 | 0.3 | Incorporates the Fable 5.1 + Codex (gpt-5.6-sol) reviews and the user's decisions: loopback-only node with rpcauth + `rpcwhitelist` canary (T-201–T-203); pruned-node, deep-reorg and index-integrity threats (T-207, T-210, T-211); one-time fragment launch token, CSRF header as the primary control, stricter CSP, browser profile on volume, clipboard (T-101–T-110); per-platform VeraCrypt detection (T-401); tax correctness brought into scope with new threats T-508–T-511; AI-agent data exfiltration (T-607, AD12); type-aware CSV escaping (T-702); in-process egress accepted (R-4); new `Documented` status; Linux + macOS scope |
 | 2026-09-27 | 0.3.1 | In-app lock deferred to a future version; v1 dismount workflow documented (T-405, §10) |
 | 2026-09-27 | 0.3.2 | Second price source for cross-checking deferred to a future version (T-303, §10) |
+| 2026-09-27 | 0.4 | No app-side chain index: chain data comes from Core's `txindex` + `blockfilterindex` via `scanblocks` and is cached in the user DB. Nothing the app writes lives on plain disk. A8, T-208, T-211 retired; T-205, T-207, T-209, T-210 rewritten; T-212 added (long scans); whitelist adds `gettxout`, `scanblocks`; Rust/crates removed from supply chain |
+| 2026-09-27 | 0.4.1 | After source-level research on BIP158 and Core's `scanblocks`: silent-skip guard added to T-210; whitelist adds `getdescriptoractivity`, `gettxspendingprevout`; minimum Core version ≥ 29.0 agreed (§10.4) |
+| 2026-09-27 | 0.4.2 | PR #4 review fixes (Opus 5.5, Codex): the `scanblocks` silent-skip guard is replaced by a scan protocol (the `to_height` postcheck was ineffective); Core ≥ 31.0 with `txospenderindex` for spender lookups; fork-point reorg handling covers negative results and coverage (T-207); BIP30 keyed by block (T-208); canary `debug.log` trace (T-209); busy-script budgets (T-205); orphaned scans (T-212); private keys in descriptors (new T-703); node indexes named as trusted (§8) |
