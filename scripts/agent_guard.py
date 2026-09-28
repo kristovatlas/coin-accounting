@@ -47,7 +47,9 @@ MAKE_VARS = {"PKG", "DEV", "BASE", "WORKSPACE"}
 _SAFE_VALUE = re.compile(r"^[A-Za-z0-9@._/+=:-]*$")
 # Variables that change what make runs or which interpreter verifies the toolchain.
 DANGEROUS_VARS = {"MAKEFILES", "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "PATH", "SYS_PYTHON", "SFW", "TOOLBIN",
-                  "PNPM", "UV", "SHELL", "BASH_ENV", "ENV"}
+                  "PNPM", "UV", "SHELL", "BASH_ENV", "ENV",
+                  # Only the human installs dependency changes that aren't merged yet (ENGINEERING §2.4).
+                  "DEPS_APPROVED"}
 
 
 def _project_dir() -> str:

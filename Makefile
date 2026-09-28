@@ -38,6 +38,7 @@ export PKG
 export DEV
 export WORKSPACE
 export BASE
+export DEPS_APPROVED
 # A package spec must be name@version (JS) or name==version (Python), nothing else.
 PKG_RE := ^(@[a-z0-9._-]+/)?[A-Za-z0-9._-]+(@|==)[A-Za-z0-9.+_-]+$$
 
@@ -59,7 +60,7 @@ test-tools: ## Install the pinned bitcoind for regtest tests (hash-verified)
 # A missing link must not fall back to a host pnpm/uv on PATH (PR #7 review).
 .PHONY: require-toolchain
 require-toolchain:
-	@"$(SYS_PYTHON)" scripts/toolchain.py verify sfw pnpm uv >/dev/null || { echo "Refusing to continue: the pinned Socket Firewall and package managers must be installed and unmodified (no fallback). Run 'make toolchain'." >&2; exit 1; }
+	@"$(SYS_PYTHON)" scripts/toolchain.py verify sfw pnpm uv node >/dev/null || { echo "Refusing to continue: the pinned Socket Firewall and package managers must be installed and unmodified (no fallback). Run 'make toolchain'." >&2; exit 1; }
 
 .PHONY: require-pkg
 require-pkg:
@@ -72,16 +73,30 @@ propose-js: require-pkg require-toolchain ## Resolve a JS dependency into the lo
 	@case "$$WORKSPACE" in frontend|e2e) ;; *) echo "WORKSPACE must be frontend or e2e" >&2; exit 1;; esac
 	"$(SFW)" "$(PNPM)" add --lockfile-only $${DEV:+--save-dev} --filter "./$$WORKSPACE" "$$PKG"
 	@git --no-pager diff --stat -- package.json '*/package.json' pnpm-lock.yaml
-	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry, human approval, then 'make bootstrap'."
+	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry and human approval. Only the human installs unmerged changes ('make bootstrap DEPS_APPROVED=1')."
 
 .PHONY: propose-py
 propose-py: require-pkg require-toolchain ## Resolve a Python dependency into uv.lock only. Usage: make propose-py PKG=name==version [DEV=1]
 	"$(SFW)" "$(UV)" add --no-sync $${DEV:+--dev} "$$PKG"
 	@git --no-pager diff --stat -- pyproject.toml uv.lock
-	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry, human approval, then 'make bootstrap'."
+	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry and human approval. Only the human installs unmerged changes ('make bootstrap DEPS_APPROVED=1')."
+
+# Dependency changes that haven't reached origin/main (i.e. aren't merged by the human) are
+# unapproved, and `bootstrap` refuses to install them (ENGINEERING §2.4). After approving,
+# the human runs `make bootstrap DEPS_APPROVED=1`; the agent guard blocks that variable
+# (PR #7 review, round 4).
+DEP_FILES := package.json '*/package.json' pnpm-workspace.yaml pnpm-lock.yaml pyproject.toml uv.lock
+
+.PHONY: require-approved-deps
+require-approved-deps:
+	@if [ "$${DEPS_APPROVED:-}" = 1 ]; then exit 0; fi; \
+	git rev-parse -q --verify origin/main >/dev/null || { echo "Refusing to install: origin/main is unknown, so the approved dependencies can't be checked. Run 'git fetch origin'." >&2; exit 1; }; \
+	if ! git diff --quiet origin/main -- $(DEP_FILES) || [ -n "$$(git ls-files --others --exclude-standard -- $(DEP_FILES))" ]; then \
+	  echo "Refusing to install: the dependency manifests or lockfiles differ from origin/main, and changes are installed only after the human approves them (ENGINEERING §2.4). Human only: make bootstrap DEPS_APPROVED=1" >&2; exit 1; \
+	fi
 
 .PHONY: bootstrap
-bootstrap: require-toolchain ## Install exactly what the lockfiles say, through sfw
+bootstrap: require-approved-deps require-toolchain ## Install exactly what the lockfiles on origin/main say, through sfw
 	@if [ -f uv.lock ]; then "$(SFW)" "$(UV)" sync --locked; else echo "no uv.lock yet (no Python dependencies approved)"; fi
 	@if [ -f pnpm-lock.yaml ]; then "$(SFW)" "$(PNPM)" install --frozen-lockfile; else echo "no pnpm-lock.yaml yet (no JS dependencies approved)"; fi
 

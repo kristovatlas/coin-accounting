@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.5 |
-| Last updated | 2026-09-27 |
+| Version | 0.2.6 |
+| Last updated | 2026-09-28 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -75,7 +75,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   Contributors, AI agents and CI all use these targets. CI jobs call `make toolchain` and `make bootstrap`, never raw installers.
 - **No silent fallback:** if `sfw` is missing, not the pinned version, or fails to start, the scripts **stop with an error**. They never drop through to an unwrapped install. Whether `sfw` fails open when the Socket API is unreachable must be tested at setup. If it does, the wrapper detects that and stops **(verify at setup)**.
 - **Fetch-and-run commands are banned:** `npx`, `pnpm dlx`, `pnpm exec` of packages not in the lockfile, `uvx`/`uv tool run`, `pip install`, `curl … | sh`, the `pre-commit` framework (it clones and builds hook environments). The same applies to IDE and agent configuration, e.g. `.mcp.json` servers started with `npx -y`. Tools we need become locked dev dependencies. Git hooks, if any, are `repo`-local scripts that call locked tools.
-- **Verifying before use:** every install target first runs `toolchain.py verify sfw pnpm uv`, with a host interpreter the caller can't override, and then calls the tools by absolute path. A missing or modified binary stops the command; there's no fallback to a host `pnpm`/`uv`.
+- **Verifying before use:** every install target first runs `toolchain.py verify sfw pnpm uv node`, with a host interpreter the caller can't override, and then calls the tools by absolute path. Verification covers **every file** of each install (a digest recorded at install time), not just the entry point, so pnpm's JavaScript and the Node that runs it are checked too. A missing, modified or moved install stops the command; there's no fallback to a host `pnpm`/`uv`.
 - **Host requirement:** `python3` 3.9 or newer to run the repository scripts; the lock is JSON so no `tomllib` is needed.
 - **Bootstrapping `sfw` itself:** `make toolchain` (`scripts/toolchain.py`) downloads the pinned sfw-free release binary and checks it against the SHA-256 in `scripts/toolchain.lock`. **Socket publishes no checksums or signatures for sfw-free**, so that committed hash is trust-on-first-use. It is recorded when the version is first adopted, and changes only through `make update-sfw` in a reviewed PR. macOS binaries are unsigned. CI uses the same script, not `socketdev/action`, which installs the latest version.
 - **What `sfw` does and doesn't do:**
@@ -106,7 +106,7 @@ The same process applies to a new direct dependency, and to a version bump of an
 4. **Check its health:** maintainers, release history, open advisories, download base, licence, transitive dependency count.
 5. **Record it** in [`DEPENDENCIES.md`](DEPENDENCIES.md).
 6. **Human approval.** The human explicitly approves the dependency in the PR. AI agents may propose dependencies, never approve them.
-7. **Only then install**, with `make bootstrap`.
+7. **Only then install.** `make bootstrap` installs only the manifests and lockfiles on `origin/main`, i.e. what the human merged, and refuses anything else. To install an approved change before it is merged, **the human** runs `make bootstrap DEPS_APPROVED=1`; agents never set that variable, and the agent guard blocks it.
 
 **Transitive dependencies** don't each need steps 1, 4 and 5. They are covered by:
 - the Socket diff on the PR
@@ -362,3 +362,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.3 | `/` is banned outright in `tax/` (#10); enforced by `scripts/check_architecture.py` |
 | 2026-09-28 | 0.2.4 | PR #7 review round 2: verify sfw, pnpm and uv before every install; non-overridable verifier interpreter; `WORKSPACE` for `propose-js`; host Python 3.9+; Linux ARM64 |
 | 2026-09-28 | 0.2.5 | Install-command guard scope: hygiene against accidental installs (ADR 0022) |
+| 2026-09-28 | 0.2.6 | PR #7 review round 4: `bootstrap` installs only merged dependency changes unless the human sets `DEPS_APPROVED=1`; toolchain verification covers every installed file and Node |

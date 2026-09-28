@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import platform
+import shlex
 import shutil
 import sys
 import tarfile
@@ -139,11 +140,11 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
         raise ToolchainError(f"{name}: no artifact pinned for {key}")
     tool_dir = TOOLCHAIN / name / spec["version"]
     cached = read_marker(tool_dir)
-    if cached and cached["artifact"] == artifact_id(entry) and not force:
+    if cached and marker_current(cached, entry) and not force:
         binary = tool_dir / cached["bin"]
-        if binary.is_file() and sha256_file(binary) == cached["bin_sha256"]:
+        if binary.is_file() and tree_digest(tool_dir) == cached["tree_sha256"]:
             return binary
-        # Missing or modified since install: reinstall from the pinned artifact.
+        # Missing, modified or moved since install: reinstall from the pinned artifact.
 
     with tempfile.TemporaryDirectory(dir=TOOLCHAIN) as tmp:
         tmpdir = Path(tmp)
@@ -180,11 +181,16 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
             # A JavaScript package: run its entry point with the pinned Node. Its npm
             # lifecycle scripts are never run (ENGINEERING §2.1).
             wrapper = tool_dir / "run"
-            wrapper.write_text(f'#!/bin/sh\nexec "{BIN / "node"}" "{tool_dir / rel_bin}" "$@"\n')
+            node, script = shlex.quote(str(BIN / "node")), shlex.quote(str(tool_dir / rel_bin))
+            wrapper.write_text(f'#!/bin/sh\nexec {node} {script} "$@"\n')
             wrapper.chmod(0o755)
             rel_bin = "run"
+        # The digest covers every installed file, not just the entry point: pnpm's JavaScript,
+        # Node's libraries (PR #7 review, round 4). The root catches a moved checkout, whose
+        # wrapper would still point at the old tree.
         (tool_dir / MARKER).write_text(json.dumps(
-            {"artifact": artifact_id(entry), "bin": rel_bin, "bin_sha256": sha256_file(tool_dir / rel_bin)}) + "\n")
+            {"artifact": artifact_id(entry), "bin": rel_bin, "root": str(TOOLCHAIN),
+             "tree_sha256": tree_digest(tool_dir)}) + "\n")
         return tool_dir / rel_bin
 
 
@@ -193,34 +199,71 @@ def read_marker(tool_dir: Path) -> dict | None:
         data = json.loads((tool_dir / MARKER).read_text())
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or not {"artifact", "bin", "bin_sha256"} <= data.keys():
+    if not isinstance(data, dict) or not {"artifact", "bin", "root", "tree_sha256"} <= data.keys():
         return None
     return data
 
 
-def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> Path:
-    """Check that .toolchain/bin/<name> is the pinned, unmodified binary; return its path.
+def marker_current(cached: dict, entry: dict) -> bool:
+    return cached["artifact"] == artifact_id(entry) and cached["root"] == str(TOOLCHAIN)
 
-    Used by `make require-sfw` so a stale or replaced sfw can never authorize an install
-    (ENGINEERING §2.3, "no silent fallback").
+
+def tree_digest(tool_dir: Path) -> str:
+    """SHA-256 over every file (content and executable bit), symlink (target) and directory
+    under tool_dir, except the marker. Symlinks are recorded, never followed.
+
+    `__pycache__` directories are skipped: the pinned Python writes bytecode there at run
+    time, which would otherwise look like tampering.
+    """
+    h = hashlib.sha256()
+    entries = []
+    for dirpath, dirnames, filenames in os.walk(tool_dir, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        for name in dirnames + filenames:
+            entries.append(Path(dirpath) / name)
+    for path in sorted(entries, key=lambda p: p.relative_to(tool_dir).as_posix()):
+        rel = path.relative_to(tool_dir).as_posix()
+        if rel == MARKER:
+            continue
+        if path.is_symlink():
+            h.update(f"L {rel} -> {os.readlink(path)}\n".encode())
+        elif path.is_dir():
+            h.update(f"D {rel}\n".encode())
+        else:
+            executable = int(bool(path.stat().st_mode & 0o111))
+            h.update(f"F {rel} {executable} {sha256_file(path)}\n".encode())
+    return h.hexdigest()
+
+
+def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> Path:
+    """Check that .toolchain/bin/<name> is the pinned, unmodified install; return its binary.
+
+    Used by `make require-toolchain` so a stale or replaced tool can never run an install
+    (ENGINEERING §2.3, "no silent fallback"). Every file of the install is checked, and a
+    JavaScript tool (pnpm) also needs the pinned Node that runs it.
     """
     lock = lock or load_lock()
     key = key or platform_key()
     if name not in lock:
         raise ToolchainError(f"unknown tool {name!r}")
     spec = lock[name]
+    entry = spec.get(key)
+    if entry is None:
+        raise ToolchainError(f"{name}: no artifact pinned for {key}")
     tool_dir = TOOLCHAIN / name / spec["version"]
     cached = read_marker(tool_dir)
-    if not cached or cached["artifact"] != artifact_id(spec[key]):
+    if not cached or not marker_current(cached, entry):
         raise ToolchainError(f"{name} {spec['version']} is not installed from the pinned artifact; run 'make toolchain'")
     expected = (tool_dir / cached["bin"]).resolve()
     link_path = BIN / {"python": "python3"}.get(name, name)
     if not link_path.is_symlink() or link_path.resolve() != expected:
         raise ToolchainError(f"{link_path} does not point at the pinned {name} {spec['version']}; run 'make toolchain'")
-    if sha256_file(expected) != cached["bin_sha256"]:
-        raise ToolchainError(f"{name} binary was modified after install; run 'make toolchain --force' after checking why")
-    if spec[key].get("kind") == "binary" and cached["bin_sha256"] != spec[key].get("sha256"):
+    if tree_digest(tool_dir) != cached["tree_sha256"]:
+        raise ToolchainError(f"{name} was modified after install; check why, then run 'make toolchain'")
+    if entry.get("kind") == "binary" and sha256_file(expected) != entry.get("sha256"):
         raise ToolchainError(f"{name} binary hash differs from the pinned artifact")
+    if entry.get("kind") == "npm-tgz":
+        verify_tool("node", lock, key)
     return expected
 
 

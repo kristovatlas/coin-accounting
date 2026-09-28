@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -99,7 +101,9 @@ class AgentGuardTests(unittest.TestCase):
                     # Round 2: wrappers, environment prefixes and changing directory first.
                     "env make -f /tmp/x.mk help", "command make -f x help", "(make -f /tmp/x.mk help)",
                     "SYS_PYTHON=true make bootstrap", "MAKEFILES=/tmp/x.mk make help", "PATH=/tmp/evil:$PATH make help",
-                    "cd /tmp && make bootstrap"):
+                    "cd /tmp && make bootstrap",
+                    # Round 4: only the human installs unmerged dependency changes.
+                    "make bootstrap DEPS_APPROVED=1", "DEPS_APPROVED=1 make bootstrap"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.bash(cmd), 2)
 
@@ -150,7 +154,50 @@ class MakefileOverrideTests(unittest.TestCase):
         self.assertIn(".toolchain/bin/sfw", out)
         self.assertNotIn("/usr/bin/env", out)
         self.assertNotIn("true scripts/toolchain.py", out)
-        self.assertIn("toolchain.py verify sfw pnpm uv", out)
+        self.assertIn("toolchain.py verify sfw pnpm uv node", out)
+
+
+class BootstrapApprovalTests(unittest.TestCase):
+    """`make bootstrap` installs only dependency files the human merged (PR #7 review, round 4)."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+        shutil.copy(HERE.parent / "Makefile", self.repo / "Makefile")
+        (self.repo / "package.json").write_text("{}\n")
+        for cmd in (["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"],
+                    ["update-ref", "refs/remotes/origin/main", "HEAD"]):
+            subprocess.run(["git", *cmd], cwd=self.repo, check=True, capture_output=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def gate(self, **env) -> int:
+        full = {k: v for k, v in os.environ.items() if k != "DEPS_APPROVED"}
+        full.update(env)
+        return subprocess.run(["make", "-s", "require-approved-deps"], cwd=self.repo, env=full,
+                              capture_output=True, text=True).returncode
+
+    def test_merged_dependencies_pass(self):
+        self.assertEqual(self.gate(), 0)
+
+    def test_unmerged_changes_are_refused_unless_the_human_approves(self):
+        (self.repo / "package.json").write_text('{"dependencies": {"left-pad": "1.3.0"}}\n')
+        self.assertNotEqual(self.gate(), 0)
+        self.assertNotEqual(self.gate(DEPS_APPROVED="0"), 0)
+        self.assertEqual(self.gate(DEPS_APPROVED="1"), 0)
+
+    def test_new_untracked_lockfile_is_refused(self):
+        (self.repo / "uv.lock").write_text("version = 1\n")
+        self.assertNotEqual(self.gate(), 0)
+
+    def test_committed_but_unmerged_change_is_refused(self):
+        (self.repo / "frontend").mkdir()
+        (self.repo / "frontend" / "package.json").write_text("{}\n")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "y"], cwd=self.repo, check=True)
+        self.assertNotEqual(self.gate(), 0)
 
 
 if __name__ == "__main__":
