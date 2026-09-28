@@ -43,23 +43,43 @@ Applies to **runtime and development dependencies alike**: linters, test tools a
 | No source builds | `no-build = true`: only wheels are installed, so no `setup.py` / build backend code runs at install time. An exception per package (`no-build-package`) needs an ADR and a manual review of the sdist |
 | Indexes | PyPI only; no extra or alternative indexes |
 
-### 2.3 Vetting a new dependency (all ecosystems)
+### 2.3 All installs go through Socket Firewall, via the repo's scripts
+
+**Every command that downloads or installs a package, for any purpose (runtime, dev tooling, tests, CI), runs through Socket Firewall (`sfw`)**, and only through the repo's own entry points. Nobody types a bare install command.
+
+- **Single entry point:** a top-level `Makefile` (portable across Linux and macOS) holds every install and update action. It calls small scripts in `scripts/` where logic is needed. Examples:
+
+  | Target | Runs |
+  |---|---|
+  | `make bootstrap` | Checks prerequisites, then installs all locked deps: `sfw pnpm install --frozen-lockfile` and `sfw uv sync --locked` |
+  | `make add-js PKG=<name> [DEV=1]` | `sfw pnpm add [-D] <name>`, then reminds you of the §2.4 vetting and `DEPENDENCIES.md` entry |
+  | `make add-py PKG=<name> [DEV=1]` | `sfw uv add [--dev] <name>`, same reminder |
+  | `make update-deps` | Batch update (§2.5) under `sfw`, honouring the cooldowns |
+  | `make test-tools` | Pinned, verified downloads of test tooling (`bitcoind`, Playwright browsers) |
+
+  Contributors, AI agents and CI all use these targets; CI jobs call `make bootstrap`, never raw installers.
+- **No silent fallback:** if `sfw` is missing, not the pinned version, or fails to start, the scripts **stop with an error**. They never drop through to an unwrapped install.
+- **Fetch-and-run commands are banned:** `npx`, `pnpm dlx`, `pnpm exec` of packages not in the lockfile, `uvx`/`uv tool run`, `pip install`, `curl … | sh`. Tools we need become locked dev dependencies, installed via `make bootstrap`.
+- **Bootstrapping `sfw` itself** is the one exception. The pinned `sfw` version is installed by `scripts/install-sfw` from its release artifact, with the checksum verified against the value committed in the repo **(verify at setup: distribution format and checksum source)**. Package managers (pnpm, uv) are likewise installed at pinned versions with verified checksums, not through a package registry.
+- **Enforcement:** a CI check (`scripts/check-install-commands`) scans the `Makefile`, `scripts/`, `.github/workflows/` and docs for raw install or fetch-and-run commands without the `sfw` wrapper, and fails the build if it finds any. `AGENTS.md` repeats the rule for agents.
+
+### 2.4 Vetting a new dependency (all ecosystems)
 
 Before a new direct dependency, or a new transitive one pulled in by an upgrade, is **installed or executed**:
 
 1. **Justify it.** Why can't the standard library or ~100 lines of our own code do the job? Could a package we already use do it?
-2. **Scan it with Socket.dev.** Installs are wrapped by **Socket Firewall** (`sfw pnpm install …`, `sfw uv sync …`), which blocks known-malicious packages before they reach disk **(verify at setup)**. The Socket report is reviewed for install scripts, network or filesystem access, obfuscated code, telemetry, new maintainers and typosquat signals. The Socket GitHub App (or `socket` CLI in CI) also reports on every PR that changes a lockfile.
+2. **Scan it with Socket.dev.** The install itself goes through `make add-js`/`make add-py`, so Socket Firewall blocks known-malicious packages before they reach disk (§2.3). The Socket report is reviewed for install scripts, network or filesystem access, obfuscated code, telemetry, new maintainers and typosquat signals. The Socket GitHub App (or `socket` CLI in CI) also reports on every PR that changes a lockfile.
 3. **Check its health:** maintainers, release history, open security advisories, download base, transitive dependency count.
 4. **Record it** in [`DEPENDENCIES.md`](DEPENDENCIES.md): name, ecosystem, runtime/dev, purpose, alternatives considered, whether it has network capability, Socket result, date, reviewer.
 5. **Get human approval.** A PR that adds a dependency needs the human reviewer's explicit approval of that dependency. AI agents may propose dependencies, never add them unilaterally.
 
-### 2.4 Updating dependencies
+### 2.5 Updating dependencies
 
 - Updates come in **deliberate batches** (at most monthly, plus urgent security fixes), never as a side effect of other work.
-- Dependabot is configured with a **7-day cooldown** matching §2.1–2.2 **(verify at setup)**. Its PRs go through the same vetting as new dependencies: read the changelog, review the Socket diff.
+- Dependabot is configured with a **7-day cooldown** matching §2.1–2.2 **(verify at setup)**. Its PRs only change lockfiles, and nothing is installed until CI runs `make bootstrap` under `sfw`. They go through the same vetting as new dependencies: read the changelog, review the Socket diff.
 - Security fixes may bypass the cooldown with a recorded justification.
 
-### 2.5 CI and repository
+### 2.6 CI and repository
 
 - GitHub Actions are **pinned to full commit SHAs**, with a version comment. Only actions from GitHub (`actions/*`) or vetted publishers are allowed.
 - Workflow `permissions: contents: read` by default; a job only gets more if it needs it. No `pull_request_target` workflows.
@@ -186,7 +206,8 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
 
 - **No real data.** Agents never run while a VeraCrypt volume with real data is mounted, and never get access to real DBs, logs, exports or configs. Development and E2E use regtest and synthetic data only. Mainnet smoke tests are run by the human (THREAT_MODEL T-607).
 - **Scope.** Agents don't:
-  - add dependencies without the §2.3 vetting and human approval
+  - add dependencies without the §2.4 vetting and human approval
+  - run any install or fetch-and-run command outside the `make` targets (§2.3)
   - weaken a control
   - change `docs/architecture.md` without an ADR
   - commit to `main` directly
@@ -223,7 +244,7 @@ A change is done only when:
 | Practice | Enforced by |
 |---|---|
 | Cooldowns, frozen lockfiles, no install scripts, wheels-only | Tool config + CI check that the config is present |
-| Socket scanning | `sfw` wrapper locally and in CI + Socket PR report |
+| Socket scanning | All installs via `make` targets that wrap `sfw` (no fallback) + CI check for unwrapped install commands + Socket PR report |
 | SHA-pinned actions, minimal permissions | CI lint of workflow files |
 | Coverage floors | CI (`coverage.py`, `vitest`) |
 | Mutation budget | Scheduled CI job + milestone checklist |
@@ -237,4 +258,4 @@ A change is done only when:
 
 | Date | Version | Change |
 |---|---|---|
-| 2026-09-27 | 0.1 | Initial proposal (P0.2) |
+| 2026-09-27 | 0.1 | Initial proposal (P0.2), including the rule that all installs go through `sfw` via the repo's `make` targets (§2.3) |
