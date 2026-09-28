@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.10 |
+| Version | 0.2.11 |
 | Last updated | 2026-09-28 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -310,7 +310,11 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
   - commit to `main` directly or merge PRs unless the human explicitly says so (§2.7)
   - add MCP servers or tools that fetch and run packages
 - **Transparency.** Agent-authored commits carry a `Co-Authored-By` trailer. PR descriptions state what was verified (commands run, tests added) and what wasn't.
-- **Review.** Every agent PR gets human review. Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
+- **Review.** PRs go through the `/review-panel` process ([ADR 0020](adr/0020-review-panel.md)):
+  - Each round has four AI reviews: Opus 5.5 and Codex gpt-5.6-sol, each once for security and once for function.
+  - Findings are validated before anything is acted on. Valid P1/High/Critical findings are fixed, and the panel repeats. Other valid findings become GitHub issues.
+  - The agent merges after a clean round, unless there are human decision points. The human reviews those decisions rather than every diff.
+  - Review output and triage decisions are posted as PR comments, as a record.
 
 ## 7. Workflow
 
@@ -354,7 +358,7 @@ A change is done only when:
 | ADR immutability, diagram hash | CI checks |
 | Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review |
 | Test-slop rules | Partly automated (§3.5) + review checklist + periodic test audit |
-| Only the human merges | Procedural (Documented, T-605) |
+| Only the human merges (or `/review-panel` after a clean round with no decision points, ADR 0020) | Procedural (Documented, T-605) |
 | No real data for agents | `AGENTS.md` + SessionStart hook + human discipline (Documented, T-607, R-6) |
 
 ## 10. Changelog
@@ -373,3 +377,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.8 | CI passes `DEPS_APPROVED=1` explicitly so dependency PRs are tested before approval (user decision, #44; THREAT_MODEL §5.6.1) |
 | 2026-09-28 | 0.2.9 | PR #7 review round 6: approval checked against `refs/remotes/origin/main`, ignored files included; the toolchain installer checks its own pins; `propose-*` refuse unapproved install config, resolve with `--no-build` and `ignorePnpmfile`; the `MAKEFLAGS` and untrusted-branch limits stated |
 | 2026-09-28 | 0.2.10 | PR #7 review round 7: the `DEPS_APPROVED` rule is stated for all agents in AGENTS.md; only Claude Code has a technical block |
+| 2026-09-28 | 0.2.11 | Review process: the `/review-panel` skill (ADR 0020) |
