@@ -212,13 +212,13 @@ def tree_digest(tool_dir: Path) -> str:
     """SHA-256 over every file (content and executable bit), symlink (target) and directory
     under tool_dir, except the marker. Symlinks are recorded, never followed.
 
-    `__pycache__` directories are skipped: the pinned Python writes bytecode there at run
-    time, which would otherwise look like tampering.
+    Bytecode caches are included: Python runs a matching `.pyc` instead of its source
+    (PR #7 review, round 5). The Makefile sets PYTHONDONTWRITEBYTECODE so normal use doesn't
+    write into the tree; a stray write fails verification and `make toolchain` reinstalls.
     """
     h = hashlib.sha256()
     entries = []
     for dirpath, dirnames, filenames in os.walk(tool_dir, followlinks=False):
-        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
         for name in dirnames + filenames:
             entries.append(Path(dirpath) / name)
     for path in sorted(entries, key=lambda p: p.relative_to(tool_dir).as_posix()):

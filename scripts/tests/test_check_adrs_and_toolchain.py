@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import hashlib
 import io
 import os
 import subprocess
-import sys
 import shutil
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -400,6 +402,24 @@ class ToolchainTests(unittest.TestCase):
                 self.assertNotIn(str(old), path.read_text())
                 self.assertIn(str(new / "bin" / "node"), path.read_text())
 
+    def test_planted_bytecode_is_detected(self):
+        # Round 5: Python runs a matching .pyc instead of its source, so __pycache__ is covered.
+        blob = self.wrapped_tar("python/bin/python3", b"#!/bin/sh\n")
+        lock = {"python": {"version": "1", "linux-x86_64": {"url": "https://example.invalid/py.tgz",
+                                                            "sha256": hashlib.sha256(blob).hexdigest(),
+                                                            "kind": "tar", "bin": "bin/python3"}}}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "BIN", Path(d) / "bin"), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
+            toolchain.link(toolchain.install_tool("python", lock["python"], "linux-x86_64"), "python3")
+            toolchain.verify_tool("python", lock, "linux-x86_64")
+            cache = Path(d) / "python" / "1" / "python" / "lib" / "__pycache__"
+            cache.mkdir(parents=True)
+            (cache / "os.cpython-313.pyc").write_bytes(b"planted")
+            with self.assertRaisesRegex(toolchain.ToolchainError, "python was modified"):
+                toolchain.verify_tool("python", lock, "linux-x86_64")
+
     def test_verify_without_an_artifact_for_this_platform_is_a_clean_error(self):
         lock = {"sfw": {"version": "1", "darwin-arm64": {}}}
         with self.assertRaisesRegex(toolchain.ToolchainError, "no artifact pinned"):
@@ -409,6 +429,22 @@ class ToolchainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaisesRegex(toolchain.ToolchainError, "non-HTTPS"):
                 toolchain.download("http://example.invalid/x", Path(d) / "x")
+
+
+class HostPythonCompatibilityTests(unittest.TestCase):
+    def test_union_annotations_need_the_future_import(self):
+        # Round 5: `str | None` in an evaluated annotation raises TypeError on the host minimum, 3.9.
+        import ast
+        for path in sorted(Path(__file__).resolve().parent.parent.rglob("*.py")):
+            tree = ast.parse(path.read_text(), feature_version=(3, 9))
+            future = any(isinstance(n, ast.ImportFrom) and n.module == "__future__"
+                         and any(a.name == "annotations" for a in n.names) for n in tree.body)
+            annotations = [n.annotation for n in ast.walk(tree) if isinstance(n, (ast.arg, ast.AnnAssign)) and n.annotation]
+            annotations += [n.returns for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.returns]
+            uses_union = any(isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.BitOr)
+                             for a in annotations for sub in ast.walk(a))
+            with self.subTest(file=path.name):
+                self.assertTrue(future or not uses_union, "add `from __future__ import annotations`")
 
 
 if __name__ == "__main__":

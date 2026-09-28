@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -154,7 +156,18 @@ class MakefileOverrideTests(unittest.TestCase):
         self.assertIn(".toolchain/bin/sfw", out)
         self.assertNotIn("/usr/bin/env", out)
         self.assertNotIn("true scripts/toolchain.py", out)
-        self.assertIn("toolchain.py verify sfw pnpm uv node", out)
+        self.assertIn("toolchain.py verify sfw pnpm uv node python", out)
+
+    def test_install_targets_are_wired_to_the_approval_gate_and_the_verifier(self):
+        # Round 5: removing either prerequisite must fail a test (ENGINEERING §3.5).
+        gate, verify = "differ from origin/main", "toolchain.py verify sfw pnpm uv node python"
+        for args, needs in ((("bootstrap",), (gate, verify)), (("toolchain",), (gate,)), (("test-tools",), (gate,)),
+                            (("propose-js", "PKG=a@1", "WORKSPACE=frontend"), (verify,)),
+                            (("propose-py", "PKG=a==1"), (verify,))):
+            out = self.dry_run(*args)
+            for text in needs:
+                with self.subTest(target=args[0], needs=text):
+                    self.assertIn(text, out)
 
 
 class BootstrapApprovalTests(unittest.TestCase):
@@ -164,20 +177,28 @@ class BootstrapApprovalTests(unittest.TestCase):
         import tempfile
         self._tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self._tmp.name)
+        # Isolated from the developer's git config (signing, hooks, templates).
+        self.env = {k: v for k, v in os.environ.items() if k != "DEPS_APPROVED"}
+        self.env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
         shutil.copy(HERE.parent / "Makefile", self.repo / "Makefile")
         (self.repo / "package.json").write_text("{}\n")
-        for cmd in (["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"],
-                    ["update-ref", "refs/remotes/origin/main", "HEAD"]):
-            subprocess.run(["git", *cmd], cwd=self.repo, check=True, capture_output=True)
+        self.git("init", "-q")
+        self.commit()
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    def git(self, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=self.repo, env=self.env, check=True, capture_output=True)
+
+    def commit(self) -> None:
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x")
 
     def tearDown(self):
         self._tmp.cleanup()
 
-    def gate(self, **env) -> int:
-        full = {k: v for k, v in os.environ.items() if k != "DEPS_APPROVED"}
-        full.update(env)
-        return subprocess.run(["make", "-s", "require-approved-deps"], cwd=self.repo, env=full,
-                              capture_output=True, text=True).returncode
+    def gate(self, *make_args: str, **env: str) -> int:
+        return subprocess.run(["make", "-s", "require-approved-deps", *make_args], cwd=self.repo,
+                              env={**self.env, **env}, capture_output=True, text=True).returncode
 
     def test_merged_dependencies_pass(self):
         self.assertEqual(self.gate(), 0)
@@ -185,8 +206,25 @@ class BootstrapApprovalTests(unittest.TestCase):
     def test_unmerged_changes_are_refused_unless_the_human_approves(self):
         (self.repo / "package.json").write_text('{"dependencies": {"left-pad": "1.3.0"}}\n')
         self.assertNotEqual(self.gate(), 0)
-        self.assertNotEqual(self.gate(DEPS_APPROVED="0"), 0)
-        self.assertEqual(self.gate(DEPS_APPROVED="1"), 0)
+        self.assertNotEqual(self.gate("DEPS_APPROVED=0"), 0)
+        self.assertEqual(self.gate("DEPS_APPROVED=1"), 0)
+
+    def test_approval_from_the_environment_does_not_count(self):
+        # Round 5: an `export DEPS_APPROVED=1` in the human's shell must not open the gate for agents.
+        (self.repo / "package.json").write_text('{"dependencies": {"left-pad": "1.3.0"}}\n')
+        self.assertNotEqual(self.gate(DEPS_APPROVED="1"), 0)
+
+    def test_install_config_and_toolchain_pins_are_gated(self):
+        # Round 5: files that change what gets installed, or run code during an install.
+        for rel in ("uv.toml", ".npmrc", "frontend/.npmrc", ".pnpmfile.cjs", ".pnpmfile.mjs", ".python-version",
+                    "scripts/toolchain.lock"):
+            with self.subTest(file=rel):
+                path = self.repo / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("x\n")
+                self.assertNotEqual(self.gate(), 0)
+                path.unlink()
+                self.assertEqual(self.gate(), 0)
 
     def test_new_untracked_lockfile_is_refused(self):
         (self.repo / "uv.lock").write_text("version = 1\n")
@@ -195,8 +233,7 @@ class BootstrapApprovalTests(unittest.TestCase):
     def test_committed_but_unmerged_change_is_refused(self):
         (self.repo / "frontend").mkdir()
         (self.repo / "frontend" / "package.json").write_text("{}\n")
-        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
-        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "y"], cwd=self.repo, check=True)
+        self.commit()
         self.assertNotEqual(self.gate(), 0)
 
 
