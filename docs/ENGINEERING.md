@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.7 |
+| Version | 0.2.8 |
 | Last updated | 2026-09-28 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -106,7 +106,7 @@ The same process applies to a new direct dependency, and to a version bump of an
 4. **Check its health:** maintainers, release history, open advisories, download base, licence, transitive dependency count.
 5. **Record it** in [`DEPENDENCIES.md`](DEPENDENCIES.md).
 6. **Human approval.** The human explicitly approves the dependency in the PR. AI agents may propose dependencies, never approve them.
-7. **Only then install.** `make bootstrap`, `make toolchain` and `make test-tools` install only what is on `origin/main`, i.e. what the human merged, and refuse anything else. This covers the manifests, lockfiles and `scripts/toolchain.lock`, and also config that changes installs or runs code during them (`.pnpmfile.*`, `.npmrc`, `uv.toml`, `.python-version`, `.node-version`). To install an approved change before it is merged, **the human** adds `DEPS_APPROVED=1` to the make command line. An inherited environment variable doesn't count, agents never set it, and the agent guard blocks it.
+7. **Only then install.** `make bootstrap`, `make toolchain` and `make test-tools` install only what is on `origin/main`, i.e. what the human merged, and refuse anything else. This covers the manifests, lockfiles and `scripts/toolchain.lock`, and also config that changes installs or runs code during them (`.pnpmfile.*`, `.npmrc`, `uv.toml`, `.python-version`, `.node-version`). To install an approved change before it is merged, **the human** adds `DEPS_APPROVED=1` to the make command line. An inherited environment variable doesn't count, agents never set it, and the agent guard blocks it. The one other place that passes it is CI, explicitly in its workflow file, so dependency PRs can be tested before approval on a throwaway machine (from M0.2; THREAT_MODEL §5.6.1, T-608).
 
 **Transitive dependencies** don't each need steps 1, 4 and 5. They are covered by:
 - the Socket diff on the PR
@@ -364,3 +364,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.5 | Install-command guard scope: hygiene against accidental installs (ADR 0022) |
 | 2026-09-28 | 0.2.6 | PR #7 review round 4: `bootstrap` installs only merged dependency changes unless the human sets `DEPS_APPROVED=1`; toolchain verification covers every installed file and Node |
 | 2026-09-28 | 0.2.7 | PR #7 review round 5: the approval gate covers toolchain pins and install-affecting config and accepts only a command-line approval; Python is verified, bytecode included |
+| 2026-09-28 | 0.2.8 | CI passes `DEPS_APPROVED=1` explicitly so dependency PRs are tested before approval (user decision, #44; THREAT_MODEL §5.6.1) |

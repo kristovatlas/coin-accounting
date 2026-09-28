@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.7.5 (M0 in progress) |
+| Version | 0.7.6 (M0 in progress) |
 | Last updated | 2026-09-28 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -219,13 +219,42 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 
 | ID | STRIDE/P | Threat | Mitigation | Status | Evidence |
 |---|---|---|---|---|---|
-| T-601 | E, I | **Malicious or compromised package** (npm/PyPI typosquat, hijacked maintainer, freshly published malicious version, lockfile poisoning). Because in-process egress is accepted (R-4), **this is the primary exfiltration path** | Packages are **resolved, vetted and approved before anything is installed** (ENGINEERING §2.4); `make bootstrap`/`toolchain`/`test-tools` install only dependency files, toolchain pins and install-affecting config (`.pnpmfile.*`, `.npmrc`, `uv.toml`) merged to `main`, unless the human passes `DEPS_APPROVED=1` on the make command line (an inherited environment variable doesn't count; the agent guard blocks it). 7-day cooldowns (pnpm `minimumReleaseAge` strict, uv relative `exclude-newer`). Every install goes through Socket Firewall via `make` targets, with no fallback. A **lockfile policy check** enforces registry-only sources, hashes and package age on every entry, including transitive ones. Exotic sources are blocked. Monthly batched updates; weekly clean-cache re-scan; `pip-audit`/`pnpm audit` on every PR. Details in `docs/ENGINEERING.md` §2 | Planned | |
+| T-601 | E, I | **Malicious or compromised package** (npm/PyPI typosquat, hijacked maintainer, freshly published malicious version, lockfile poisoning). Because in-process egress is accepted (R-4), **this is the primary exfiltration path** | Packages are **resolved, vetted and approved before anything is installed** (ENGINEERING §2.4); `make bootstrap`/`toolchain`/`test-tools` install only dependency files, toolchain pins and install-affecting config (`.pnpmfile.*`, `.npmrc`, `uv.toml`) merged to `main`, unless the human passes `DEPS_APPROVED=1` on the make command line (an inherited environment variable doesn't count; the agent guard blocks it). CI is the one other place that passes it (T-608, §5.6.1). 7-day cooldowns (pnpm `minimumReleaseAge` strict, uv relative `exclude-newer`). Every install goes through Socket Firewall via `make` targets, with no fallback. A **lockfile policy check** enforces registry-only sources, hashes and package age on every entry, including transitive ones. Exotic sources are blocked. Monthly batched updates; weekly clean-cache re-scan; `pip-audit`/`pnpm audit` on every PR. Details in `docs/ENGINEERING.md` §2 | Planned | |
 | T-602 | E | **Install-time or load-time code execution**: dependency build scripts, our own lifecycle scripts, `.pnpmfile` hooks, sdist builds, `.pth` files in wheels, package managers auto-installing or auto-downloading | pnpm `allowBuilds: {}` + `strictDepBuilds`; no lifecycle scripts, `.pnpmfile` or `configDependencies` in our repo (CI check); uv `no-build` with no exceptions and `package = false`; `.pth` allowlist check; `verifyDepsBeforeRun: error`, `pmOnFail: error`, `UV_NO_SYNC`, `python-downloads = "never"` | Planned | |
 | T-603 | E, T | **Compromised CI, GitHub Actions or toolchain/test downloads** | Actions pinned by full SHA and checked with `zizmor`/`actionlint`; `contents: read`, read-only default token, `persist-credentials: false`, no secrets, no dependency caches; fork PRs need approval. Toolchain and test binaries (`sfw`, pnpm, uv, Node, Python, `bitcoind`, Playwright browsers) are each verified per ENGINEERING §2.3. **`sfw` itself has no published checksums**, so its committed hash is trust-on-first-use | Implemented (partly) | Implemented: toolchain hash verification, and re-verification of every installed file (Python bytecode included) of sfw, pnpm, uv, Node and Python before each install (`scripts/toolchain.py`, `scripts/toolchain.lock`; tests in `scripts/tests/test_check_adrs_and_toolchain.py`) and the SHA-pinned `actions/checkout` with `contents: read` and `persist-credentials: false` (`.github/workflows/ci.yml`). Pending: zizmor/actionlint, Node `.asc` and `bitcoind` builder-signature checks, Playwright browser hashes (#15) |
 | T-604 | I | **Runtime dependency adds network access** (telemetry, update checks) | The socket guard in tests (T-305); dependency review checks for network capability | Planned | |
 | T-605 | T | **AI coding agent introduces insecure code, weak tests or unvetted dependencies, or merges its own PRs** | `AGENTS.md` binds agents to this document; the install-command guard catches **accidental or habitual** unwrapped installs only (ADR 0022; deliberate evasion is R-8) and `ENGINEERING.md`; human review of every PR; test-slop audits; agents may propose but never approve dependencies. **Only the human merges**: this is procedural, since agents use the owner's GitHub credentials (user decision, 2026-09-27) | Documented † (hook implemented) | [`AGENTS.md`](../AGENTS.md), [ADR 0018](adr/0018-repository-governance.md); banned-command hook `scripts/agent_guard.py` via `.claude/settings.json` (Claude Code only), tests in `scripts/tests/test_guards.py` |
 | T-606 | T | **Tampered release/source** as distributed to the user | Commit signing is **not** required (user decision, 2026-09-27: agents would need the owner's key). GitHub signs merge commits. If releases are published for other users, release tags will be signed, and a reproducible build with checksums will be considered | Accepted (for now) | |
 | T-607 | I | **Cloud-backed AI coding agents (AD12) read real user data** (DB, logs, exports, terminal output) and send it to a model provider | Agents never run while a volume with real data is mounted, and never get access to real data paths; development and E2E use regtest and synthetic data only; mainnet smoke tests are run by the human; agent-ignore files list the data paths; log redaction is on by default in dev. **Claude Code hook** (`scripts/agent_guard.py`): blocks every tool call while a VeraCrypt volume appears to be mounted. Limits: detection matches `veracrypt` in the device-mapper names and mount table, so a volume opened under another mapper name is missed, and an agent could edit the hook itself while no volume is mounted (#13). Other agents rely on the AGENTS.md check | Implemented † (Claude Code hook) | `scripts/agent_guard.py` via `.claude/settings.json`; test `test_blocks_everything_when_veracrypt_is_mounted` (detection itself untested: #22) |
+| T-608 | E, I | **A new dependency runs before it is approved**, because it must be installed to be tested, and it must be tested to be approved (the approval chicken-and-egg, §5.6.1) | Unapproved dependencies are installed **only in CI**, never on a developer machine: `ci.yml` passes `DEPS_APPROVED=1` on the make command line (not keyed on `CI`/`GITHUB_ACTIONS`, which anyone can set). CI runners are throwaway, hold no secrets and have a read-only token (T-603); Socket reports on the PR; the human approves before merge; locally, only merged dependencies install (T-601) | Planned (M0.2, #44) | Decision: user, 2026-09-28 ([#44](https://github.com/kristovatlas/coin-accounting/issues/44)) |
+
+### 5.6.1 The approval chicken-and-egg (a lesson for other projects too)
+
+This applies to almost any project that vets its dependencies.
+
+**The problem.** A new dependency should not run before someone has approved it. But the best evidence for approving it (do the tests pass? does the audit find anything?) comes from installing and running it. Installing a package can itself run the package's code: install scripts, build steps, and every import when the tests start. So "install it to check it" already means "run code nobody has approved yet". Where that happens decides how much harm a malicious package can do.
+
+**The usual mistakes:**
+- **Test it on your own machine.** The package runs next to your SSH keys, browser sessions, tokens and, here, possibly real financial data (R-6). This is exactly the attack a malicious package is built for.
+- **Refuse to install anything unapproved, anywhere.** Then nothing can be tested before approval. People approve blind, or work around the rule under deadline pressure, and a control that is routinely bypassed protects nothing.
+- **Relax the rule "when running in CI" by checking an environment variable** such as `CI=true`. Anything can set that variable, including an agent or a script on a developer machine, so the exception leaks everywhere.
+
+**Our answer: split where unapproved code may run.**
+- **Developer machines, where the valuable things are:** only dependencies already merged to `main` are installed. The human can override this for one command (`DEPS_APPROVED=1` on the make command line) after approving; agents can't (T-601).
+- **CI, a throwaway machine with nothing worth stealing:** unapproved dependencies are installed and tested there. CI passes `DEPS_APPROVED=1` explicitly in its workflow file, where every change to it is visible in review. It never infers approval from an environment variable (T-608).
+- **CI is only safe for this while it holds nothing of value:**
+  - no secrets
+  - a read-only token (`contents: read`, `persist-credentials: false`)
+  - no shared dependency cache that a later, trusted run would reuse
+  - no publishing or deploying from pull-request jobs
+
+  If any of this changes, this decision must be revisited. A malicious package would then have something to steal, or a way to poison later builds (T-603).
+- **Other checks** narrow the gap without closing it:
+  - the 7-day cooldown and Socket's report on the PR (T-601)
+  - no install scripts (T-602)
+  - the human's approval before merge
+
+**What remains.** A malicious package can still run in CI and see the repository's source code, which is public here anyway. The design limits the damage to "a wasted CI run". It does not prevent the run.
 
 ### 5.7 TB6 — User-supplied files
 
@@ -329,3 +358,4 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 | 2026-09-28 | 0.7.3 | The install-command guard is hygiene against accidental installs (ADR 0022); deliberate evasion accepted as R-8. The 0.7.2 wording "sees through wrappers" means common wrappers only. pnpm now comes from the npm registry tarball (sha512 integrity) |
 | 2026-09-28 | 0.7.4 | PR #7 review round 4: `bootstrap` refuses unmerged dependency changes unless the human approves (T-601); toolchain verification covers every installed file, including pnpm's code and Node, and a moved checkout (T-603) |
 | 2026-09-28 | 0.7.5 | PR #7 review round 5: the approval gate also covers toolchain pins (`make toolchain`/`test-tools`) and install-affecting config, and accepts approval only from the make command line (T-601, T-603); the pinned Python is verified before installs, bytecode included (T-603) |
+| 2026-09-28 | 0.7.6 | T-608 and §5.6.1: the approval chicken-and-egg explained in plain language; unapproved dependencies run only in CI, which passes approval explicitly (user decision, #44) |
