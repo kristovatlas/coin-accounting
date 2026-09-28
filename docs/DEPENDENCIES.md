@@ -78,7 +78,7 @@ Verified as described in [`ENGINEERING.md` §2.3](ENGINEERING.md#23-all-installs
 | Name | Kind (Action / App) | Pinned SHA / permissions | Purpose | Added (date, PR) |
 |---|---|---|---|---|
 | `actions/checkout` | Action | `3d3c42e5aac5ba805825da76410c181273ba90b1` (v7.0.1, released 2026-07-20); `contents: read`, `persist-credentials: false` | Check out the repo in CI | 2026-09-28, M0.1 |
-| Socket GitHub App | App | read-only on this repository (installed by the human) | Socket report on every PR that changes a lockfile | **to be installed by the human** |
+| Socket GitHub App | App | installed on this repository by the human (checks "Project Report" and "Pull Request Alerts") | Socket report on every PR | present by 2026-09-28 (seen on PR #7) |
 | Dependabot | GitHub feature | configured in M0.2 (monthly, grouped, 7-day cooldown) | Dependency update PRs | M0.2 |
 
 ## Cooldown exceptions
