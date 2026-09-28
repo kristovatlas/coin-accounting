@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.4.1 (design stage — no code yet) |
+| Version | 0.4.2 (design stage — no code yet) |
 | Last updated | 2026-09-27 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -54,7 +54,7 @@ flowchart LR
       UDB[("User DB (SQLite)<br/>tags, lots, events, prices")]
       LOGS[("Logs, exports, app config<br/>(incl. RPC credentials)")]
     end
-    NODE["Bitcoin Core<br/>(unpruned; txindex + blockfilterindex;<br/>rpcwhitelist)"]
+    NODE["Bitcoin Core<br/>(unpruned; txindex + blockfilterindex<br/>+ txospenderindex; rpcwhitelist)"]
   end
   NET(("Internet<br/>price source"))
   SUPPLY(("TB5 · npm / PyPI / GitHub<br/>AI coding agents<br/>(build/dev time)"))
@@ -65,7 +65,7 @@ flowchart LR
   API --> TAX
   TAX --> UDB
   API --> LOGS
-  SCAN -- "TB2: JSON-RPC scanblocks / getblock (rpcauth, loopback)" --> NODE
+  SCAN -- "TB2: JSON-RPC scanblocks / getdescriptoractivity /<br/>gettxspendingprevout / getrawtransaction (rpcauth, loopback)" --> NODE
   API -- "TB2: JSON-RPC (whitelisted methods)" --> NODE
   API --> SCAN
   SCAN --> UDB
@@ -123,7 +123,7 @@ flowchart LR
 | AD4 | **Network observer** (ISP, Wi-Fi, state, price-source operator) | Sees outbound connections, DNS, TLS metadata, request timing | Yes |
 | AD5 | **Compromised/malicious price source** or MITM | Serves wrong prices | Yes |
 | AD6 | **Supply-chain attacker** (typosquat, hijacked maintainer, malicious GitHub Action, tampered release/`bitcoind` download) | Code execution at install/build/runtime | Yes |
-| AD7 | **Adversarial on-chain data** (crafted tx/script/OP_RETURN content by any payer) | Controls bytes that our parser and UI render | Yes |
+| AD7 | **Adversarial on-chain data** (crafted tx/script/OP_RETURN content by any payer) | Controls bytes that Core decodes and our result processing and UI handle | Yes |
 | AD8 | **Chain-analysis firm / exchange / identity-knowing counterparty** correlating the user's coins | Public blockchain + KYC or other identity data | Yes (as a *privacy* adversary the doxx model informs against) |
 | AD9 | **The user themself** (mistakes, mis-tagging, wrong paths, accidental export, late identification) | Legitimate access | Yes (safety rails) |
 | AD12 | **Cloud-backed AI coding agent** used during development | Reads files and terminal output on the dev machine and sends them to a remote model provider | Yes (as a dev-process exfiltration path) |
@@ -159,14 +159,14 @@ Columns: **ID** · **STRIDE/P** (S spoofing, T tampering, R repudiation, I info 
 | T-202 | I, P | **Queries sent to a non-local node**: RPC has no TLS, so credentials and every lookup (A1) would cross the network in plaintext | **Loopback only; non-loopback RPC endpoints are refused, with no override.** For a node elsewhere, the docs cover an SSH tunnel (`ssh -L`) that terminates on loopback | Planned | |
 | T-203 | E, T | **App (or code inside it) misuses the node**: wallet, broadcast or other state-changing RPCs (e.g. `sendrawtransaction`, or `importdescriptors` storing the user's addresses in a node wallet **outside** the volume) | **Server-side `rpcwhitelist`** for the app's rpcauth user, limited to read-only methods: `getblockchaininfo`, `getnetworkinfo`, `getindexinfo`, `getblockcount`, `getbestblockhash`, `getblockhash`, `getblockheader`, `getblock`, `getrawtransaction`, `gettxout`, `gettxspendingprevout`, `scanblocks`, `getdescriptoractivity`, `getchaintips`, `deriveaddresses`, `getdescriptorinfo`. A client-side allowlist adds defence in depth. **Canary at startup:** the app calls a harmless method that is *not* whitelisted (`uptime`) and refuses to run if it succeeds. REST (`rest=1`) is never used, and the docs recommend leaving it off | Planned | |
 | T-204 | P | **Node logs reveal lookup activity** | With `debug=rpc`, Core logs method names and users but not parameters. The docs recommend not running with `debug=rpc`/`debug=http` | Documented † | |
-| T-205 | D, T | **Adversarial tx data (AD7)** in Core's decoded output: huge blocks/txs exhaust memory, unusual scripts break processing, or crafted text reaches the UI (T-104) | No custom binary parser: Core decodes. Response size limits and streaming JSON decoding for large blocks; property/fuzz tests (Hypothesis) on script matching and scan-result processing; processing fails closed (no partial cache writes) | Planned | |
+| T-205 | D, T | **Adversarial or oversized chain data (AD7)**: huge blocks/txs or **very busy scripts** (e.g. a tagged exchange hot wallet with 100k+ blocks of activity) exhaust memory, time or disk; unusual scripts break processing; crafted text reaches the UI (T-104) | No custom binary parser: Core decodes. Response size limits and streaming JSON decoding; `getdescriptoractivity` calls capped at a few hundred blocks; a per-script activity budget (candidate count from `scanblocks` first; above a threshold, warn and ask); clustering never auto-expands busy scripts; property/fuzz tests on result processing; fails closed (no partial cache writes) | Planned | |
 | T-206 | T | **Wrong network**: a testnet/signet/regtest node is used against a mainnet DB, or the reverse | Store `chain` in the user DB; refuse to start on mismatch | Planned | |
-| T-207 | T | **Reorg leaves cached chain data stale or wrong** | Every cached row stores its source block hash and height. On each tip change, rows whose block hash no longer matches `getblockhash(height)` are invalidated and re-fetched, and derived events are surfaced for review. Tax events only become final after a configurable number of confirmations (default 6) | Planned | |
-| T-208 | T | ~~Index prefix collisions~~ | *N/A since v0.4:* no app-side index; all lookups use full txids and Core's indexes. BIP30 duplicate coinbase txids are handled by Core's `txindex` | N/A | |
-| T-209 | I, P | **Queries leave traces outside the volume**: the node or the app records which scripts or txs the user looked up | App side: all cached chain data lives in the user DB on the volume. Node side: no node wallet is used; Core doesn't persist RPC parameters or `scanblocks` descriptors. **M0 check:** after a regtest run, search the node's datadir (including `debug.log`) for the scanned descriptors and txids; any hit is a bug, or else documented and accepted | Planned | |
-| T-210 | D, T | **Incomplete chain data**: a pruned node, or `txindex`/`blockfilterindex` missing or still syncing, silently omits history | Refuse to run unless `pruned == false` and `getindexinfo` reports both indexes synced to the tip. **Core's `scanblocks` silently skips any chunk the filter index can't serve and still reports `completed: true`.** So before each scan, `getindexinfo` must show the filter index synced to at least the scan's stop height. Afterwards, the result must have `completed == true` and `to_height ==` the requested stop, or it is discarded and the error surfaced. A `getblock`/`getdescriptoractivity` failure is a hard error, never a skip | Planned | |
-| T-211 | T | ~~Chain index tampered with on plain disk~~ | *N/A since v0.4:* the app writes nothing to plain disk. The integrity of the node's own indexes is the node's responsibility (trusted, §8), and the cache is covered by T-408 | N/A | |
-| T-212 | D | **Long-running scans** tie up the node (Core runs one `scanblocks` at a time) or make the UI unresponsive | Scans run as queued background jobs, with progress via `scanblocks status` and cancellation via `scanblocks abort`; forward expansion scans in chunks from the output's height and stops at the first hit; results are cached | Planned | |
+| T-207 | T | **Reorgs or new blocks leave cached chain data stale or incomplete**: rows from orphaned blocks, **"nothing found" results and scanned ranges** that no longer reflect the active chain, reorgs that happened while the app was closed, stale mempool results | Every block-backed row stores its block hash and height; each script's coverage stores its range and stop-block hash; negative answers are **snapshots** tagged with the tip hash. A persisted last-seen tip: on startup and every tip change, find the fork point (walk `getblockheader` while `confirmations == -1`), invalidate every row, coverage range and snapshot above it **at any depth**, then extend coverage to the new tip. Mempool results are kept separately and rebuilt on every refresh. Tax events become final only after a configurable number of confirmations (default 6) | Planned | |
+| T-208 | T | ~~Index prefix collisions~~ → **BIP30 duplicate txids** | Prefix collisions are *N/A since v0.4* (no app-side index). **BIP30:** Core's `txindex` keeps only the later of each duplicate coinbase txid, so the app keys cached txs by (txid, block hash) and always fetches with the block hash from the activity event. Duplicate outpoints are resolved chronologically. The earlier outputs are unspendable | Planned | |
+| T-209 | I, P | **Queries leave traces outside the volume**: the node or the app records which scripts or txs the user looked up, or that the tool is in use | App side: all cached chain data lives in the user DB on the volume. Node side: no node wallet is used, and Core doesn't persist RPC parameters or scan descriptors. `debug=rpc` would log method, user and request `id`, so the app uses counter `id`s. **Known trace:** the startup canary's refused call writes an unconditional warning to `debug.log` naming the RPC user. The docs recommend a generic username (fact-of-usage leak, A11). **M0 check:** after a regtest run, search the node's datadir for the scanned descriptors and txids; the only expected hit is that canary line | Planned | |
+| T-210 | D, T | **Incomplete chain data**: a pruned node, a missing or lagging index, or **`scanblocks` silently skipping filter ranges it can't read**. Core returns `completed: true` and `to_height == stop` anyway, so neither signals the gap | Startup: unpruned; `txindex`, `blockfilterindex`, `txospenderindex` each `synced` with `best_block_height == getblockcount()`. **Scan protocol** (PLAN §1): stop height ≤ the filter index height and ≤ tip − 100; bounded ranges; after each range, the index height and `getblockhash(stop)` are re-checked, else discard and retry; the newest ~100 blocks are only ever read via `getdescriptoractivity`, which errors rather than skips; "Block is not in main chain" triggers a rescan; any other failure is a hard error. Forward expansion uses `txospenderindex` (no filters, waits for index sync, errors loudly). **Residual:** read errors or corruption inside the node's filter index are still skipped silently. Covered by trusting the node's indexes (§8); reported upstream | Planned | |
+| T-211 | T | ~~Chain index tampered with on plain disk~~ | *N/A since v0.4:* the app writes nothing to plain disk. The node's indexes are trusted (§8). The chain cache on the volume is recomputable and is kept consistent by T-207/T-210 | N/A | |
+| T-212 | D | **Long-running or orphaned scans**: Core runs one `scanblocks` at a time **for all RPC users**, a scan keeps running after a client disconnect or crash, and `status`/`abort` can't tell whose scan it is | Scans are queued background jobs over bounded ranges, with `status`/`abort` on a second connection. "Scan already in progress" means *queue busy* and is retried with backoff. At startup and after any client error, the app checks `status` and aborts a scan it left running. Client timeouts are long but finite. Forward expansion doesn't use scans at all (`txospenderindex`) | Planned | |
 
 ### 5.3 TB3 — Backend ↔ Internet (price data)
 
@@ -227,6 +227,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 |---|---|---|---|---|---|
 | T-701 | D, T | **Malformed or huge import files** (address lists, descriptors, future exchange CSVs) | Size/row limits; strict address validation (checksum, network); descriptors validated via `getdescriptorinfo` with a gap-limit cap; reject rather than guess; the import preview must be confirmed | Planned | |
 | T-702 | T | **CSV/formula injection in exports**: a label or chain-derived text starting with `= + - @` executes when the file is opened in a spreadsheet | Type-aware export: numeric columns are written as numbers, so negative gains stay intact; free-text columns (labels, descriptions, notes) have leading `= + - @`, tab and CR neutralised; unit test | Planned | |
+| T-703 | I | **Private keys in imported descriptors**: an xprv/WIF descriptor would be sent to the node over RPC (`scanblocks`, `getdescriptoractivity` and `deriveaddresses` all accept private material), could reach logs or error paths, and would be stored in the DB | Import rejects any descriptor or key containing private material, before it is stored, sent or logged, and tells the user how to export the public form. The redaction filter also masks xprv/WIF patterns. Unit and E2E tests cover it | Planned | |
 
 ---
 
@@ -271,7 +272,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 
 - **In scope for protection, but not app-enforced:** VeraCrypt is correctly configured by the user (strong passphrase, volume dismounted when not in use).
 - **Trusted:**
-  - the user's Bitcoin Core node, for consensus-valid chain data
+  - the user's Bitcoin Core node, for consensus-valid chain data, **and its indexes** (`txindex`, `blockfilterindex`, `txospenderindex`). These are not consensus-validated. Filter-index corruption would show up as silently skipped ranges (T-210 residual)
   - the OS, kernel, browser engine and hardware (AD10)
 - **Out of scope:**
   - malware running as the same OS user, or root, while the volume is mounted (it can read everything the app can)
@@ -294,7 +295,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 1. ~~Non-Linux VeraCrypt detection (macOS/Windows) for T-401: do we support these platforms in v1?~~ **Resolved (2026-09-27):** v1 supports Linux and macOS; Windows is not planned. The macOS detection method is designed in M0 (T-401).
 2. ~~**In-app "lock"** so the volume can be dismounted cleanly without killing the app.~~ **Resolved (2026-09-27): deferred to a future version.** For v1 the documented workflow is to quit the app and close its browser window, then dismount (T-405). The backend should still treat "no DB open" as a clean state where cheap, so a lock is easy to add later.
 3. ~~Should a second price source be added for cross-checking (T-303)?~~ **Resolved (2026-09-27): deferred to a future version.** v1 relies on TLS, sanity checks, content hashes and user overrides (T-303). A second source would add one more outbound flow (§6), so it needs an ADR.
-4. ~~**Minimum Bitcoin Core version**~~ **Resolved (2026-09-27): ≥ 29.0** (needed for `getdescriptoractivity`). The user is fine with any minimum, so it may be raised later if a newer RPC helps.
+4. ~~**Minimum Bitcoin Core version**~~ **Resolved (2026-09-27): ≥ 31.0**, for `txospenderindex` (raised from 29.0 after the PR #4 reviews). The user accepts any minimum.
 
 ## 11. Changelog
 
@@ -307,3 +308,4 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 | 2026-09-27 | 0.3.2 | Second price source for cross-checking deferred to a future version (T-303, §10) |
 | 2026-09-27 | 0.4 | No app-side chain index: chain data comes from Core's `txindex` + `blockfilterindex` via `scanblocks` and is cached in the user DB. Nothing the app writes lives on plain disk. A8, T-208, T-211 retired; T-205, T-207, T-209, T-210 rewritten; T-212 added (long scans); whitelist adds `gettxout`, `scanblocks`; Rust/crates removed from supply chain |
 | 2026-09-27 | 0.4.1 | After source-level research on BIP158 and Core's `scanblocks`: silent-skip guard added to T-210; whitelist adds `getdescriptoractivity`, `gettxspendingprevout`; minimum Core version ≥ 29.0 agreed (§10.4) |
+| 2026-09-27 | 0.4.2 | PR #4 review fixes (Opus 5.5, Codex): the `scanblocks` silent-skip guard is replaced by a scan protocol (the `to_height` postcheck was ineffective); Core ≥ 31.0 with `txospenderindex` for spender lookups; fork-point reorg handling covers negative results and coverage (T-207); BIP30 keyed by block (T-208); canary `debug.log` trace (T-209); busy-script budgets (T-205); orphaned scans (T-212); private keys in descriptors (new T-703); node indexes named as trusted (§8) |
