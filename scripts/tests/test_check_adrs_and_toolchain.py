@@ -162,7 +162,18 @@ class ToolchainTests(unittest.TestCase):
                 with self.subTest(tool=name, platform=key):
                     entry = lock[name][key]
                     self.assertTrue(entry["url"].startswith("https://"))
-                    self.assertRegex(entry["sha256"], r"^[0-9a-f]{64}$")
+                    if "sha256" in entry:
+                        self.assertRegex(entry["sha256"], r"^[0-9a-f]{64}$")
+                    else:
+                        self.assertRegex(entry["integrity"], r"^sha512-[A-Za-z0-9+/]{86}==$")
+
+    def test_pnpm_comes_from_the_npm_registry_pinned_by_integrity(self):
+        # User decision in PR #7: publisher-provided integrity instead of a GitHub digest.
+        for key, entry in toolchain.load_lock()["pnpm"].items():
+            if key in ("version", "source"):
+                continue
+            self.assertTrue(entry["url"].startswith("https://registry.npmjs.org/pnpm/-/"))
+            self.assertEqual(entry["kind"], "npm-tgz")
 
     def test_sha256_mismatch_is_a_hard_error(self):
         spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x", "sha256": "0" * 64,
@@ -170,7 +181,7 @@ class ToolchainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
                 mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(b"evil")):
-            with self.assertRaisesRegex(toolchain.ToolchainError, "SHA-256 mismatch"):
+            with self.assertRaisesRegex(toolchain.ToolchainError, "hash mismatch"):
                 toolchain.install_tool("x", spec, "linux-x86_64")
             self.assertFalse((Path(d) / "x").exists())
 
@@ -292,6 +303,36 @@ class ToolchainTests(unittest.TestCase):
         with mock.patch.object(toolchain.platform, "system", return_value="Linux"), \
                 mock.patch.object(toolchain.platform, "machine", return_value="aarch64"):
             self.assertEqual(toolchain.platform_key(), "linux-arm64")
+
+    def npm_tarball(self, data: bytes) -> tuple[bytes, str]:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            info = tarfile.TarInfo("package/pnpm")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        blob = buf.getvalue()
+        import base64
+        return blob, "sha512-" + base64.b64encode(hashlib.sha512(blob).digest()).decode()
+
+    def test_npm_tarball_is_checked_by_integrity_and_wrapped_with_pinned_node(self):
+        blob, integrity = self.npm_tarball(b"console.log('pnpm')\n")
+        spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/p.tgz", "integrity": integrity,
+                                                  "kind": "npm-tgz", "bin": "package/pnpm"}}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "BIN", Path(d) / "bin"), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
+            path = toolchain.install_tool("pnpm", spec, "linux-x86_64")
+            text = path.read_text()
+            self.assertIn(str(Path(d) / "bin" / "node"), text)
+            self.assertIn("package/pnpm", text)
+            self.assertEqual(toolchain.install_tool("pnpm", spec, "linux-x86_64"), path)
+        bad = dict(spec["linux-x86_64"], integrity="sha512-" + "A" * 86 + "==")
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
+            with self.assertRaisesRegex(toolchain.ToolchainError, "hash mismatch"):
+                toolchain.install_tool("pnpm", {"version": "1", "linux-x86_64": bad}, "linux-x86_64")
 
     def test_non_https_url_is_refused(self):
         with tempfile.TemporaryDirectory() as d:

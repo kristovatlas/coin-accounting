@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -112,13 +113,33 @@ def safe_extract(archive: Path, target: Path) -> None:
         tar.extractall(target)
 
 
+def artifact_id(entry: dict) -> str:
+    """The pinned identity of an artifact: a SHA-256 hex digest, or an npm `sha512-…` integrity."""
+    return entry.get("sha256") or entry["integrity"]
+
+
+def artifact_matches(entry: dict, path: Path) -> tuple[bool, str]:
+    if "sha256" in entry:
+        actual = sha256_file(path)
+        return actual == entry["sha256"], actual
+    algo, _, expected = entry["integrity"].partition("-")
+    if algo != "sha512":
+        raise ToolchainError(f"unsupported integrity algorithm {algo!r}")
+    h = hashlib.sha512()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    actual = base64.b64encode(h.digest()).decode()
+    return actual == expected, f"sha512-{actual}"
+
+
 def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
     entry = spec.get(key)
     if entry is None:
         raise ToolchainError(f"{name}: no artifact pinned for {key}")
     tool_dir = TOOLCHAIN / name / spec["version"]
     cached = read_marker(tool_dir)
-    if cached and cached["artifact_sha256"] == entry["sha256"] and not force:
+    if cached and cached["artifact"] == artifact_id(entry) and not force:
         binary = tool_dir / cached["bin"]
         if binary.is_file() and sha256_file(binary) == cached["bin_sha256"]:
             return binary
@@ -129,16 +150,16 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
         artifact = tmpdir / "artifact"
         print(f"downloading {name} {spec['version']} ({key})", file=sys.stderr)
         download(entry["url"], artifact)
-        actual = sha256_file(artifact)
-        if actual != entry["sha256"]:
+        ok, actual = artifact_matches(entry, artifact)
+        if not ok:
             raise ToolchainError(
-                f"{name}: SHA-256 mismatch\n  expected {entry['sha256']}\n  got      {actual}\n  url      {entry['url']}"
+                f"{name}: hash mismatch\n  expected {artifact_id(entry)}\n  got      {actual}\n  url      {entry['url']}"
             )
         staging = tmpdir / "staging"
         staging.mkdir()
         if entry["kind"] == "binary":
             shutil.copyfile(artifact, staging / entry["bin"])
-        elif entry["kind"] == "tar":
+        elif entry["kind"] in ("tar", "npm-tgz"):
             safe_extract(artifact, staging)
         else:
             raise ToolchainError(f"{name}: unknown kind {entry['kind']!r}")
@@ -151,13 +172,19 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
             binary = matches[0]
         binary.chmod(0o755)
         rel_bin = binary.relative_to(staging).as_posix()
-        bin_sha = sha256_file(binary)
         if tool_dir.exists():
             shutil.rmtree(tool_dir)
         tool_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(staging), str(tool_dir))
+        if entry["kind"] == "npm-tgz":
+            # A JavaScript package: run its entry point with the pinned Node. Its npm
+            # lifecycle scripts are never run (ENGINEERING §2.1).
+            wrapper = tool_dir / "run"
+            wrapper.write_text(f'#!/bin/sh\nexec "{BIN / "node"}" "{tool_dir / rel_bin}" "$@"\n')
+            wrapper.chmod(0o755)
+            rel_bin = "run"
         (tool_dir / MARKER).write_text(json.dumps(
-            {"artifact_sha256": entry["sha256"], "bin": rel_bin, "bin_sha256": bin_sha}) + "\n")
+            {"artifact": artifact_id(entry), "bin": rel_bin, "bin_sha256": sha256_file(tool_dir / rel_bin)}) + "\n")
         return tool_dir / rel_bin
 
 
@@ -166,7 +193,7 @@ def read_marker(tool_dir: Path) -> dict | None:
         data = json.loads((tool_dir / MARKER).read_text())
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or not {"artifact_sha256", "bin", "bin_sha256"} <= data.keys():
+    if not isinstance(data, dict) or not {"artifact", "bin", "bin_sha256"} <= data.keys():
         return None
     return data
 
@@ -184,7 +211,7 @@ def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> 
     spec = lock[name]
     tool_dir = TOOLCHAIN / name / spec["version"]
     cached = read_marker(tool_dir)
-    if not cached or cached["artifact_sha256"] != spec[key]["sha256"]:
+    if not cached or cached["artifact"] != artifact_id(spec[key]):
         raise ToolchainError(f"{name} {spec['version']} is not installed from the pinned artifact; run 'make toolchain'")
     expected = (tool_dir / cached["bin"]).resolve()
     link_path = BIN / {"python": "python3"}.get(name, name)
@@ -192,7 +219,7 @@ def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> 
         raise ToolchainError(f"{link_path} does not point at the pinned {name} {spec['version']}; run 'make toolchain'")
     if sha256_file(expected) != cached["bin_sha256"]:
         raise ToolchainError(f"{name} binary was modified after install; run 'make toolchain --force' after checking why")
-    if spec[key].get("kind") == "binary" and cached["bin_sha256"] != spec[key]["sha256"]:
+    if spec[key].get("kind") == "binary" and cached["bin_sha256"] != spec[key].get("sha256"):
         raise ToolchainError(f"{name} binary hash differs from the pinned artifact")
     return expected
 

@@ -16,7 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from banned_commands import violations  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-SELF_ALLOW = {"scripts/banned_commands.py", "scripts/check_install_commands.py", "scripts/agent_guard.py"}
+SELF_ALLOW = {"scripts/banned_commands.py", "scripts/check_install_commands.py", "scripts/agent_guard.py",
+              # Data, not commands: URLs, hashes and descriptive prose.
+              "scripts/toolchain.lock"}
 SFW_ALLOWED_DIRS = ("Makefile", "scripts/")
 
 
