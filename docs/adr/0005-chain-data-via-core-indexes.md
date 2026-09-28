@@ -27,7 +27,7 @@ Option 3, chosen by the user.
 ### Consequences
 
 - Good: no large index to build or secure; no Rust; nothing on plain disk; forward expansion is a single call.
-- Bad: we depend on Core's index correctness (trusted, THREAT_MODEL §8). Filter-index read errors remain a silent-skip residual (T-210), reported upstream. Discovery can be slow for busy scripts (budgets, T-205).
+- Bad: we depend on Core's index correctness (trusted, THREAT_MODEL §8). Filter-index read errors remain a silent-skip residual (T-210), to be reported upstream. Discovery can be slow for busy scripts (budgets, T-205).
 
 ## References
 

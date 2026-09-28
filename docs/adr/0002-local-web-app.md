@@ -23,8 +23,8 @@ Option 1, chosen by the user during planning: it is the fastest to build and has
 ### Consequences
 
 - Good: mature graph tooling; one backend language; easy E2E tests with Playwright.
-- Bad: the browser is a trust boundary. We need loopback hardening: a Host check; a one-time token delivered through a 0600 bootstrap file (never argv) and exchanged for a bearer session in `sessionStorage` (no cookies, because cookies are shared by every port on the host); and a strict CSP (architecture §4), and the browser can leak data to disk (THREAT_MODEL T-101–T-110, R-5).
-- v1 opens the user's **default browser**. Two alternatives were considered and deferred to a future version by the user (2026-09-27): launching a specific browser with a profile on the volume, and packaging a desktop shell (Electron, Tauri, pywebview). They add complexity and supply-chain surface for residual risks that are accepted for now: disk leakage by the browser (R-5), and browser extensions reading the app's pages (R-7).
+- Bad: the browser is a trust boundary. We need loopback hardening: a Host check, a bootstrap-file launch with a bearer session (ADR 0015), and a strict CSP (THREAT_MODEL T-104), and the browser can leak data to disk (THREAT_MODEL T-101–T-110, R-5).
+- v1 opens the user's **default browser** (ADR 0016).
 
 ## References
 

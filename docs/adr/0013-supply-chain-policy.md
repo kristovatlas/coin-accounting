@@ -6,21 +6,34 @@ deciders: repository owner (human), drafted by Claude Code
 
 # 0013: Supply-chain policy
 
+## Context and Problem Statement
+
+In-process egress is an accepted risk (ADR 0012), so malicious dependencies are the main exfiltration path.
+
+## Considered Options
+
+1. Default package-manager behaviour with Dependabot alerts.
+2. **A strict policy:** cooldowns, no install scripts, Socket Firewall on every install, vet-before-install, a lockfile policy check.
+3. Vendoring all dependencies.
+
 ## Decision Outcome
 
-As detailed in ENGINEERING §2:
-- pnpm 12 and uv with **7-day cooldowns**; lockfiles with hashes; frozen/locked installs.
-- **No build or lifecycle scripts:** pnpm `allowBuilds: {}` and `strictDepBuilds`; none of our own lifecycle scripts; uv wheels-only with no exceptions and `package = false`.
-- **No auto-installs or auto-downloads** (`verifyDepsBeforeRun: error`, `pmOnFail: error`, `UV_NO_SYNC`, `python-downloads = "never"`); fetch-and-run tools banned.
-- **Every install goes through Socket Firewall via `make` targets, with no fallback.** The `sfw` binary is pinned with a trust-on-first-use hash.
+Option 2. **ENGINEERING §2 (v0.2.1) is authoritative** for the concrete settings. This ADR records the principles:
+- 7-day cooldowns in all ecosystems (pnpm ≥ 12, uv); hashed lockfiles; frozen/locked installs.
+- No build or lifecycle scripts; wheels only.
+- No auto-installs, auto-downloads, or fetch-and-run tools.
+- **Every install goes through Socket Firewall via `make` targets, with no fallback.**
 - **Resolve → vet → human approval → install** for every new or bumped dependency.
-- A lockfile policy check (registry-only sources, hashes, ≥7-day age on every entry); audits on every PR; a weekly clean-cache rescan.
+- A lockfile policy check, audits on every PR, and a weekly clean-cache rescan.
 - Verified toolchain and test downloads; hardened GitHub Actions; no CI secrets.
 
 ### Consequences
 
-- Good: a strong defence for the primary exfiltration path (ADR 0012).
-- Bad: slower dependency updates; security fixes need recorded, version-specific exceptions.
+- Good: a strong defence for the main exfiltration path.
+- Bad:
+  - slower dependency updates, and security fixes need recorded, version-specific exceptions
+  - `sfw` itself is trusted on first use: Socket publishes no checksums
+  - `sfw` sends the names and versions of installed packages to Socket (a build-time flow, THREAT_MODEL §6)
 
 ## References
 

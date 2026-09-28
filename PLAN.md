@@ -34,7 +34,7 @@ FastAPI backend (Python 3.13, uv-managed)
 ### 1. Chain data from Bitcoin Core (`backend/coinacct/chain/`)
 The app keeps **no chain index of its own**. Bitcoin Core's built-in indexes answer every chain question on demand, and the app caches the answers it needs in the user DB. Maintaining the node (initial sync, pruning, restores, resyncs) is the user's responsibility; the app only checks its settings. Details were verified against BIP158 and Core's source (`rpc/blockchain.cpp`, `rpc/mempool.cpp`, `index/*`) on 2026-09-27, and reviewed by Opus 5.5 and Codex.
 
-- **Node requirements, checked at startup** (the app refuses to run with a clear message if any fails):
+- **Node requirements, checked at startup.** If any check fails, including a canary call that succeeds, the app disables all chain RPC and starts in **offline mode** with a clear message (architecture §3):
   - **Bitcoin Core ≥ 31.0**, the first release with `-txospenderindex`. The user accepts any minimum version (2026-09-27).
   - `txindex=1`, `blockfilterindex=1` and `txospenderindex=1`. Each must be reported by `getindexinfo` with `synced: true` **and** `best_block_height == getblockcount()` (retried briefly, since indexes follow the tip asynchronously).
   - An **unpruned** node (`getblockchaininfo.pruned == false`).
@@ -198,40 +198,42 @@ A pure, deterministic function of events, recomputed on every change. It can com
   | `buy` (exchange) | cost + acquisition fees | date of purchase |
   | `p2p_buy` | fiat actually paid + fees | date of purchase |
   | `income` / mining | USD FMV at receipt time, also recorded as ordinary income | receipt date |
-  | `gift_in` | dual basis: donor basis for gains; FMV at the gift, if lower, for losses; no gain/loss between the two; donor basis unknown → zero, flagged | donor's date (tacked) for gain basis; the gift date when loss basis applies |
-  | `inherit` | FMV at death | always long-term |
-  | `opening_allocation_2025` | the user's documented allocation of unused pre-2025 basis to each tax account | carried from the allocated lots; overrides derived fragments for that account |
+  | `gift_in` | dual basis: donor basis for gains; FMV at the gift, if lower, for losses; no gain/loss between the two. If the donor's basis is unknown, it's *unknown basis* (blocks reports) until the user enters one; zero is offered as the conservative choice and the choice is recorded | donor's date (tacked) for gain basis; the gift date when loss basis applies |
+  | `inherit` | FMV at death, or the basis the estate reported (e.g. §2032 alternate valuation date) | always long-term |
+  | `opening_allocation_2025` | **optional**, only for *unattached* pre-2025 basis (Rev. Proc. 2024-28). The user enters the allocation and attests to the method and to when it was made. It must be made by the first 2025 sale; the app warns if the recorded date is later. Users who already tracked coins per wallet (as UTXO tracing does) don't need it | carried from the allocated lots; overrides derived fragments for that account |
 
 - **Movements never create lots.**
-  - Self-transfers between owned UTXOs move fragments pro-rata by sats, and holding periods carry over.
+  - Self-transfers between owned UTXOs move fragments and keep their holding periods. **Where the chain shows which coins moved, the fragments follow the UTXO.** When a transaction spends a UTXO that holds several lots (after coins were merged), fragments leave **oldest first (FIFO)**, unless the wallet has a different recorded method (user decision, 2026-09-28).
   - A `deposit` moves fragments into the custodial tax account.
   - A `withdrawal` moves fragments from the custodial account to the received UTXO. The fragments are chosen by the identification rules below.
   - A lot is created on withdrawal only when the account has no known fragments (buys were never entered). The user must then supply the original date and basis; otherwise it is *unknown basis*.
-- **Disposals** (`sell`, `spend`, `gift_out`) draw only from lots in the **same tax account** (per-account basis).
+- **Disposals** (`sell`, `spend`) and **gifts out** (`gift_out`) draw only from lots in the **same tax account** (per-account basis; this also applies to self-custody wallets, Treas. Reg. §1.1012-1(j)(1)–(2)). A `gift_out` is **not** a sale. It removes lots with no gain or loss, and keeps the donor's basis and date for the recipient.
 - **Identification timing:**
   - Specific ID counts only if recorded **no later than the sale**. For exchanges, it goes to the broker; through 12/31/2026, the taxpayer's own books and records are also accepted (Notice 2025-7, extended by Notice 2026-20).
-  - `identified_at` is stored. **Warn only** (user decision, 2026-09-27): a pick made after the sale is flagged `late`. The app shows a warning (the IRS may apply FIFO instead) and notes it in the audit trail and on reports, but it **uses the user's choice** and does not block reports.
+  - `identified_at` is stored for every lot choice: exchange sales **and exchange withdrawals**. **Warn only** (user decision, 2026-09-27): a choice made after the sale or withdrawal is flagged `late`. The app shows a warning that the IRS may apply the account's standing order, or FIFO if there is none, together with the result under that method. It notes the flag in the audit trail and on reports, but it **uses the user's choice** and does not block reports.
   - For 2027+ sales the UI warns that the identification must be communicated to the broker.
-  - For on-chain disposals, the spent UTXO is itself the identification. Within that UTXO, fragments are consumed by the account's standing method.
+  - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet.
 - **Fees by role:**
   - acquisition fees add to basis
   - disposal fees reduce proceeds; proceeds are net of costs, matching 1099-DA
-  - network fees on self-transfers/deposits: the default carries the fee's basis over to the remaining sats; a setting instead treats it as a small disposal
+  - network fees on self-transfers/deposits: the default carries the fee's basis over to the remaining sats; a setting instead treats it as a small disposal. The law here isn't settled, so this is a stated tax position (ADR 0009) shown on every report
   - network fees on `spend`: they reduce proceeds
   - BTC withdrawal fees charged by an exchange: handled as a small disposal (default)
   - A tx mixing owned and third-party outputs splits the fee by role
 - **Blocking conditions:** unknown basis or unconfirmed txs (below the confirmation threshold) block report generation. Late identifications only produce a warning. Each needs an explicit user resolution, which is recorded in the change log.
 - **Dates:** events use UTC timestamps. The tax date is converted to the user's configured time zone. Block timestamps can be off by about ±2h, so the user can override them with exchange-recorded times.
 - **Short/long-term:** held for more than one year counts as long-term.
-- **Out of scope for v1** (documented, and the UI warns if they seem to apply): lost/stolen coins, forks/airdrops, state taxes. §1091 wash-sale rules do not apply to BTC (not a security); a future toggle is noted.
+- **Out of scope for v1** (documented, and the UI warns if they seem to apply): lost/stolen coins, forks/airdrops, state taxes, §1015(d) gift-tax basis adjustments. As of 2026-09, §1091 wash-sale rules apply only to stock and securities, not BTC. This is re-checked each tax year, and a future toggle is noted.
 
 ### 8. Reports (`tax/reports.py`)
 - **Form 8949 CSV:** one row per disposal-lot allocation. The box is chosen **per disposal** from (tax year, disposal channel, 1099-DA received?, basis reported?), and the user can override it with the reason recorded:
   - ≤2024: A/B/C (short-term) and D/E/F (long-term). Digital assets without a 1099-B go in C/F.
   - ≥2025: digital assets go in **G/H/I** (short-term) and **J/K/L** (long-term). C/F may not be used for them.
-    - on-chain disposals (`spend`, `gift_out`, fee disposals) → I/L
-    - 2025 exchange sells default to H/K, since brokers report proceeds but not basis
-    - exchange sells of 2026+ acquisitions default to G/J when the broker reports basis
+    - **only taxable disposals produce rows:** `sell`, `spend` and fee disposals. **`gift_out` never produces a row.**
+    - on-chain disposals (`spend`, fee disposals) → I/L
+    - exchange sells default to H/K (proceeds reported, basis not), including coins **deposited from outside** the exchange, which brokers treat as noncovered
+    - G/J only for **covered** coins, i.e. bought inside that exchange account on or after 2026-01-01, when the broker reports basis
+    - broker-reported basis and dates may differ from the user's books (Notice 2026-20). The report flags differences for review
 - **Ordinary income summary** per year: income events with their USD FMV and source.
 - **Year summary + holdings:** realized short/long-term gains per year; lots held as of any date, with basis, holding period and unrealized gain.
 - **Audit trail:** for each lot, the chain from acquisition event → every tx hop (txids) → identification → disposal. Exported as CSV and JSON.
@@ -277,7 +279,7 @@ The practices live in [`docs/ENGINEERING.md`](docs/ENGINEERING.md), and that fil
 - **Testing:**
   - E2E first, against the production build under the real CSP
   - a test-time socket guard
-  - coverage floors: 85% backend, 95% for `tax/`/`doxx.py`/`chain/` from unit + integration tests, 70% frontend
+  - coverage floors: 85% backend, 95% for `tax/`/`doxx/`/`chain/` from unit + integration tests, 70% frontend
   - per-PR mutation testing
   - anti-test-slop rules and audits
 - **Records:** ADRs are immutable after acceptance, and the architecture diagram is hash-locked to an ADR.
@@ -301,23 +303,21 @@ The practices live in [`docs/ENGINEERING.md`](docs/ENGINEERING.md), and that fil
 - A change is allowed only through an ADR. A CI check compares the file's hash with the one recorded in the ADR, and fails if they differ.
 
 ### P0.4 Initial ADRs
-Seed ADRs in [`docs/adr/`](docs/adr/README.md) record the decisions already made: 0001–0014.
-- ADR usage
-- local web app
-- platforms
-- node access
-- chain data via Core's indexes
-- storage on the volume
-- price download
-- per-account basis and identification timing
-- lot flow and fees
-- doxx rules
-- 8949 boxes
-- the accepted egress risk
-- supply-chain policy
-- the architecture baseline, which records the architecture hash
+Seed ADRs 0001–0019 in [`docs/adr/`](docs/adr/README.md) record the decisions already made:
+- process and governance: ADR usage, repository governance (precedence, procedural merge, no commit signing)
+- architecture:
+  - local web app, platforms
+  - node access, chain data via Core's indexes
+  - storage on the volume, price download
+  - the accepted egress risk, supply-chain policy
+  - the architecture baseline (with the architecture hash)
+  - local authentication, default browser
+  - no dev/live separation
+  - public-only descriptor import
+- tax: lot identification in every account, lots/gifts/fees, Form 8949 rows and boxes
+- privacy: doxx rules
 
-The same PR adds `AGENTS.md` (and the one-line `CLAUDE.md`), which makes all four Phase 0 documents binding for agents.
+The same PR adds `AGENTS.md` (and the one-line `CLAUDE.md`), which makes the Phase 0 documents binding for agents.
 
 ## Milestones
 Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diagram if needed, and it passes the coverage floors and E2E flow on Linux and macOS.
@@ -326,7 +326,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
    - config
    - RPC client with node checks (pruned, chain, version, whitelist canary)
    - storage checks: VeraCrypt detection on Linux and macOS, file modes
-   - FastAPI app with Host check, launch token, CSRF and CSP
+   - FastAPI app with the Host check, bootstrap-file launch, bearer session and CSP
    - a regtest harness that uses a verified `bitcoind` download
 2. **M1 chain access:** node checks (including index sync and the canary), the tx fetch layer, spender lookups, the scan protocol (bounded ranges, gap guards, tip handling), the scan job queue (status/abort, leftover-scan cleanup), busy-script budgets, the chain-data cache with coverage and snapshots, fork-point reorg handling, the mempool pass, and the mainnet perf check.
 3. **M2 user DB + import + discovery:**
