@@ -24,6 +24,7 @@ Option 1, chosen by the user during planning: it is the fastest to build and has
 
 - Good: mature graph tooling; one backend language; easy E2E tests with Playwright.
 - Bad: the browser is a trust boundary. We need loopback hardening (Host check, one-time launch token, CSRF header, strict CSP), and the browser can leak data to disk (THREAT_MODEL T-101–T-110, R-5).
+- v1 opens the user's **default browser**. Two alternatives were considered and deferred to a future version by the user (2026-09-27): launching a specific browser with a profile on the volume, and packaging a desktop shell (Electron, Tauri, pywebview). They add complexity and supply-chain surface for a residual risk that is accepted for now (R-5).
 
 ## References
 

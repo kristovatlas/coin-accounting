@@ -2,14 +2,14 @@
 status: proposed
 date: 2026-09-27
 deciders: repository owner (human), drafted by Claude Code
-architecture_sha256: df3dfab149c11a255f4b77445cd5fa63b6d047efc5fd4ea64f8419a3abe88001
+architecture_sha256: b569cd6f8362f85a1b4a141265a6760474e19df509802701a56d29076cd84ccd
 ---
 
 # 0014: Adopt the v1 architecture baseline
 
 ## Decision Outcome
 
-Adopt `docs/architecture.md` v0.1 (components and trust boundaries, module import rules, runtime flows F1–F3, data at rest, the data flow, chain-access sequences, build flows) as the binding v1 architecture.
+Adopt `docs/architecture.md` v0.1.1 (components and trust boundaries, module import rules, runtime flows F1–F3, data at rest, the data flow, chain-access sequences, build flows) as the binding v1 architecture.
 
 - The CI check compares `sha256(docs/architecture.md)` with `architecture_sha256` above.
 - Any later change to the architecture needs a new ADR with the new hash (ENGINEERING §4.2).
