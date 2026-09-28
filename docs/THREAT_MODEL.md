@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.5 (design stage — no code yet) |
+| Version | 0.5.1 (design stage — no code yet) |
 | Last updated | 2026-09-27 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -39,7 +39,7 @@ The app is a single-user tool running on the user's own machine (Linux or macOS)
 flowchart LR
   subgraph TB0["TB0 · User's machine (OS user account)"]
     direction LR
-    subgraph TB1["TB1 · Browser (profile on volume)"]
+    subgraph TB1["TB1 · User's default browser"]
       UI["SPA (bundled assets)"]
       OtherTabs["Other websites / tabs<br/>(untrusted)"]
     end
@@ -144,7 +144,7 @@ Columns: **ID** · **STRIDE/P** (S spoofing, T tampering, R repudiation, I info 
 | T-102 | T | **CSRF**: an AD1 page sends state-changing requests to the API | Every non-GET request needs an `X-CSRF-Token` header matching a token that only our SPA can read (served in the bootstrap response). **This header check is the primary control.** Cookies are scoped to a host, not a port, so `SameSite` does not isolate us from other apps on 127.0.0.1. Only JSON bodies are accepted; **no CORS headers ever** | Planned | |
 | T-103 | I, S | **Other local users (AD2)**, or other local web apps on 127.0.0.1, reach the API | Bind `127.0.0.1` only (never `0.0.0.0`); random port. Auth: a **one-time launch token** is exchanged once for an `HttpOnly; SameSite=Strict` session cookie, with a unique cookie name per launch; the token is invalidated immediately | Planned | |
 | T-104 | T, E | **XSS via attacker-controlled chain data (AD7)**, e.g. OP_RETURN text or crafted labels rendered in the graph or tables | React escaping only (lint bans `dangerouslySetInnerHTML` and inline styles); Cytoscape labels as text. Strict CSP: `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'` | Planned | |
-| T-105 | I | **Browser leaks sensitive data to plain disk (AD3)**: history, HTTP cache, autofill, session restore, crash reports, thumbnails | No sensitive values in URLs, including the launch token (T-110); opaque IDs; queries in POST bodies. `Cache-Control: no-store` on all API responses; autocomplete off. The launcher opens a **dedicated browser profile stored on the volume** (Chromium `--user-data-dir` / Firefox `-profile`) when a supported browser is found. Otherwise it shows a warning; the residual risk is R-5 | Planned † | |
+| T-105 | I | **Browser leaks sensitive data to plain disk (AD3)**: history, HTTP cache, autofill, session restore, crash reports, thumbnails | App-side, browser-independent controls: no sensitive values in URLs, including the launch token (T-110); opaque IDs; queries in POST bodies; `Cache-Control: no-store` on all API responses; autocomplete off on sensitive fields. v1 opens the user's **default browser** and does **not** manage a dedicated profile. Whatever the browser still writes is accepted as **R-5** (user decision, 2026-09-27) | Planned (app-side) / Accepted (browser-side) | |
 | T-106 | I, P | **UI pulls third-party resources** (fonts, CDN, analytics), leaking usage (A11) or data | All assets bundled at build time; CSP `connect-src 'self'`; a CI test fails if the built bundle references external URLs | Planned | |
 | T-107 | T | **Clickjacking**: an AD1 page frames the UI | `frame-ancestors 'none'` + `X-Frame-Options: DENY` | Planned | |
 | T-108 | I | **Browser downloads of exports go to `~/Downloads`** (plain disk) | Exports are written server-side to an export directory on the volume by default; downloading through the browser needs an explicit confirmation that warns about the destination | Planned | |
@@ -288,7 +288,7 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 | R-2 | The price source operator sees one bulk download per refresh from the user's IP (if Tor is not used) | Content reveals nothing user-specific; Tor is offered |
 | R-3 | The doxx model is a lower bound on what adversaries know (T-505) | No local tool can model proprietary chain analysis or off-chain data; mitigated by honest UI wording |
 | R-4 | **In-process egress:** malicious code running inside the backend (e.g. a compromised dependency) could send user data to the internet. Nothing at the OS level blocks it | Decided 2026-09-27: OS-level sandboxing (bwrap/nftables on Linux, sandbox-exec/pf on macOS) adds cross-platform complexity and compatibility risk. Supply-chain controls (T-601–T-604) are the primary defence; the test-time socket guard catches accidental egress only. To be revisited if the dependency count grows or a sandbox becomes portable |
-| R-5 | The browser may still write data outside the volume (crash reports, OS-level caches) when a supported browser can't be launched with a profile on the volume | Best effort with warnings; documented |
+| R-5 | **Browser-side disk leakage:** the user's own browser may keep app content on plain disk despite `no-store` (session restore, crash reports, OS-level caches, history of the loopback URL) | User decision, 2026-09-27: v1 doesn't manage a browser profile. Launching specific browsers with a profile on the volume, or packaging a desktop shell (Electron, Tauri, pywebview), added complexity and supply-chain surface. The docs mention private windows as an optional precaution. To be revisited in a future version, via an ADR |
 | R-6 | **Dev work and real data on the same machine:** an AI agent or a compromised dev tool can leave code in the working tree (venv, `node_modules`, built bundle, git hooks, Makefile). That code runs later when the user starts the app against real data | User decision, 2026-09-27: no technical dev/live separation. The user docs warn against doing development work, or running AI coding agents, on a machine where real financial data is used. Related: T-607 |
 
 ## 10. Open questions
@@ -311,3 +311,4 @@ Tax-rule correctness is **in scope**. The supported federal rules are versioned 
 | 2026-09-27 | 0.4.1 | After source-level research on BIP158 and Core's `scanblocks`: silent-skip guard added to T-210; whitelist adds `getdescriptoractivity`, `gettxspendingprevout`; minimum Core version ≥ 29.0 agreed (§10.4) |
 | 2026-09-27 | 0.4.2 | PR #4 review fixes (Opus 5.5, Codex): the `scanblocks` silent-skip guard is replaced by a scan protocol (the `to_height` postcheck was ineffective); Core ≥ 31.0 with `txospenderindex` for spender lookups; fork-point reorg handling covers negative results and coverage (T-207); BIP30 keyed by block (T-208); canary `debug.log` trace (T-209); busy-script budgets (T-205); orphaned scans (T-212); private keys in descriptors (new T-703); node indexes named as trusted (§8) |
 | 2026-09-27 | 0.5 | Supply-chain rows updated for ENGINEERING v0.2 (PR #3): vet-before-install, lockfile policy check, load-time execution paths (T-601–T-603); only-human-merges is procedural (T-605); commit signing dropped (T-606, Accepted); sfw telemetry and toolchain downloads added to build-time flows (§6); R-6 dev work and real data on the same machine accepted |
+| 2026-09-27 | 0.5.1 | No managed browser profile in v1: T-105 is split into app-side controls (Planned) and browser-side leakage (Accepted, R-5 widened) |

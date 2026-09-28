@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.1 (proposed, awaiting approval) |
+| Version | 0.1.1 (proposed, awaiting approval) |
 | Last updated | 2026-09-27 |
 | Scope | v1: Bitcoin (Bitcoin Core), single user, Linux + macOS |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) (IDs such as TB1, T-203, F2 refer to it) · [`ENGINEERING.md`](ENGINEERING.md) |
@@ -27,7 +27,7 @@ flowchart LR
   subgraph TB0["TB0 · User's machine (one OS user)"]
     direction LR
     LAUNCH["Launcher<br/>(make run / coinacct start)<br/>storage checks, one-time token,<br/>starts backend + browser"]
-    subgraph TB1["TB1 · Browser (dedicated profile on the volume)"]
+    subgraph TB1["TB1 · User's default browser"]
       SPA["SPA: React + Cytoscape.js<br/>bundled assets, strict CSP"]
     end
     subgraph BACKEND["Backend process (FastAPI on 127.0.0.1:random)"]
@@ -42,7 +42,6 @@ flowchart LR
     subgraph TB4V["TB4 · VeraCrypt volume"]
       UDB[("User DB (SQLite 0600)<br/>entities, accounts, events, lots,<br/>doxx, prices, chain cache, change log")]
       FILES[("Logs · exports · app config<br/>(RPC credentials)")]
-      BPROF[("Browser profile")]
     end
     IMPORTS[/"TB6 · Imported files<br/>address lists, public descriptors"/]
     NODE["Bitcoin Core ≥ 31.0<br/>unpruned · txindex · blockfilterindex ·<br/>txospenderindex · rpcwhitelist"]
@@ -65,14 +64,13 @@ flowchart LR
   PRC --> STORE
   STORE --> UDB
   STORE --> FILES
-  SPA -.-> BPROF
 ```
 
 **Components**
 
 | Component | Responsibility | Must not |
 |---|---|---|
-| **Launcher** | Resolves the data directory and runs the storage checks (VeraCrypt detection, file modes; T-401). Loads config, starts the backend on a random loopback port, and opens a supported browser with a profile on the volume, passing the one-time token in the URL fragment (T-110). Sets `RLIMIT_CORE=0` / `PR_SET_DUMPABLE` and points `TMPDIR` at the volume | Start if the storage checks fail (unless explicitly overridden, T-401) |
+| **Launcher** | Resolves the data directory and runs the storage checks (VeraCrypt detection, file modes; T-401). Loads config, starts the backend on a random loopback port, and opens the URL in the user's **default browser** (Python `webbrowser`), passing the one-time token in the URL fragment (T-110). Sets `RLIMIT_CORE=0` / `PR_SET_DUMPABLE` and points `TMPDIR` at the volume. It does **not** manage a browser profile in v1 (THREAT_MODEL R-5) | Start if the storage checks fail (unless explicitly overridden, T-401) |
 | **SPA** | UI: graph, tagging, events, sells, reports. Talks only to the API | Contact any other origin, embed remote assets, or put sensitive values in URLs |
 | **`api/`** | HTTP boundary: Host allowlist, session cookie, CSRF header, CSP and other security headers, request validation, `no-store` | Contain business logic |
 | **Services** (`discovery.py`, `tagging.py`, `doxx.py`) | Import and discovery; entity, account and client tagging; clustering suggestions; doxx propagation | Talk to the node except through `chain/` |
@@ -139,7 +137,7 @@ This is the exhaustive list; it mirrors THREAT_MODEL §6. Any other runtime conn
 
 ## 4. Data at rest
 
-Everything the app writes lives on the VeraCrypt volume. The app writes nothing to plain disk.
+Everything the app writes lives on the VeraCrypt volume. The app writes nothing to plain disk. The browser is a separate program, and what it stores is covered by R-5.
 
 | Store | Location | Contents | Notes |
 |---|---|---|---|
@@ -147,8 +145,8 @@ Everything the app writes lives on the VeraCrypt volume. The app writes nothing 
 | App config | `<volume>/coinacct/config.toml` | RPC endpoint and `rpcauth` credentials, proxy, time zone | Mode 0600; the credentials are never logged (T-201) |
 | Logs | `<volume>/coinacct/logs/` | Redacted operational logs | Redaction on by default (T-403) |
 | Exports | `<volume>/coinacct/exports/` | 8949 CSV, income, summaries, audit trail | Type-aware CSV escaping (T-702); a warning if saved elsewhere (T-108) |
-| Browser profile | `<volume>/coinacct/browser-profile/` | The dedicated browser profile | Best effort (T-105, R-5) |
 | **Not ours** | Bitcoin Core datadir | Chain, indexes, `debug.log` | Contains the canary warning line (T-209); managed by the user |
+| **Not ours** | The user's browser profile (plain disk) | Whatever the browser keeps despite `no-store`: session restore, crash reports, history of the loopback URL | Accepted risk R-5; a dedicated profile or desktop shell is deferred to a future version |
 
 ## 5. Main data flow: import → discover → tag → lots → reports
 
@@ -188,7 +186,7 @@ sequenceDiagram
   B->>N: getindexinfo + getblockcount (txindex, basic block filter index, txospenderindex synced to tip)
   B->>N: scanblocks status (abort our leftover scan, if any)
   B->>B: fork-point check vs persisted last-seen tip, invalidate above fork
-  L->>L: open browser (profile on volume) with one-time token in URL fragment
+  L->>L: open default browser with one-time token in URL fragment
 ```
 
 ### 6.2 Script/descriptor history: the scan protocol
@@ -265,3 +263,4 @@ flowchart LR
 | Date | Version | Change |
 |---|---|---|
 | 2026-09-27 | 0.1 | Initial architecture (P0.3) |
+| 2026-09-27 | 0.1.1 | v1 opens the user's default browser; there is no managed browser profile (user decision, R-5) |
