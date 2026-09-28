@@ -1,0 +1,32 @@
+# Toolchain and dependency installs (never committed)
+/.toolchain/
+/.venv/
+node_modules/
+/.pnpm-store/
+/.uv-cache/
+
+# Build and test output
+dist/
+coverage/
+.coverage
+.coverage.*
+htmlcov/
+playwright-report/
+test-results/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+mutants/
+
+# User data must never be in the repo (THREAT_MODEL T-406)
+*.sqlite
+*.sqlite-*
+*.db
+data/
+exports/
+coinacct-bootstrap-*.html
+
+# Local agent/editor settings
+.claude/settings.local.json

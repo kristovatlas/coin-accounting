@@ -322,12 +322,24 @@ The same PR adds `AGENTS.md` (and the one-line `CLAUDE.md`), which makes the Pha
 ## Milestones
 Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diagram if needed, and it passes the coverage floors and E2E flow on Linux and macOS.
 
-1. **M0 skeleton:**
-   - config
-   - RPC client with node checks (pruned, chain, version, whitelist canary)
-   - storage checks: VeraCrypt detection on Linux and macOS, file modes
-   - FastAPI app with the Host check, bootstrap-file launch, bearer session and CSP
-   - a regtest harness that uses a verified `bitcoind` download
+1. **M0 skeleton**, split so that nothing third-party runs before the human approves it:
+   - **M0.1 scaffolding (no third-party packages):**
+     - the `Makefile` and the pinned, hash-verified toolchain (`scripts/toolchain.py`, `scripts/toolchain.lock`)
+     - standard-library repository checks (ADRs and the architecture hash, install commands, architecture rules)
+     - tool config (`pyproject.toml`, `pnpm-workspace.yaml`)
+     - a CI workflow
+     - the Claude Code guard hooks
+     - the proposed dependency list in `docs/DEPENDENCIES.md`
+   - **M0.2 toolchain and dependencies:**
+     - install the toolchain, and confirm each tool setting marked "verify at setup"
+     - `make propose-*` for each approved dependency; Socket review; human approval; `make bootstrap`
+     - the lockfile policy check, `make audit`, zizmor/actionlint, and the signature checks for Node and `bitcoind`
+   - **M0.3 app skeleton:**
+     - the launcher (hardening, storage checks, bootstrap file) and the FastAPI app (Host check, bearer session, CSP)
+     - the RPC client with node checks (pruned, chain, version, indexes, canary)
+     - VeraCrypt detection on Linux and macOS
+     - the regtest harness
+     - the first E2E test
 2. **M1 chain access:** node checks (including index sync and the canary), the tx fetch layer, spender lookups, the scan protocol (bounded ranges, gap guards, tip handling), the scan job queue (status/abort, leftover-scan cleanup), busy-script budgets, the chain-data cache with coverage and snapshots, fork-point reorg handling, the mempool pass, and the mainnet perf check.
 3. **M2 user DB + import + discovery:**
    - entities, tax accounts, clients

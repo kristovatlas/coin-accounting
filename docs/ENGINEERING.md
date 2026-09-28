@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.1 |
+| Version | 0.2.2 |
 | Last updated | 2026-09-27 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -75,7 +75,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   Contributors, AI agents and CI all use these targets. CI jobs call `make toolchain` and `make bootstrap`, never raw installers.
 - **No silent fallback:** if `sfw` is missing, not the pinned version, or fails to start, the scripts **stop with an error**. They never drop through to an unwrapped install. Whether `sfw` fails open when the Socket API is unreachable must be tested at setup. If it does, the wrapper detects that and stops **(verify at setup)**.
 - **Fetch-and-run commands are banned:** `npx`, `pnpm dlx`, `pnpm exec` of packages not in the lockfile, `uvx`/`uv tool run`, `pip install`, `curl … | sh`, the `pre-commit` framework (it clones and builds hook environments). The same applies to IDE and agent configuration, e.g. `.mcp.json` servers started with `npx -y`. Tools we need become locked dev dependencies. Git hooks, if any, are `repo`-local scripts that call locked tools.
-- **Bootstrapping `sfw` itself:** `scripts/install-sfw` downloads the pinned sfw-free release binary and checks it against a SHA-256 committed in the repo. **Socket publishes no checksums or signatures for sfw-free**, so that committed hash is trust-on-first-use. It is recorded when the version is first adopted, and changes only through `make update-sfw` in a reviewed PR. macOS binaries are unsigned. CI uses the same script, not `socketdev/action`, which installs the latest version.
+- **Bootstrapping `sfw` itself:** `make toolchain` (`scripts/toolchain.py`) downloads the pinned sfw-free release binary and checks it against the SHA-256 in `scripts/toolchain.lock`. **Socket publishes no checksums or signatures for sfw-free**, so that committed hash is trust-on-first-use. It is recorded when the version is first adopted, and changes only through `make update-sfw` in a reviewed PR. macOS binaries are unsigned. CI uses the same script, not `socketdev/action`, which installs the latest version.
 - **What `sfw` does and doesn't do:**
   - It blocks packages Socket has *confirmed* as malware.
   - AI-flagged risks produce warnings only, and brand-new unscanned versions are not blocked. That is why the §2.4 review and the cooldowns still matter.
@@ -112,7 +112,7 @@ The same process applies to a new direct dependency, and to a version bump of an
 
 ### 2.5 Lockfile policy check (CI, required)
 
-The cooldown only applies when versions are *resolved*. A hand-edited or bot-generated lockfile could still bring in a fresh or off-registry package. So a required CI check (`scripts/check-lockfiles`) verifies, for **every** entry in `pnpm-lock.yaml` and `uv.lock`:
+The cooldown only applies when versions are *resolved*. A hand-edited or bot-generated lockfile could still bring in a fresh or off-registry package. So a required CI check (`scripts/check-lockfiles`, added in M0.2 together with the first lockfile) verifies, for **every** entry in `pnpm-lock.yaml` and `uv.lock`:
 
 - the source is `registry.npmjs.org` or `files.pythonhosted.org`, with no git, URL, tarball or path sources, direct or transitive
 - an integrity hash is present
@@ -355,3 +355,4 @@ A change is done only when:
 | 2026-09-27 | 0.1 | Initial proposal (P0.2), including the rule that all installs go through `sfw` via the repo's `make` targets (§2.3) |
 | 2026-09-27 | 0.2 | Incorporates the Opus 5.5 and Codex (gpt-5.6-sol) reviews and the user's decisions: two-phase dependency adds (resolve → vet → approve → install); pnpm 12 settings (`allowBuilds`, `pmOnFail`, `verifyDepsBeforeRun`, `blockExoticSubdeps`, `trustPolicy`); uv `package = false`, `python-downloads = "never"`, `UV_NO_SYNC`, no sdist exceptions, relative `exclude-newer`; lockfile policy check; sfw trust-on-first-use + telemetry; verification table for non-package downloads; audits, reproducible build, Actions hardening restored or added; socket guard defined; coverage mechanics and ratchet; per-PR mutation runs; corrected CSP rationale; float ban hardened; ADR immutability check. **Signed commits dropped** and **only-the-human-merges kept procedural** by user decision |
 | 2026-09-27 | 0.2.1 | Aligned with architecture v0.2: `doxx/` is a pure package; E2E lives in `e2e/` with a Python harness; import and capability rules are defined in architecture §2 and checked by `scripts/check-architecture`; the subprocess allowlist moves there |
+| 2026-09-28 | 0.2.2 | M0.1: the toolchain installer is `scripts/toolchain.py` with `scripts/toolchain.lock`; `check-lockfiles` arrives with the first lockfile (M0.2) |

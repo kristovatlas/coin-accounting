@@ -1,0 +1,24 @@
+# ENGINEERING §2.1. The "(verify at setup)" items are confirmed in M0.2 with the pinned pnpm.
+packages:
+  - frontend
+  - e2e
+
+# Cooldown: no version younger than 7 days, and no exemption for missing publish times.
+minimumReleaseAge: 10080
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+
+# No dependency build scripts. Allowing one needs an ADR.
+allowBuilds: {}
+strictDepBuilds: true
+
+# No git/tarball/URL dependencies anywhere in the tree; don't accept provenance downgrades.
+blockExoticSubdeps: true
+trustPolicy: no-downgrade
+
+# Never install or self-download implicitly.
+verifyDepsBeforeRun: error
+pmOnFail: error
+
+# Project-local store (ENGINEERING §2.7).
+storeDir: .pnpm-store
