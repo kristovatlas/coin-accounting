@@ -1,0 +1,28 @@
+---
+status: accepted
+date: 2026-09-28
+deciders: repository owner (human), drafted by Claude Code
+---
+
+# 0003: Supported platforms are Linux and macOS
+
+## Considered Options
+
+1. Linux only
+2. **Linux and macOS** (user decision)
+3. Linux, macOS and Windows
+
+## Decision Outcome
+
+- v1 supports **Linux and macOS**; Windows is not planned.
+- Avoid OS-specific mechanisms unless both platforms are covered.
+- CI and E2E run on both.
+
+### Consequences
+
+- Good: covers the platforms the user needs; keeps the build simple.
+- Bad: VeraCrypt detection needs a macOS method (designed in M0, with an explicit-confirmation fallback; T-401). OS-level egress sandboxing was rejected partly for portability reasons (ADR 0012).
+
+## References
+
+- THREAT_MODEL §10.1

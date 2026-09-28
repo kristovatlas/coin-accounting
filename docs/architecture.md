@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.1 (proposed, awaiting approval) |
+| Version | 0.2.1 (status: see ADR 0014) |
 | Last updated | 2026-09-27 |
 | Scope | v1: Bitcoin (Bitcoin Core), single user, Linux + macOS |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) (IDs such as TB1, T-203, F2 refer to it) · [`ENGINEERING.md`](ENGINEERING.md) |
