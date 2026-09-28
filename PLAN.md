@@ -262,54 +262,29 @@ Order: design (this plan) → **P0.1 threat model** → **P0.2 engineering pract
 - The threat model is updated in the same PR as any change that affects a threat.
 
 ### P0.2 `docs/ENGINEERING.md` (practices; agreed before any code)
-- **Supply chain (JS):**
-  - pnpm with `minimumReleaseAge: 10080` (7-day cooldown on any new version)
-  - lifecycle/postinstall scripts blocked (pnpm 10 default; empty `onlyBuiltDependencies`)
-  - `--frozen-lockfile` in CI
-  - no CDN assets at runtime
-- **Supply chain (Python):**
-  - `uv` with a lockfile containing hashes, `uv sync --locked`
-  - a 7-day cooldown via `exclude-newer`, kept rolling by a checked-in script (verify uv's relative-duration support at setup)
-  - sdists only when no wheel exists, reviewed by hand
-- **Dependency vetting:**
-  - Every new dependency, direct or transitive, is scanned with Socket.dev (Socket CLI / Socket Firewall `sfw` wrapping installs) **before it is installed or executed**.
-  - The dependency is recorded in `docs/DEPENDENCIES.md` with a justification.
-  - The rule is to prefer stdlib or a small hand-written module over adding a dependency.
-  - Because in-process egress is an accepted risk, **these controls are the primary defence against data exfiltration**.
-- **CI:**
-  - GitHub Actions pinned by commit SHA; `permissions: contents: read` by default
-  - no secrets needed
-  - `pip-audit`/`pnpm audit` + Socket on each PR
-  - reproducible frontend build
-  - `bitcoind` for regtest downloaded with SHA256SUMS + builder-signature verification
-  - Playwright browsers pinned
+The practices live in [`docs/ENGINEERING.md`](docs/ENGINEERING.md), and that file is authoritative. In summary:
+- **Supply chain:**
+  - pnpm 12 and uv, both with 7-day cooldowns
+  - no build or lifecycle scripts; wheels only
+  - no auto-installs or auto-downloads
+  - every install through Socket Firewall via `make` targets with no fallback
+  - dependencies are **resolved, vetted and approved before anything is installed**
+  - a lockfile policy check
+  - verified toolchain and test downloads
+  - audits on every PR
+- **CI:** hardened Actions, no secrets, a reproducible frontend build, Linux + macOS.
 - **Testing:**
-  - The strategy leans on E2E: regtest `bitcoind` + backend + Playwright UI flows are the primary evidence a feature works, and unit tests back up the doxx and tax engines and the scan/cache logic.
-  - E2E runs on both Linux and macOS.
-  - Coverage floors, enforced in CI: overall ≥85% line+branch, and ≥95% for `tax/`, `doxx.py`, `chain/`. These are floors, not targets.
-  - A test-time socket guard (patching `socket.connect` **and** `getaddrinfo`) fails any test that opens an unexpected connection. It catches accidental phoning home; it is not a security boundary.
-  - **Anti-test-slop:**
-    - A review checklist bans tests that only assert mocks, tautologies, snapshot-everything tests, and tests changed to match buggy output.
-    - Tax tests use hand-worked expected values derived from IRS rules, independently of the code.
-    - Mutation testing (`mutmut`) on `tax/` and `doxx.py` runs on a schedule, with a surviving-mutant budget.
-    - A periodic "test audit" task reviews the suite and deletes or strengthens weak tests.
-- **AI agents and real data:**
-  - Agents never run while a VeraCrypt volume with real data is mounted, and never get access to real DBs, logs or exports.
-  - Development and E2E use regtest and synthetic data only.
-  - Mainnet smoke tests are run by the human, not by an agent.
-  - Data paths are listed in `.gitignore` and agent-ignore files.
-- **Design records:**
-  - ADRs in `docs/adr/NNNN-title.md` (MADR format) for every significant or irreversible choice. Changing a decision means writing a superseding ADR, not editing history.
-  - Architecture diagram changes need an ADR plus human review.
-- **Code:**
-  - typed Python (mypy strict), TypeScript strict, ruff/eslint
-  - integer sats, `Decimal` for fiat; `float` is banned in `tax/`
-  - React inline styles are banned, because the CSP has no `'unsafe-inline'`
-  - no network calls outside `rpc.py` (loopback) and `prices/`
-- **Process:**
-  - small commits
-  - each PR updates the threat model status and any affected ADR/diagram
-  - Definition of Done includes E2E coverage of the feature
+  - E2E first, against the production build under the real CSP
+  - a test-time socket guard
+  - coverage floors: 85% backend, 95% for `tax/`/`doxx.py`/`chain/` from unit + integration tests, 70% frontend
+  - per-PR mutation testing
+  - anti-test-slop rules and audits
+- **Records:** ADRs are immutable after acceptance, and the architecture diagram is hash-locked to an ADR.
+- **AI agents:**
+  - no real data
+  - they propose dependencies but never approve them
+  - only the human merges (procedural)
+- **Commit signing is not required.**
 
 ### P0.3 `docs/architecture.md` — architecture diagram (human-reviewed, stays binding)
 - A Mermaid diagram (renders on GitHub and as text in the repo) of components, trust boundaries, data stores (all on the VeraCrypt volume), and every network flow.
