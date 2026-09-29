@@ -279,12 +279,15 @@ def link(bin_path: Path, name: str) -> None:
     link_path.symlink_to(bin_path)
 
 
-def require_approved_lock(root: Path = ROOT) -> None:
+def require_approved_lock(root: Path | None = None) -> None:
     """Refuse to install pins that differ from origin/main (i.e. aren't merged by the human).
 
     Checked here, not only in the Makefile, so a direct `toolchain.py install` is gated too
     (PR #7 review, round 6). `make toolchain DEPS_APPROVED=1` passes --approved.
     """
+    # Resolved at call time (not as a default argument), so the checked repository is always
+    # the one ROOT names when the check runs.
+    root = root if root is not None else ROOT
     rel = LOCK.relative_to(ROOT).as_posix()
 
     def git(*args: str) -> int:
