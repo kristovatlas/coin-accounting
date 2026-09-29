@@ -153,6 +153,11 @@ PANEL="$GIT_DIR_ABS/review-panel"; WT="$GIT_DIR_ABS/review-panel-wt"; umask 077
    - merge duplicates, keeping the highest severity
    - mark each finding valid, rejected (with the reason), or needs the human
 2. **Classify each valid finding.** It is a **P1** if its severity is Critical/High/P0/P1 on the reviewer's scale, or if it would cause a security hole, data loss, a privacy leak, wrong tax figures, or a broken build or test.
+   - **Downgrade to non-P1** (user decision, 2026-09-29), whatever the reviewer's severity:
+     - **Process edge cases that fail safe:** a gap in this skill's procedure or the review workflow whose worst outcome is that the panel stalls, repeats work or asks the human.
+     - **Unsandboxed-AI findings:** "an AI could be prompt-injected or steered", or "this rule is only an instruction to the AI". These are accepted risk R-9; the panel does not try to sandbox AI.
+
+     They become issues, or triage notes if already covered by R-9.
    - The panel fixes a P1 unless it needs a human decision; those P1s go into `p1_fixes`.
    - These go into `human_items`:
      - a P1 that needs a human decision
