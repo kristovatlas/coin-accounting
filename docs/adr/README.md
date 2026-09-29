@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 MADR-format records of significant decisions (see [ADR 0001](0001-record-decisions-with-adrs.md) and ENGINEERING §4).
-- **Status is in each file's front matter.** Any ADR on `main` has been decided by the human's merge.
+- **Status is in each file's front matter.** Any ADR on `main` has been decided by the human: by merging it, or by approving it as a decision point before the review panel merged it ([ADR 0020](0020-review-panel.md)).
 - This index lists titles only. CI will regenerate and check it (M0).
 - When binding documents conflict, [ADR 0018](0018-repository-governance.md) sets which one wins.
 

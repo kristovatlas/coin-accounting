@@ -313,7 +313,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
 - **Review.** PRs go through the `/review-panel` process ([ADR 0020](adr/0020-review-panel.md)):
   - Each round has four AI reviews: Opus 5.5 and Codex gpt-5.6-sol, each once for security and once for function.
   - Findings are validated before anything is acted on. Valid P1/High/Critical findings are fixed, and the panel repeats. Other valid findings become GitHub issues.
-  - The agent merges after a clean round, pinned to the reviewed commit, and only for the owner's same-repository PRs. Changes to dependencies, controls, the agent's rules, ADRs, the architecture or PLAN are **decision points** the human must approve. The human reviews those decisions rather than every application-code diff (THREAT_MODEL R-9).
+  - The agent merges only through ADR 0020's merge gate: a clean round at the pinned commit, required CI checks green on it, the owner's same-repository PR. Every change outside a short application allowlist (so dependencies, controls, agent instructions, scripts, CI, binding documents, ADRs, the architecture and PLAN) is a **decision point** the human approves, shown with the diff. The human reviews those decisions rather than every application-code diff (THREAT_MODEL R-9).
   - Review output and triage decisions are posted as PR comments, as a record.
 
 ## 7. Workflow
@@ -358,7 +358,7 @@ A change is done only when:
 | ADR immutability, diagram hash | CI checks |
 | Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review |
 | Test-slop rules | Partly automated (§3.5) + review checklist + periodic test audit |
-| Only the human merges (or `/review-panel` after a clean round with no decision points, ADR 0020) | Procedural (Documented, T-605) |
+| Only the human merges (or `/review-panel` through ADR 0020's merge gate, with every decision point approved by the human) | Procedural (Documented, T-605) |
 | No real data for agents | `AGENTS.md` + SessionStart hook + human discipline (Documented, T-607, R-6) |
 
 ## 10. Changelog
