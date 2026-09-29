@@ -18,7 +18,9 @@ from banned_commands import violations  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 SELF_ALLOW = {"scripts/banned_commands.py", "scripts/check_install_commands.py", "scripts/agent_guard.py",
               # Data, not commands: URLs, hashes and descriptive prose.
-              "scripts/toolchain.lock"}
+              "scripts/toolchain.lock",
+              # Detection patterns for these very commands (ADR 0020 tripwire).
+              "scripts/tripwire.py", "scripts/secret_scan.py"}
 SFW_ALLOWED_DIRS = ("Makefile", "scripts/")
 
 

@@ -26,6 +26,7 @@ MADR-format records of significant decisions (see [ADR 0001](0001-record-decisio
 | [0017](0017-no-dev-live-separation.md) | No technical separation of development and real-data use |
 | [0018](0018-repository-governance.md) | Repository governance, agent rules and document precedence |
 | [0019](0019-public-descriptor-import.md) | Import addresses and public descriptors only |
+| [0020](0020-review-panel.md) | Automated review panel and tripwire; the human merges |
 | [0021](0021-standing-method-automatic.md) | Accounts that use their standing method need no lot picking |
 | [0022](0022-install-guard-is-hygiene.md) | The install-command guard is hygiene against accidental installs |
 

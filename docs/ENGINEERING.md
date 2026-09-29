@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.10 |
+| Version | 0.2.11 |
 | Last updated | 2026-09-28 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -311,6 +311,11 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
   - add MCP servers or tools that fetch and run packages
 - **Transparency.** Agent-authored commits carry a `Co-Authored-By` trailer. PR descriptions state what was verified (commands run, tests added) and what wasn't.
 - **Review.** Every agent PR gets human review. Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
+  - **The review panel** (`/review-panel #N`, [ADR 0020](adr/0020-review-panel.md)) does the AI review:
+    - Rounds of four reviews (Opus 5.5 and Codex gpt-5.6-sol, security and functional) find issues, and the panel fixes valid P1s and files issues for the rest.
+    - When a round is clean and CI is green, the **tripwire** checks the final commit: a mechanical scan (`scripts/tripwire.py`, from `main`'s copy) plus a separate Opus check for malicious patterns. Examples: process or network use in tests, weakened or deleted guards and tests, new hosts, obfuscated code, dependency or agent-instruction changes. It is a heuristic that points the human's attention, not a guarantee.
+    - The flags are posted for the human (after the mechanical secret scan, `scripts/secret_scan.py`), and set as the advisory `tripwire` commit status on that exact commit. The hand-off names the SHA, and a later push has no status until the tripwire runs again.
+    - **The human merges**, looking carefully at anything flagged. The panel never merges; afterwards it deletes the branch and cleans up.
 
 ## 7. Workflow
 
@@ -373,3 +378,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.8 | CI passes `DEPS_APPROVED=1` explicitly so dependency PRs are tested before approval (user decision, #44; THREAT_MODEL §5.6.1) |
 | 2026-09-28 | 0.2.9 | PR #7 review round 6: approval checked against `refs/remotes/origin/main`, ignored files included; the toolchain installer checks its own pins; `propose-*` refuse unapproved install config, resolve with `--no-build` and `ignorePnpmfile`; the `MAKEFLAGS` and untrusted-branch limits stated |
 | 2026-09-28 | 0.2.10 | PR #7 review round 7: the `DEPS_APPROVED` rule is stated for all agents in AGENTS.md; only Claude Code has a technical block |
+| 2026-09-28 | 0.2.11 | Review process: the `/review-panel` skill and the tripwire (ADR 0020); the human still merges |
