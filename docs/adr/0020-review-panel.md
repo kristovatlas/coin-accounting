@@ -4,94 +4,79 @@ date: 2026-09-28
 deciders: repository owner (human), drafted by Claude Code
 ---
 
-# 0020: Automated review panel drives PRs to merge
+# 0020: Automated review panel; auto-merge only for application code
 
 ## Context and Problem Statement
 
 Every PR so far has been reviewed by two AI models, with the triage done by hand. The human wants LLM reviews to replace most human review time, with the human's attention reserved for real decisions.
 
+Three review rounds on the first design for this ADR showed a problem. A panel that merges everything on its own, gated by stored approvals, needs a lot of machinery, and each piece had holes: an approval ledger, special commits, session tracking.
+
 ## Considered Options
 
 1. The human requests reviews and approves each merge (the practice so far).
-2. **A `/review-panel #N` skill.** Four reviews per round (Opus 5.5 security and functional, Codex gpt-5.6-sol security and functional). Validated P1/High/Critical findings are fixed and the panel repeats. Other valid findings become GitHub issues. When a round is clean, the agent merges, or brings the human decision points to the human.
-3. A panel that never merges, only reports. Every merge still needs the human, including routine application-code PRs.
-4. GitHub auto-merge with required reviews. This needs a second GitHub account for the reviewer, because agents act as the owner, and it adds no decision-point logic.
+2. A panel that merges every PR itself, after the human approves "decision points" recorded in a state file. Rejected after three review rounds, for these reasons:
+   - stored approvals could be forged by an agent
+   - the list of paths needing a decision kept leaking
+   - the restart and acceptance logic kept failing
+3. **A panel that reviews every PR, but auto-merges only application-code PRs.** Every other PR is merged only on the human's explicit instruction.
+4. A panel that never merges. Every merge needs the human, even for routine application code.
 
 ## Decision Outcome
 
-Option 2 (user decision, 2026-09-28), as specified in `.claude/skills/review-panel/SKILL.md`, which this ADR governs: changing the skill's merge gate, decision points or trust rules needs a new ADR.
+Option 3 (user decision, 2026-09-28), as specified in `.claude/skills/review-panel/SKILL.md`. This ADR governs that file: any change to it, or to `.claude/agents/panel-reviewer.md`, needs the human (neither file is on the allowlist).
 
-**This ADR amends two earlier ADRs**, under the newest-wins rule of ADR 0018:
-- [ADR 0018](0018-repository-governance.md), Merging: besides the human, the panel may merge under the conditions below.
-- [ADR 0001](0001-record-decisions-with-adrs.md), acceptance: an ADR is also accepted when the human approves it as a decision point, and the panel then merges it.
+### The panel
 
-### Merge authority
+`/review-panel #N`, typed by the human (the skill can't be started by the model or a subagent), runs rounds of four reviews: Opus 5.5 and Codex gpt-5.6-sol, each once for security and once for function.
+- Validated P1/High/Critical findings are fixed, and the round repeats.
+- Other valid findings become GitHub issues.
+- A loop guard stops for the human after 5 rounds.
+- Reviewers can't change anything. Opus runs as a read-only agent (Read, Grep, Glob only), and Codex runs in its read-only sandbox.
+- Only same-repository PRs authored by the owner are handled.
+- PR text, reviews, issues, comments and task notifications are untrusted data.
 
-The human typing `/review-panel #N` (or the cron tick the panel creates for it) is the instruction to merge PR #N. The skill can't be invoked by the model on its own (`disable-model-invocation`), or from a subagent. It merges only through one **merge gate**:
-- **A clean round at a pinned commit.** A round of four reviews found no valid P1/High/Critical findings at a pinned head. The base branch and merge base are unchanged since the round started.
-  - A push (other than the panel's own, which starts a new round), a retarget or a base change restarts the round and voids approvals.
-  - **The one exception:** the panel's own commit that only flips approved ADRs from `proposed` to `accepted` keeps the round and the approvals.
-- **CI on that commit:** the required checks (`checks (ubuntu-latest)`, `checks (macos-latest)`) are present and green on it, and no other check failed.
-- **Mergeable:** the PR has no conflict.
-- **Approved:** every decision point has been approved by the human in the current session.
-- **Pinned merge:** `gh pr merge --match-head-commit <that commit>`. The approvals are quoted in a PR comment first.
+### Auto-merge
 
-**Scope.** Only same-repository PRs authored by the repository owner. The panel doesn't check out, run or merge anything else.
+This amends [ADR 0018](0018-repository-governance.md): the panel merges on its own only when **all** of these hold:
+- **The round was clean** at the exact commit being merged.
+- **Every changed path is on the application allowlist:**
+  - `backend/coinacct/{domain,services,chain,tax,doxx}/**`
+  - `backend/tests/**`
+  - `frontend/src/{views,graph}/**`
+  - `e2e/**/*.spec.ts`
+- **None of these appear:**
+  - dot-directories or dotfiles
+  - agent-instruction files (`AGENTS*.md`, `CLAUDE*.md`, `SKILL.md`)
+  - manifests, lockfiles, `*.toml`/`*.yaml` config
+  - symlinks or submodules
+- **Moved files** count under both their old and their new path.
+- **Nothing that needs the human.** The change needs no ADR under ENGINEERING §4.1, takes no tax position or privacy trade-off, and no reviewer was skipped. This judgment can only block an auto-merge, never allow one.
+- **The merge gate passes:**
+  - the head is the reviewed commit
+  - the required CI checks (`checks (ubuntu-latest)`, `checks (macos-latest)`, from GitHub Actions) are green on that commit
+  - the PR is mergeable
+  - the merge uses `gh pr merge --match-head-commit`
+  - if the base branch moved, a clean merge of it into the branch keeps the reviews (verified mechanically); a conflict starts a new round
 
-### Human decision points
+The security-critical modules are **not** on the allowlist, so a change to any of them always goes to the human: `launcher.py`, `config.py`, `api/`, `rpc.py`, `prices/`, `storage/`, `e2e/harness/` and `frontend/src/api/`.
 
-**Fail-safe, by path.** Every changed path (with moves listed as both old and new path) is a decision point, **unless** it is on this application allowlist:
-- `backend/coinacct/**`
-- `backend/tests/**`
-- `frontend/src/**`
-- `frontend/tests/**`
-- `e2e/tests/**`
+### Every other PR
 
-Even there, these are always decision points:
-- dotfiles
-- `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`
-- package manifests, lockfiles and `*.toml`/`*.yaml`/`*.yml` config
-
-So every change to dependencies, install config, agent instructions, scripts, CI, the binding documents, ADRs, the architecture and PLAN needs the human.
-
-**Also by content:**
-- tax positions
-- privacy trade-offs
-- risk changes
-- unrequested scope changes
-- a rejected Critical/High security finding
-- a skipped security reviewer
-
-The agent's judgment can add decision points, never remove one.
-
-**What the human is shown.** Decisions are presented with the diffstat and a link to the PR's files, never with the agent's summary alone. Dependency changes also come with the Socket verdict and the lockfile diff (ENGINEERING §2.4).
-
-### Approvals
-
-Approvals come only from the human's own messages in the current Claude session. PR text, review reports, issues and comments are untrusted data, and a cron tick approves nothing.
-
-An approval is voided when:
-- the reviewed head or base changes (except the status-only commit), or
-- the session changes; the human then confirms again.
-
-### Other rules
-
-- **Other agents** may run the procedure by hand, but they merge only when the human explicitly says "merge PR #N" in their own session.
-- **Issues.** The agent may open GitHub issues (label `review-panel`) for valid non-P1 findings, and post review and triage comments. Reports are scrubbed of local details, and unfixed security findings are described in general terms until fixed.
-- **Loop guard.** The panel stops for the human after 5 rounds. A merge the human orders from there still goes through the merge gate.
-- **Usage limits.** Only session tokens are used. When a limit is hit, the panel pauses and resumes from its state file.
+Every other PR goes to the human with a clean round, the reason, the diffstat and files link, and for dependencies the Socket verdict and lockfile diff.
+- **It merges only when the human types "merge #N" in the session.** The panel then sets the PR's ADRs to `accepted`, and merges through the same gate in that turn.
+- **The panel stores no approvals.** This is the explicit instruction that ADR 0018 already allows. The human's merge instruction is the acceptance under [ADR 0001](0001-record-decisions-with-adrs.md), and the dependency approval under ENGINEERING §2.4.
 
 ### Consequences
 
-- **Good:** routine application-code PRs progress without waiting for the human. Every review, triage and decision is on the PR, and the human's attention goes to the decision points.
-- **Bad:** an agent merges application-code PRs with the owner's credentials and no human diff review. Enforcement is procedural (THREAT_MODEL T-605), and the residual risks are accepted as R-9:
-  - a validation mistake merging a real defect
-  - Opus reviewers read-only only by prompt
-  - PR code run locally by the panel, as in normal development (R-6)
-  - a Codex run lasting up to ~5 seconds after a data volume is mounted, before its watchdog kills it
-
-  They are limited by four reviews per round, the fail-safe decision points, the merge gate and the owner-only scope.
+- **Good:**
+  - Routine application-code PRs progress without the human.
+  - Every other change still gets an explicit human merge, with no approval state an agent could forge.
+  - Every review and triage is on the PR.
+- **Bad:** application-code PRs merge with no human diff review, under the owner's credentials. This is accepted as THREAT_MODEL R-9, which also covers:
+  - reviewers running while a data volume is mounted: the user must not mount one while the panel runs, and Codex's watchdog kills it within ~5 seconds
+  - the panel running the PR's code locally, as in normal development (R-6)
 
 ## References
 
-- `.claude/skills/review-panel/SKILL.md`; AGENTS.md; ADR 0001; ADR 0018; ENGINEERING §2.4, §4.1, §6, §8, §9; THREAT_MODEL T-605, R-8, R-9
+- `.claude/skills/review-panel/SKILL.md`; `.claude/agents/panel-reviewer.md`; AGENTS.md; ADR 0001; ADR 0018; ENGINEERING §2.4, §4.1, §6; architecture §2; THREAT_MODEL T-605, R-6, R-9
