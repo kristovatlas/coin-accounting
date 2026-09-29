@@ -164,7 +164,7 @@ The cooldown only applies when versions are *resolved*. A hand-edited or bot-gen
 - **Branch protection on `main`:**
   - PRs only, with all required checks green
   - stacked PRs are merged with merge commits
-  - **only the human merges**, or explicitly tells an agent to merge (e.g. "merge #N"). The one exception: `/review-panel` auto-merges application-code-only PRs after a clean round ([ADR 0020](adr/0020-review-panel.md)). Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605
+  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605
 - **Commit signing is not required** (user decision, 2026-09-27). Agents would need the owner's key, so signatures couldn't tell agent commits from human ones. GitHub signs the merge commits it creates. If releases are ever published for other users, release tags will be signed (THREAT_MODEL T-606).
 - GitHub secret scanning and push protection are enabled.
 
@@ -310,11 +310,12 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
   - commit to `main` directly or merge PRs unless the human explicitly says so (§2.7)
   - add MCP servers or tools that fetch and run packages
 - **Transparency.** Agent-authored commits carry a `Co-Authored-By` trailer. PR descriptions state what was verified (commands run, tests added) and what wasn't.
-- **Review.** PRs go through the `/review-panel` process ([ADR 0020](adr/0020-review-panel.md)):
-  - Each round has four AI reviews: Opus 5.5 and Codex gpt-5.6-sol, each once for security and once for function. The reviewers can only read.
-  - Findings are validated before anything is acted on. Valid P1/High/Critical findings are fixed, and the panel repeats. Other valid findings become GitHub issues.
-  - After a clean round, a PR that changes only the application allowlist of ADR 0020 is auto-merged, pinned to the reviewed commit with the required CI checks green. **Every other PR** (dependencies, config, scripts, CI, agent instructions, docs, ADRs, and the security-critical modules) is handed to the human, who merges it or says "merge #N".
-  - Review output and triage decisions are posted as PR comments, as a record.
+- **Review.** Every agent PR gets human review. Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
+  - **The review panel** (`/review-panel #N`, [ADR 0020](adr/0020-review-panel.md)) does the AI review:
+    - Rounds of four reviews (Opus 5.5 and Codex gpt-5.6-sol, security and functional) find issues, and the panel fixes valid P1s and files issues for the rest.
+    - When a round is clean, the **tripwire** checks the final commit: a mechanical scan (`scripts/tripwire.py`) plus a separate Opus check for malicious patterns. Examples: process or network use in tests, weakened guards, new hosts, obfuscated code, dependency or agent-instruction changes.
+    - The flags are posted for the human, and set as the `tripwire` commit status on that exact commit. A later push has no status until the tripwire runs again.
+    - **The human merges**, looking carefully at anything flagged. The panel never merges; afterwards it deletes the branch and cleans up.
 
 ## 7. Workflow
 
@@ -339,7 +340,7 @@ A change is done only when:
 - [ ] Any new dependency went through §2.4, is recorded in `DEPENDENCIES.md`, and has human approval
 - [ ] No new network flow outside THREAT_MODEL §6; the socket guard stays green
 - [ ] User-facing docs updated where behaviour changed
-- [ ] The human merged the PR or told an agent to, or `/review-panel` auto-merged it under ADR 0020 (application code only)
+- [ ] The human merged the PR
 
 ## 9. Enforcement summary
 
@@ -358,7 +359,7 @@ A change is done only when:
 | ADR immutability, diagram hash | CI checks |
 | Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review |
 | Test-slop rules | Partly automated (§3.5) + review checklist + periodic test audit |
-| Only the human merges, or tells an agent to (`/review-panel` auto-merges application code only, ADR 0020) | Procedural (Documented, T-605) |
+| Only the human merges | Procedural (Documented, T-605) |
 | No real data for agents | `AGENTS.md` + SessionStart hook + human discipline (Documented, T-607, R-6) |
 
 ## 10. Changelog
@@ -377,4 +378,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.8 | CI passes `DEPS_APPROVED=1` explicitly so dependency PRs are tested before approval (user decision, #44; THREAT_MODEL §5.6.1) |
 | 2026-09-28 | 0.2.9 | PR #7 review round 6: approval checked against `refs/remotes/origin/main`, ignored files included; the toolchain installer checks its own pins; `propose-*` refuse unapproved install config, resolve with `--no-build` and `ignorePnpmfile`; the `MAKEFLAGS` and untrusted-branch limits stated |
 | 2026-09-28 | 0.2.10 | PR #7 review round 7: the `DEPS_APPROVED` rule is stated for all agents in AGENTS.md; only Claude Code has a technical block |
-| 2026-09-28 | 0.2.11 | Review process: the `/review-panel` skill (ADR 0020); auto-merge only for application-code-only PRs |
+| 2026-09-28 | 0.2.11 | Review process: the `/review-panel` skill and the tripwire (ADR 0020); the human still merges |
