@@ -287,7 +287,7 @@ The practices live in [`docs/ENGINEERING.md`](docs/ENGINEERING.md), and that fil
 - **AI agents:**
   - no real data
   - they propose dependencies but never approve them
-  - only the human merges (procedural)
+  - only the human merges, or the `/review-panel` skill after the human approves every decision point (procedural; ADR 0020)
 - **Commit signing is not required.**
 
 ### P0.3 `docs/architecture.md` — architecture (human-reviewed, stays binding)

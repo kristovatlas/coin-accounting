@@ -105,8 +105,8 @@ The same process applies to a new direct dependency, and to a version bump of an
 3. **Review the Socket verdict** for every new or changed package in the lockfile diff. Use the Socket GitHub App's report on the draft PR (which contains only the manifest/lockfile change), or the package's socket.dev page. Look for install scripts, network or filesystem access, obfuscated code, telemetry, new maintainers and typosquat signals.
 4. **Check its health:** maintainers, release history, open advisories, download base, licence, transitive dependency count.
 5. **Record it** in [`DEPENDENCIES.md`](DEPENDENCIES.md).
-6. **Human approval.** The human explicitly approves the dependency in the PR. AI agents may propose dependencies, never approve them.
-7. **Only then install.** Approval is the human's merge to `main`, compared against `refs/remotes/origin/main`.
+6. **Human approval.** The human explicitly approves the dependency: by merging the PR, or by approving it as a decision point in the `/review-panel` session ([ADR 0020](adr/0020-review-panel.md)). AI agents may propose dependencies, never approve them.
+7. **Only then install.** What is on `main` counts as approved: the human merged it, or the panel merged it after the human approved it as a decision point (ADR 0020). The check compares against `refs/remotes/origin/main`.
    - `make bootstrap` installs only dependency files that match it: the manifests and lockfiles, plus config that changes installs or runs code during them (`.pnpmfile.*`, `.npmrc`, `uv.toml`, `pnpm-workspace.yaml`, `.python-version`, `.node-version`). Untracked files count even if a gitignore would hide them.
    - `scripts/toolchain.py install` (behind `make toolchain`/`make test-tools`) refuses pins in `scripts/toolchain.lock` that aren't on `main`, including when run directly.
    - Step 2 (`make propose-*`) refuses unapproved install config, because resolving follows it too. It resolves with `--no-build`, and pnpm is set to `ignorePnpmfile`, so no package or hook code runs while resolving **(verify at setup)**.
@@ -164,7 +164,7 @@ The cooldown only applies when versions are *resolved*. A hand-edited or bot-gen
 - **Branch protection on `main`:**
   - PRs only, with all required checks green
   - stacked PRs are merged with merge commits
-  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605
+  - **only the human merges**, or explicitly tells an agent to merge. The `/review-panel` skill counts as that instruction only under [ADR 0020](adr/0020-review-panel.md)'s conditions. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decisions, 2026-09-27 and 2026-09-28; THREAT_MODEL T-605
 - **Commit signing is not required** (user decision, 2026-09-27). Agents would need the owner's key, so signatures couldn't tell agent commits from human ones. GitHub signs the merge commits it creates. If releases are ever published for other users, release tags will be signed (THREAT_MODEL T-606).
 - GitHub secret scanning and push protection are enabled.
 
@@ -240,7 +240,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 - **Location/format:**
   - `docs/adr/NNNN-kebab-title.md`, [MADR](https://adr.github.io/madr/) template
   - Status: `proposed` → `accepted` or `rejected`, later `deprecated` or `superseded by NNNN`
-  - **Acceptance means the human merged the PR** that contains the ADR
+  - **Acceptance means the human approved it:** the human merged the PR that contains the ADR, or approved the ADR as a decision point before the panel merged it (ADR 0020). The status line is set to `accepted` before the merge
 - **After acceptance, only the Status line may change.** A CI check rejects any other edit to an accepted ADR. To change a decision, write a new ADR that supersedes the old one.
 - **An ADR is required for:**
   - a new runtime network flow
@@ -313,7 +313,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
 - **Review.** PRs go through the `/review-panel` process ([ADR 0020](adr/0020-review-panel.md)):
   - Each round has four AI reviews: Opus 5.5 and Codex gpt-5.6-sol, each once for security and once for function.
   - Findings are validated before anything is acted on. Valid P1/High/Critical findings are fixed, and the panel repeats. Other valid findings become GitHub issues.
-  - The agent merges after a clean round, unless there are human decision points. The human reviews those decisions rather than every diff.
+  - The agent merges after a clean round, pinned to the reviewed commit, and only for the owner's same-repository PRs. Changes to dependencies, controls, the agent's rules, ADRs, the architecture or PLAN are **decision points** the human must approve. The human reviews those decisions rather than every application-code diff (THREAT_MODEL R-9).
   - Review output and triage decisions are posted as PR comments, as a record.
 
 ## 7. Workflow
@@ -321,7 +321,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
 - **Branches:** `main` is always releasable. Work happens on short-lived branches (`<type>/<topic>`, e.g. `feat/scan-jobs`, `docs/adr-0003`).
 - **PRs:**
   - small and focused
-  - opened as **drafts** for human review on GitHub
+  - opened as **drafts** on GitHub, for the `/review-panel` process or human review
   - stacked PRs are allowed and merged with merge commits
   - each PR description lists the affected threat IDs and ADRs
 - **Commits:** imperative subject ≤ 72 chars; the body explains *why*.
@@ -339,7 +339,7 @@ A change is done only when:
 - [ ] Any new dependency went through §2.4, is recorded in `DEPENDENCIES.md`, and has human approval
 - [ ] No new network flow outside THREAT_MODEL §6; the socket guard stays green
 - [ ] User-facing docs updated where behaviour changed
-- [ ] The human merged the PR
+- [ ] The human merged the PR, or `/review-panel` merged it under ADR 0020 (clean round, CI green on the reviewed commit, every decision point approved by the human)
 
 ## 9. Enforcement summary
 
@@ -377,4 +377,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.8 | CI passes `DEPS_APPROVED=1` explicitly so dependency PRs are tested before approval (user decision, #44; THREAT_MODEL §5.6.1) |
 | 2026-09-28 | 0.2.9 | PR #7 review round 6: approval checked against `refs/remotes/origin/main`, ignored files included; the toolchain installer checks its own pins; `propose-*` refuse unapproved install config, resolve with `--no-build` and `ignorePnpmfile`; the `MAKEFLAGS` and untrusted-branch limits stated |
 | 2026-09-28 | 0.2.10 | PR #7 review round 7: the `DEPS_APPROVED` rule is stated for all agents in AGENTS.md; only Claude Code has a technical block |
-| 2026-09-28 | 0.2.11 | Review process: the `/review-panel` skill (ADR 0020) |
+| 2026-09-28 | 0.2.11 | Review process: the `/review-panel` skill (ADR 0020); dependency approval, ADR acceptance, branch rules, workflow and Definition of Done account for panel merges |
