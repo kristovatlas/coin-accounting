@@ -1,0 +1,140 @@
+# coin-accounting: the single entry point for installs and checks (ENGINEERING §2.3).
+# Written for GNU Make 3.81+ and bash 3.2+ (macOS) as well as Linux.
+# Every package install goes through Socket Firewall ($(SFW)), and there is no fallback without it.
+
+SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+.DEFAULT_GOAL := help
+
+ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+
+# The host interpreter that runs our scripts, including the toolchain verifier. It is
+# resolved once, here, before PATH is changed, and can't be overridden from the command
+# line or the environment: a substitute (e.g. SYS_PYTHON=true) would make every
+# verification pass (PR #7 review).
+override SYS_PYTHON := $(shell command -v python3)
+ifeq ($(SYS_PYTHON),)
+$(error python3 (3.9 or newer) is required on the host to run the repository scripts)
+endif
+
+# `override`: a command-line SFW=/TOOLBIN= must never replace the pinned tools (PR #7 review).
+override TOOLBIN := $(ROOT)/.toolchain/bin
+override SFW := $(TOOLBIN)/sfw
+override PNPM := $(TOOLBIN)/pnpm
+override UV := $(TOOLBIN)/uv
+export PATH := $(TOOLBIN):$(PATH)
+
+# uv: never sync, lock or download an interpreter implicitly (ENGINEERING §2.2).
+export UV_NO_SYNC := 1
+export UV_PYTHON_DOWNLOADS := never
+export UV_PYTHON := $(TOOLBIN)/python3
+export UV_CACHE_DIR := $(ROOT)/.uv-cache
+# pytest plugins load only when named explicitly (ENGINEERING §3.1).
+export PYTEST_DISABLE_PLUGIN_AUTOLOAD := 1
+# The pinned Python's tree is verified file by file, bytecode included; don't write into it.
+export PYTHONDONTWRITEBYTECODE := 1
+
+# PKG/DEV/WORKSPACE/BASE reach recipes only as environment variables and are validated or
+# quoted there, never pasted into shell text (no injection).
+export PKG
+export DEV
+export WORKSPACE
+export BASE
+# A package spec must be name@version (JS) or name==version (Python), nothing else.
+PKG_RE := ^(@[a-z0-9._-]+/)?[A-Za-z0-9._-]+(@|==)[A-Za-z0-9.+_-]+$$
+
+.PHONY: help
+help: ## List targets
+	@grep -E '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
+
+# --- toolchain -------------------------------------------------------------
+
+.PHONY: toolchain
+toolchain: ## Install the pinned sfw, pnpm, uv, Node and Python into .toolchain/ (hash-verified; pins must be on origin/main)
+	"$(SYS_PYTHON)" scripts/toolchain.py install $(if $(DEPS_OK),--approved)
+
+.PHONY: test-tools
+test-tools: ## Install the pinned bitcoind for regtest tests (hash-verified; pins must be on origin/main)
+	"$(SYS_PYTHON)" scripts/toolchain.py install --only bitcoind $(if $(DEPS_OK),--approved)
+
+# sfw and the package managers it wraps must all be the pinned, unmodified binaries.
+# A missing link must not fall back to a host pnpm/uv on PATH (PR #7 review).
+.PHONY: require-toolchain
+require-toolchain:
+	@"$(SYS_PYTHON)" scripts/toolchain.py verify sfw pnpm uv node python >/dev/null || { echo "Refusing to continue: the pinned Socket Firewall and package managers must be installed and unmodified (no fallback). Run 'make toolchain'." >&2; exit 1; }
+
+.PHONY: require-pkg
+require-pkg:
+	@printf '%s\n' "$$PKG" | grep -Eq '$(PKG_RE)' || { echo "PKG must look like name@version or name==version" >&2; exit 1; }
+
+# --- dependencies (ENGINEERING §2.4: resolve -> vet -> approve -> install) ---
+
+.PHONY: propose-js
+propose-js: require-pkg require-approved-config require-toolchain ## Resolve a JS dependency into the lockfile only. Usage: make propose-js PKG=name@version WORKSPACE=frontend|e2e [DEV=1]
+	@case "$$WORKSPACE" in frontend|e2e) ;; *) echo "WORKSPACE must be frontend or e2e" >&2; exit 1;; esac
+	"$(SFW)" "$(PNPM)" add --lockfile-only $${DEV:+--save-dev} --filter "./$$WORKSPACE" "$$PKG"
+	@git --no-pager diff --stat -- package.json '*/package.json' pnpm-lock.yaml
+	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry and human approval. Only the human installs unmerged changes (DEPS_APPROVED=1 on the make command line)."
+
+.PHONY: propose-py
+propose-py: require-pkg require-approved-config require-toolchain ## Resolve a Python dependency into uv.lock only. Usage: make propose-py PKG=name==version [DEV=1]
+	"$(SFW)" "$(UV)" add --no-sync --no-build $${DEV:+--dev} "$$PKG"
+	@git --no-pager diff --stat -- pyproject.toml uv.lock
+	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry and human approval. Only the human installs unmerged changes (DEPS_APPROVED=1 on the make command line)."
+
+# Changes that haven't reached origin/main (i.e. aren't merged by the human) are unapproved
+# (ENGINEERING §2.4). `bootstrap` refuses to install unapproved dependency files, including
+# config that changes what gets installed or runs code during an install (.pnpmfile, .npmrc,
+# uv.toml). `propose-*` refuse unapproved install config, because resolving follows it too;
+# they also pass --no-build on the command line, where branch config can't undo it.
+# `toolchain.py install` checks its own lock (so running it directly is gated too).
+# After approving, the human adds DEPS_APPROVED=1 to the make command line; CI does the same
+# in its workflow file (THREAT_MODEL §5.6.1). The agent guard blocks it. Paths use :(glob) so
+# `*` stays within one directory, and ignored files count: a global gitignore must not hide
+# them (PR #7 review, rounds 4-6).
+APPROVED_REF := refs/remotes/origin/main
+INSTALL_CONFIG := ':(glob)uv.toml' ':(glob)*/uv.toml' ':(glob).npmrc' ':(glob)*/.npmrc' \
+	':(glob).pnpmfile.*' ':(glob)*/.pnpmfile.*' ':(glob)pnpm-workspace.yaml'
+DEP_FILES := ':(glob)package.json' ':(glob)*/package.json' ':(glob)pnpm-lock.yaml' ':(glob)pyproject.toml' \
+	':(glob)uv.lock' ':(glob).python-version' ':(glob).node-version' ':(glob)scripts/toolchain.lock' $(INSTALL_CONFIG)
+override DEPS_OK :=
+ifeq ($(origin DEPS_APPROVED),command line)
+ifeq ($(DEPS_APPROVED),1)
+override DEPS_OK := 1
+endif
+endif
+
+# $(call approval_gate,<pathspecs>,<what>)
+define approval_gate
+	@if [ "$(DEPS_OK)" = 1 ]; then exit 0; fi; \
+	git rev-parse -q --verify "$(APPROVED_REF)" >/dev/null || { echo "Refusing: $(APPROVED_REF) is unknown, so approval can't be checked. Run 'git fetch origin'." >&2; exit 1; }; \
+	if ! git diff --quiet "$(APPROVED_REF)" -- $(1) || [ -n "$$(git ls-files --others -- $(1))" ]; then \
+	  echo "Refusing: $(2) differ from origin/main, and changes are used only after the human approves them (ENGINEERING §2.4). AI agents: stop and ask the human (AGENTS.md). The human, after approving, may rerun with DEPS_APPROVED=1 on the make command line" >&2; exit 1; \
+	fi
+endef
+
+.PHONY: require-approved-deps
+require-approved-deps:
+	$(call approval_gate,$(DEP_FILES),dependency or toolchain files)
+
+.PHONY: require-approved-config
+require-approved-config:
+	$(call approval_gate,$(INSTALL_CONFIG),install config files (uv.toml, .npmrc, .pnpmfile, pnpm-workspace.yaml))
+
+.PHONY: bootstrap
+bootstrap: require-approved-deps require-toolchain ## Install exactly what the lockfiles on origin/main say, through sfw
+	@if [ -f uv.lock ]; then "$(SFW)" "$(UV)" sync --locked; else echo "no uv.lock yet (no Python dependencies approved)"; fi
+	@if [ -f pnpm-lock.yaml ]; then "$(SFW)" "$(PNPM)" install --frozen-lockfile; else echo "no pnpm-lock.yaml yet (no JS dependencies approved)"; fi
+
+.PHONY: audit
+audit: ## Vulnerability audit of both lockfiles (enabled once the audit tools are approved; M0.2)
+	@echo "audit: pip-audit and pnpm audit are enabled in M0.2, after their dependency approval." >&2; exit 1
+
+# --- checks (standard library only, so they run before any dependency exists) ---
+
+.PHONY: check
+check: ## Run all repository checks
+	"$(SYS_PYTHON)" scripts/check_adrs.py $${BASE:+--base "$$BASE"}
+	"$(SYS_PYTHON)" scripts/check_install_commands.py
+	"$(SYS_PYTHON)" scripts/check_architecture.py
+	"$(SYS_PYTHON)" -m unittest discover -s scripts/tests -p 'test_*.py'

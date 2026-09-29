@@ -1,0 +1,42 @@
+[project]
+name = "coinacct"
+version = "0.0.0"
+description = "Local, privacy-first Bitcoin cost basis and doxx tracking (see PLAN.md)"
+requires-python = "==3.13.*"
+# Dependencies are added only after human approval (ENGINEERING §2.4, docs/DEPENDENCIES.md).
+dependencies = []
+
+[dependency-groups]
+dev = []
+
+[tool.uv]
+# ENGINEERING §2.2. The "(verify at setup)" items are confirmed in M0.2 with the pinned uv.
+package = false                 # virtual project: never build or run a build backend for our own code
+no-build = true                 # wheels only, no sdist builds, no exceptions
+exclude-newer = "7 days"        # 7-day cooldown, recorded in uv.lock
+python-downloads = "never"      # the interpreter comes from `make toolchain` only
+python-preference = "only-system"
+index-strategy = "first-index"
+cache-dir = ".uv-cache"         # project-local cache (ENGINEERING §2.7)
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 110
+src = ["backend", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "T20", "TID", "PL", "RUF"]
+ignore = ["PLR2004"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/tests/**" = ["S101", "S603", "PLC0415"]
+"backend/tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true

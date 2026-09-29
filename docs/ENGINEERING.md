@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.1 |
-| Last updated | 2026-09-27 |
+| Version | 0.2.10 |
+| Last updated | 2026-09-28 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -66,7 +66,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   |---|---|
   | `make toolchain` | Installs the pinned `sfw` (see below), then the pinned pnpm, uv, Node and Python, each verified by checksum |
   | `make bootstrap` | `sfw pnpm install --frozen-lockfile` and `sfw uv sync --locked`, from a clean cache in CI |
-  | `make propose-js PKG=<name@version> [DEV=1]` / `make propose-py …` | **Resolve only**: `sfw pnpm add --lockfile-only …` / `sfw uv add --no-sync …`. Nothing is installed. Prints the lockfile diff and the list of new packages to vet (§2.4) |
+  | `make propose-js PKG=<name@version> WORKSPACE=frontend\|e2e [DEV=1]` / `make propose-py …` | **Resolve only**: `sfw pnpm add --lockfile-only …` / `sfw uv add --no-sync …`. Nothing is installed. Prints the lockfile diff and the list of new packages to vet (§2.4) |
   | `make update-deps` | Batch update (§2.6), lockfile-only, then the same review |
   | `make update-sfw` | Reviewed update of the pinned `sfw` version and checksum |
   | `make test-tools` | Pinned, verified test tooling downloads (see "Non-package downloads") |
@@ -75,7 +75,9 @@ Configured in `pyproject.toml` `[tool.uv]`.
   Contributors, AI agents and CI all use these targets. CI jobs call `make toolchain` and `make bootstrap`, never raw installers.
 - **No silent fallback:** if `sfw` is missing, not the pinned version, or fails to start, the scripts **stop with an error**. They never drop through to an unwrapped install. Whether `sfw` fails open when the Socket API is unreachable must be tested at setup. If it does, the wrapper detects that and stops **(verify at setup)**.
 - **Fetch-and-run commands are banned:** `npx`, `pnpm dlx`, `pnpm exec` of packages not in the lockfile, `uvx`/`uv tool run`, `pip install`, `curl … | sh`, the `pre-commit` framework (it clones and builds hook environments). The same applies to IDE and agent configuration, e.g. `.mcp.json` servers started with `npx -y`. Tools we need become locked dev dependencies. Git hooks, if any, are `repo`-local scripts that call locked tools.
-- **Bootstrapping `sfw` itself:** `scripts/install-sfw` downloads the pinned sfw-free release binary and checks it against a SHA-256 committed in the repo. **Socket publishes no checksums or signatures for sfw-free**, so that committed hash is trust-on-first-use. It is recorded when the version is first adopted, and changes only through `make update-sfw` in a reviewed PR. macOS binaries are unsigned. CI uses the same script, not `socketdev/action`, which installs the latest version.
+- **Verifying before use:** every install target first runs `toolchain.py verify sfw pnpm uv node python`, with a host interpreter the caller can't override, and then calls the tools by absolute path. Verification covers **every file** of each install (a digest recorded at install time), not just the entry point, so pnpm's JavaScript, the Node that runs it and the Python that uv uses are checked too, bytecode caches included (`make` sets `PYTHONDONTWRITEBYTECODE`). A missing, modified or moved install stops the command; there's no fallback to a host `pnpm`/`uv`.
+- **Host requirement:** `python3` 3.9 or newer to run the repository scripts; the lock is JSON so no `tomllib` is needed.
+- **Bootstrapping `sfw` itself:** `make toolchain` (`scripts/toolchain.py`) downloads the pinned sfw-free release binary and checks it against the SHA-256 in `scripts/toolchain.lock`. **Socket publishes no checksums or signatures for sfw-free**, so that committed hash is trust-on-first-use. It is recorded when the version is first adopted, and changes only through `make update-sfw` in a reviewed PR. macOS binaries are unsigned. CI uses the same script, not `socketdev/action`, which installs the latest version.
 - **What `sfw` does and doesn't do:**
   - It blocks packages Socket has *confirmed* as malware.
   - AI-flagged risks produce warnings only, and brand-new unscanned versions are not blocked. That is why the §2.4 review and the cooldowns still matter.
@@ -85,25 +87,32 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | Artifact | Verification |
   |---|---|
   | `sfw` | Committed SHA-256 (trust-on-first-use, as above) |
-  | pnpm, uv | Release artifacts checked against the publisher's checksums, and our committed SHA-256 |
+  | pnpm | npm registry tarball checked against the registry's sha512 integrity, committed in the lock (registry signature and provenance: M0.2) |
+  | uv | Release artifacts checked against the publisher's checksums, and our committed SHA-256 |
   | Node.js | `SHASUMS256.txt` verified against the Node release keys |
   | Python | Pinned interpreter build checked against a committed SHA-256 |
   | `bitcoind` (regtest) | `SHA256SUMS` plus a threshold of builder signatures (pinned `guix.sigs` builder keys), minimum and latest supported versions |
   | Playwright browsers | Pinned `@playwright/test` version; each downloaded browser archive checked against a committed per-platform SHA-256; fails closed if no hash is recorded |
 
-- **Enforcement:** a CI check (`scripts/check-install-commands`) scans the `Makefile`, `scripts/`, `.github/workflows/` and config files for install or fetch-and-run commands without the `sfw` wrapper. It can be bypassed by obfuscation, so it is **hygiene, not a security boundary**, and it allowlists documentation files that quote the banned commands. `AGENTS.md` repeats the rule for agents.
+- **Enforcement:** a CI check (`scripts/check-install-commands`) scans the `Makefile`, `scripts/`, `.github/workflows/` and config files for install or fetch-and-run commands without the `sfw` wrapper. It can be bypassed by obfuscation, so it is **hygiene, not a security boundary** (ADR 0022: the Claude Code guard and this check catch accidental or habitual installs; deliberate evasion is accepted risk R-8), and it allowlists documentation files that quote the banned commands. `AGENTS.md` repeats the rule for agents.
 
 ### 2.4 Adding a dependency: vet before anything is installed
 
 The same process applies to a new direct dependency, and to a version bump of an existing one:
 
 1. **Justify it.** Why can't the standard library or ~100 lines of our own code do the job? Could a package we already use do it?
-2. **Resolve only.** Run `make propose-js`/`make propose-py`. This updates the manifest and lockfile without installing or running anything.
+2. **Resolve only.** Run `make propose-js`/`make propose-py`. This updates the manifest and lockfile without installing anything, and without building sdists or loading a `.pnpmfile` (step 7).
 3. **Review the Socket verdict** for every new or changed package in the lockfile diff. Use the Socket GitHub App's report on the draft PR (which contains only the manifest/lockfile change), or the package's socket.dev page. Look for install scripts, network or filesystem access, obfuscated code, telemetry, new maintainers and typosquat signals.
 4. **Check its health:** maintainers, release history, open advisories, download base, licence, transitive dependency count.
 5. **Record it** in [`DEPENDENCIES.md`](DEPENDENCIES.md).
 6. **Human approval.** The human explicitly approves the dependency in the PR. AI agents may propose dependencies, never approve them.
-7. **Only then install**, with `make bootstrap`.
+7. **Only then install.** Approval is the human's merge to `main`, compared against `refs/remotes/origin/main`.
+   - `make bootstrap` installs only dependency files that match it: the manifests and lockfiles, plus config that changes installs or runs code during them (`.pnpmfile.*`, `.npmrc`, `uv.toml`, `pnpm-workspace.yaml`, `.python-version`, `.node-version`). Untracked files count even if a gitignore would hide them.
+   - `scripts/toolchain.py install` (behind `make toolchain`/`make test-tools`) refuses pins in `scripts/toolchain.lock` that aren't on `main`, including when run directly.
+   - Step 2 (`make propose-*`) refuses unapproved install config, because resolving follows it too. It resolves with `--no-build`, and pnpm is set to `ignorePnpmfile`, so no package or hook code runs while resolving **(verify at setup)**.
+   - To use an approved change before it is merged, **the human** adds `DEPS_APPROVED=1` to the make command line. CI does the same, explicitly in its workflow file, so dependency PRs can be tested before approval on a throwaway machine (from M0.2; THREAT_MODEL §5.6.1, T-608). Agents never set it (AGENTS.md); the Claude Code guard blocks it, while other agents are bound by the AGENTS.md rule alone.
+   - GNU make treats a variable in an inherited `MAKEFLAGS` as a command-line one, so **never put `DEPS_APPROVED` in `MAKEFLAGS`**, a shell profile or agent settings.
+   - The gate checks the files on the current branch; it does not protect against a malicious branch. Don't run `make` targets on branches you don't trust.
 
 **Transitive dependencies** don't each need steps 1, 4 and 5. They are covered by:
 - the Socket diff on the PR
@@ -112,7 +121,7 @@ The same process applies to a new direct dependency, and to a version bump of an
 
 ### 2.5 Lockfile policy check (CI, required)
 
-The cooldown only applies when versions are *resolved*. A hand-edited or bot-generated lockfile could still bring in a fresh or off-registry package. So a required CI check (`scripts/check-lockfiles`) verifies, for **every** entry in `pnpm-lock.yaml` and `uv.lock`:
+The cooldown only applies when versions are *resolved*. A hand-edited or bot-generated lockfile could still bring in a fresh or off-registry package. So a required CI check (`scripts/check-lockfiles`, added in M0.2 together with the first lockfile) verifies, for **every** entry in `pnpm-lock.yaml` and `uv.lock`:
 
 - the source is `registry.npmjs.org` or `files.pythonhosted.org`, with no git, URL, tarball or path sources, direct or transitive
 - an integrity hash is present
@@ -270,7 +279,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 | Rule | Why | Enforcement |
 |---|---|---|
 | Import edges and capabilities (network, `webbrowser`, `subprocess`, filesystem, clock, `importlib`/`__import__`) follow the per-path rules in [architecture §2](architecture.md#2-module-structure-dependency-rules-and-capability-rules) | T-305, T-402, purity of `tax/`/`doxx/`/`domain/` | `scripts/check-architecture` (custom AST check, no dependency) + ruff `banned-api` per path. Hygiene, not a security boundary |
-| No floats in `tax/`: no float literals, no `/` on integer sats, no `float()`; money arrives as strings or `Decimal`; the `decimal` context in `tax/` traps `FloatOperation`; property tests check that no intermediate value is a float | T-502 | custom AST check + runtime trap + tests |
+| No floats in `tax/`: no float literals, **no true division `/` or `/=` at all** (`//` for exact integer division; Decimal division only through a named helper in `domain/`), no `float()`, no `math`; money arrives as strings or `Decimal`; the `decimal` context in `tax/` traps `FloatOperation`; property tests check that no intermediate value is a float | T-502 | custom AST check + runtime trap + tests |
 | No `eval`/`exec`, `pickle`, `shell=True` | Code execution | ruff (`S` rules) + banned-api |
 | No `dangerouslySetInnerHTML`; no runtime CSS-in-JS (it injects `<style>` tags that the CSP blocks); no `setAttribute('style', …)` | T-104 | ESLint rules + E2E CSP-violation check (§3.1) |
 | No navigation or `window.open` to external origins; no network sinks (`fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `sendBeacon`) outside the API client module | T-106 | ESLint rules + a bundle scan for network sinks. Plain URL strings such as React's error-doc links are allowlisted, since they are inert |
@@ -355,3 +364,12 @@ A change is done only when:
 | 2026-09-27 | 0.1 | Initial proposal (P0.2), including the rule that all installs go through `sfw` via the repo's `make` targets (§2.3) |
 | 2026-09-27 | 0.2 | Incorporates the Opus 5.5 and Codex (gpt-5.6-sol) reviews and the user's decisions: two-phase dependency adds (resolve → vet → approve → install); pnpm 12 settings (`allowBuilds`, `pmOnFail`, `verifyDepsBeforeRun`, `blockExoticSubdeps`, `trustPolicy`); uv `package = false`, `python-downloads = "never"`, `UV_NO_SYNC`, no sdist exceptions, relative `exclude-newer`; lockfile policy check; sfw trust-on-first-use + telemetry; verification table for non-package downloads; audits, reproducible build, Actions hardening restored or added; socket guard defined; coverage mechanics and ratchet; per-PR mutation runs; corrected CSP rationale; float ban hardened; ADR immutability check. **Signed commits dropped** and **only-the-human-merges kept procedural** by user decision |
 | 2026-09-27 | 0.2.1 | Aligned with architecture v0.2: `doxx/` is a pure package; E2E lives in `e2e/` with a Python harness; import and capability rules are defined in architecture §2 and checked by `scripts/check-architecture`; the subprocess allowlist moves there |
+| 2026-09-28 | 0.2.2 | M0.1: the toolchain installer is `scripts/toolchain.py` with `scripts/toolchain.lock`; `check-lockfiles` arrives with the first lockfile (M0.2) |
+| 2026-09-28 | 0.2.3 | `/` is banned outright in `tax/` (#10); enforced by `scripts/check_architecture.py` |
+| 2026-09-28 | 0.2.4 | PR #7 review round 2: verify sfw, pnpm and uv before every install; non-overridable verifier interpreter; `WORKSPACE` for `propose-js`; host Python 3.9+; Linux ARM64 |
+| 2026-09-28 | 0.2.5 | Install-command guard scope: hygiene against accidental installs (ADR 0022) |
+| 2026-09-28 | 0.2.6 | PR #7 review round 4: `bootstrap` installs only merged dependency changes unless the human sets `DEPS_APPROVED=1`; toolchain verification covers every installed file and Node |
+| 2026-09-28 | 0.2.7 | PR #7 review round 5: the approval gate covers toolchain pins and install-affecting config and accepts only a command-line approval; Python is verified, bytecode included |
+| 2026-09-28 | 0.2.8 | CI passes `DEPS_APPROVED=1` explicitly so dependency PRs are tested before approval (user decision, #44; THREAT_MODEL §5.6.1) |
+| 2026-09-28 | 0.2.9 | PR #7 review round 6: approval checked against `refs/remotes/origin/main`, ignored files included; the toolchain installer checks its own pins; `propose-*` refuse unapproved install config, resolve with `--no-build` and `ignorePnpmfile`; the `MAKEFLAGS` and untrusted-branch limits stated |
+| 2026-09-28 | 0.2.10 | PR #7 review round 7: the `DEPS_APPROVED` rule is stated for all agents in AGENTS.md; only Claude Code has a technical block |

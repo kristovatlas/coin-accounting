@@ -1,0 +1,177 @@
+{
+  "_comment": [
+    "Pinned toolchain for coin-accounting (ENGINEERING \u00a72.3). JSON so any host Python 3.9+ can read it (no tomllib).",
+    "Every version was at least 7 days old when pinned. Each sha256 comes from the publisher's checksum file where one",
+    "exists, cross-checked against the SHA-256 digest GitHub records for the release asset. Change only in a reviewed PR.",
+    "sfw-free has no publisher checksums: its hashes come from GitHub's asset digest (trust-on-first-use).",
+    "pnpm comes from the npm registry tarball, pinned by its sha512 integrity (user decision, PR #7)."
+  ],
+  "sfw": {
+    "version": "1.15.2",
+    "source": "GitHub release asset digest (no publisher checksums; TOFU)",
+    "linux-x86_64": {
+      "url": "https://github.com/SocketDev/sfw-free/releases/download/v1.15.2/sfw-free-linux-x86_64",
+      "sha256": "fea8171808f9d913635c8f55fa70f7e72451cd38b0fca3d694e12ee1a9d7fc68",
+      "kind": "binary",
+      "bin": "sfw"
+    },
+    "linux-arm64": {
+      "url": "https://github.com/SocketDev/sfw-free/releases/download/v1.15.2/sfw-free-linux-arm64",
+      "sha256": "d3e5490e7a1315ff2ba9bcc903d9d57de042d8dcde83dde1d59536725a470946",
+      "kind": "binary",
+      "bin": "sfw"
+    },
+    "darwin-arm64": {
+      "url": "https://github.com/SocketDev/sfw-free/releases/download/v1.15.2/sfw-free-macos-arm64",
+      "sha256": "28c4d14ed5db09e3a3e299c02036ddaa524c5c476cb28e32deac4f77091acacb",
+      "kind": "binary",
+      "bin": "sfw"
+    },
+    "darwin-x86_64": {
+      "url": "https://github.com/SocketDev/sfw-free/releases/download/v1.15.2/sfw-free-macos-x86_64",
+      "sha256": "3abd6086098e6ad604a8814cd6a5d9e5dd8e64c2108583f9e85c12e08baa7a26",
+      "kind": "binary",
+      "bin": "sfw"
+    }
+  },
+  "pnpm": {
+    "version": "12.5.1",
+    "source": "npm registry tarball, verified by the registry's sha512 integrity (the package also carries a registry signature and a provenance attestation; verifying those is M0.2, #15). Runs on the pinned Node. User decision, PR #7, 2026-09-28. Published 2026-09-18.",
+    "linux-x86_64": {
+      "url": "https://registry.npmjs.org/pnpm/-/pnpm-12.5.1.tgz",
+      "integrity": "sha512-4/MFvHhKK8ifWtO2E4iJRw+ujSr182thIW7JHCw9ZAiXdfneOKrDMQROpA8kXLDVZmOS399lgk4ZB+9qLGLeXw==",
+      "kind": "npm-tgz",
+      "bin": "package/pnpm"
+    },
+    "linux-arm64": {
+      "url": "https://registry.npmjs.org/pnpm/-/pnpm-12.5.1.tgz",
+      "integrity": "sha512-4/MFvHhKK8ifWtO2E4iJRw+ujSr182thIW7JHCw9ZAiXdfneOKrDMQROpA8kXLDVZmOS399lgk4ZB+9qLGLeXw==",
+      "kind": "npm-tgz",
+      "bin": "package/pnpm"
+    },
+    "darwin-arm64": {
+      "url": "https://registry.npmjs.org/pnpm/-/pnpm-12.5.1.tgz",
+      "integrity": "sha512-4/MFvHhKK8ifWtO2E4iJRw+ujSr182thIW7JHCw9ZAiXdfneOKrDMQROpA8kXLDVZmOS399lgk4ZB+9qLGLeXw==",
+      "kind": "npm-tgz",
+      "bin": "package/pnpm"
+    },
+    "darwin-x86_64": {
+      "url": "https://registry.npmjs.org/pnpm/-/pnpm-12.5.1.tgz",
+      "integrity": "sha512-4/MFvHhKK8ifWtO2E4iJRw+ujSr182thIW7JHCw9ZAiXdfneOKrDMQROpA8kXLDVZmOS399lgk4ZB+9qLGLeXw==",
+      "kind": "npm-tgz",
+      "bin": "package/pnpm"
+    }
+  },
+  "uv": {
+    "version": "0.12.17",
+    "source": "publisher sha256.sum, matches GitHub asset digest",
+    "linux-x86_64": {
+      "url": "https://github.com/astral-sh/uv/releases/download/0.12.17/uv-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63",
+      "kind": "tar",
+      "bin": "uv"
+    },
+    "linux-arm64": {
+      "url": "https://github.com/astral-sh/uv/releases/download/0.12.17/uv-aarch64-unknown-linux-gnu.tar.gz",
+      "sha256": "d636d1b678e9e7f367ecb22b46bd1cabbed234d6bc3b4d96365d2b507f72f86c",
+      "kind": "tar",
+      "bin": "uv"
+    },
+    "darwin-arm64": {
+      "url": "https://github.com/astral-sh/uv/releases/download/0.12.17/uv-aarch64-apple-darwin.tar.gz",
+      "sha256": "85f00cbdc6dd3e97eba4c31b4d014375a9fdfe8f570023b84e5102fc3456896b",
+      "kind": "tar",
+      "bin": "uv"
+    },
+    "darwin-x86_64": {
+      "url": "https://github.com/astral-sh/uv/releases/download/0.12.17/uv-x86_64-apple-darwin.tar.gz",
+      "sha256": "8dcf05a8c809bb3c471d2b614788ba27a6e41298fc8c31ac84b5f4339fd468e5",
+      "kind": "tar",
+      "bin": "uv"
+    }
+  },
+  "node": {
+    "version": "24.21.0",
+    "source": "nodejs.org SHASUMS256.txt (signature check of the .asc against Node release keys: M0.2)",
+    "linux-x86_64": {
+      "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz",
+      "sha256": "fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6",
+      "kind": "tar",
+      "bin": "bin/node"
+    },
+    "linux-arm64": {
+      "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-arm64.tar.xz",
+      "sha256": "6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2",
+      "kind": "tar",
+      "bin": "bin/node"
+    },
+    "darwin-arm64": {
+      "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-darwin-arm64.tar.gz",
+      "sha256": "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057",
+      "kind": "tar",
+      "bin": "bin/node"
+    },
+    "darwin-x86_64": {
+      "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-darwin-x64.tar.gz",
+      "sha256": "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097",
+      "kind": "tar",
+      "bin": "bin/node"
+    }
+  },
+  "python": {
+    "version": "3.13.15",
+    "source": "python-build-standalone 20260901 SHA256SUMS",
+    "linux-x86_64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "0651dd7157d3debf769e15a52c1de9de7fbcdc36ba72faf79fde3c44f14d9461",
+      "kind": "tar",
+      "bin": "python/bin/python3"
+    },
+    "linux-arm64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-aarch64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "76ed18125286d7dc96ce24023d1e319dbd55a89a767102411b1ea23846113f69",
+      "kind": "tar",
+      "bin": "python/bin/python3"
+    },
+    "darwin-arm64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-aarch64-apple-darwin-install_only.tar.gz",
+      "sha256": "b9054a9d3d54f4cb5573d44907fddb29874b08909bde73f29f2868cf872223ee",
+      "kind": "tar",
+      "bin": "python/bin/python3"
+    },
+    "darwin-x86_64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.13.15%2B20260901-x86_64-apple-darwin-install_only.tar.gz",
+      "sha256": "49f0d97f506b855eed60b74a8ac138595c5b39799a6aa5e0d7ca8abe1019a4d4",
+      "kind": "tar",
+      "bin": "python/bin/python3"
+    }
+  },
+  "bitcoind": {
+    "version": "31.1",
+    "source": "bitcoincore.org SHA256SUMS (builder-signature threshold check: M0.2)",
+    "linux-x86_64": {
+      "url": "https://bitcoincore.org/bin/bitcoin-core-31.1/bitcoin-31.1-x86_64-linux-gnu.tar.gz",
+      "sha256": "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e",
+      "kind": "tar",
+      "bin": "bitcoin-31.1/bin/bitcoind"
+    },
+    "linux-arm64": {
+      "url": "https://bitcoincore.org/bin/bitcoin-core-31.1/bitcoin-31.1-aarch64-linux-gnu.tar.gz",
+      "sha256": "dcf1873f2208ba4f962f3398d47e154c39c0084be8f4553e05c940d0ace3d004",
+      "kind": "tar",
+      "bin": "bitcoin-31.1/bin/bitcoind"
+    },
+    "darwin-arm64": {
+      "url": "https://bitcoincore.org/bin/bitcoin-core-31.1/bitcoin-31.1-arm64-apple-darwin.tar.gz",
+      "sha256": "16a097c09fbd7eb78b240ce1dae123663ea2e5e377cfd6a951e71e227e23cf2f",
+      "kind": "tar",
+      "bin": "bitcoin-31.1/bin/bitcoind"
+    },
+    "darwin-x86_64": {
+      "url": "https://bitcoincore.org/bin/bitcoin-core-31.1/bitcoin-31.1-x86_64-apple-darwin.tar.gz",
+      "sha256": "bc506958d0f387c1ea770bdc7c7192a505fa645ff62cabcc7761fa7eb89e867e",
+      "kind": "tar",
+      "bin": "bitcoin-31.1/bin/bitcoind"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "coinacct-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "description": "SPA workspace (M0.3). No lifecycle scripts allowed (ENGINEERING §2.1)."
+}

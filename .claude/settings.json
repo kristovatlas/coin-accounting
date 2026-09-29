@@ -1,0 +1,24 @@
+{
+  "env": {
+    "UV_NO_SYNC": "1",
+    "UV_PYTHON_DOWNLOADS": "never",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/agent_guard.py\" sessionstart" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/agent_guard.py\" pretooluse" }
+        ]
+      }
+    ]
+  }
+}

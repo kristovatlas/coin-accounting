@@ -30,9 +30,9 @@ If a request conflicts with these documents, stop and ask the human instead of w
 - Prefix every direct `uv` command with `UV_NO_SYNC=1`, or use `make`. Environment variables don't persist between agent shell calls.
 
 ### Dependencies
-- Propose them with `make propose-js` / `make propose-py`, which only resolve the lockfile.
+- Propose them with `make propose-js PKG=name@version WORKSPACE=frontend|e2e` / `make propose-py PKG=name==version`, which only resolve the lockfile.
 - Nothing is installed until the human has approved the Socket verdict and the lockfile diff (ENGINEERING §2.4).
-- Agents never approve dependencies.
+- Agents never approve dependencies. **Never pass `DEPS_APPROVED`** (on a make command line, in the environment or in `MAKEFLAGS`) **and never run `toolchain.py install --approved`.** When an install target refuses because changes aren't on `main`, stop and ask the human. The Claude Code hook blocks these; other agents are bound by this rule alone.
 
 ### Network and code boundaries
 - Don't add runtime network flows. The only allowed ones are F1–F3 (architecture §5).
