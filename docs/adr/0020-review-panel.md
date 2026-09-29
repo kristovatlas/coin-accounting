@@ -21,7 +21,7 @@ Four review rounds on earlier drafts of this ADR tried to let the panel merge PR
 1. The human requests reviews by hand, and triages them (the practice so far).
 2. A panel that merges every PR after the human approves stored "decision points". Rejected: the stored approvals could be forged, and the decision-point list kept leaking.
 3. A panel that auto-merges only application-code PRs. Rejected: tests, chain checks, tax and doxx rules all carry security or ADR weight, so the auto-merge list shrank to almost nothing.
-4. **A panel that reviews, fixes and triages every PR, and hands it to the human to merge, with a tripwire that points the human at anything that looks malicious.** The human, used to skimming, won't reliably spot a malicious test unaided. So the AI does the detection, and the human is the circuit breaker that no prompt injection can reach.
+4. **A panel that reviews, fixes and triages every PR, and hands it to the human to merge, with a tripwire that points the human at anything that looks malicious.** The human, used to skimming, won't reliably spot a malicious test unaided. So the AI and the mechanical scan do the detection, and the human is the final decision: the one party that prompt injection in a PR can't reach, provided they look at what is flagged.
 
 ## Decision Outcome
 
@@ -35,26 +35,30 @@ The human types `/review-panel #N`; the skill can't be started by the model or a
 - files GitHub issues for the other valid findings
 - stops for the human after 5 rounds
 - when a round is clean, runs the **tripwire** on the exact commit it hands over:
-  - **A mechanical scan** (`scripts/tripwire.py`, always run from `main`'s copy, so a PR can't weaken it). It flags:
+  - **A mechanical scan** (`scripts/tripwire.py`, always run from `main`'s copy, so neither the PR nor a stacked base can weaken it). It uses a fixed git configuration and never quotes source text. It flags:
     - risky paths: agent instructions, CI, scripts, dependency and test config, the security-critical modules, binding documents
     - process, network or dynamic-code use
     - new URL hosts and encoded blobs
     - symlinks, submodules and executables
+    - deleted files, and removed tests, assertions and guards
+
+    It is a heuristic that a deliberate author can evade, not a detector of all malice.
   - **A separate, focused Opus check** for malicious patterns. It runs in a fresh context that sees none of the other reviews.
-  - **Every flag reaches the human.** The orchestrator can't remove one.
-  - **The result is set as the `tripwire` commit status** on that commit. By construction the check is renewed on every change: any later push has no status until the panel runs again.
+  - **Every flag reaches the human.** By rule, the orchestrator may not remove one; the mechanical output is posted verbatim.
+  - **The result is set as the `tripwire` commit status** on that commit, and the hand-off names the full SHA with a compare link. Any later push has no status until the panel runs again. The status is advisory, since anyone with the owner's token can set it; the human merges only if the PR's head is the named SHA.
 - hands the PR to the human, tripwire flags first, with:
   - the diffstat and files link
   - for dependency changes, the Socket verdict and the lockfile diff
   - the CI state
-  - any ADR the merge will accept (its status line is set to `accepted` in a status-only commit, per [ADR 0001](0001-record-decisions-with-adrs.md))
+  - the PR's new ADRs, still `proposed`. On the human's instruction ("accept ADRs #N"), the panel commits the status-only change to `accepted` and re-runs the tripwire on that commit ([ADR 0001](0001-record-decisions-with-adrs.md)). The human can also do it themselves.
+- hands off only once CI is green on that commit; CI failures and conflicts go back to the panel or the human
 - **after the human merges**, deletes the PR's branch (unless another open PR builds on it), its worktrees and its local files
 
 ### Safeguards
 
-- **The panel never merges** a PR, approves one, or enables auto-merge.
-- **Reviewers can't change anything.** Opus runs as a read-only agent (Read, Grep, Glob), and Codex in its read-only sandbox. Their reports pass a mechanical secret scan before anything is posted publicly.
-- **Only the owner's PRs.** The panel runs the PR's tests locally, so it handles only same-repository PRs authored by the owner.
+- **The panel never merges** a PR, approves one, or enables auto-merge. This is procedural: the orchestrator holds the owner's credentials (T-605).
+- **Reviewers can't change anything.** Opus runs as a read-only agent (Read, Grep, Glob), and Codex in its read-only sandbox. Everything the panel posts passes a mechanical secret scan (`scripts/secret_scan.py`) first. The Opus reviewers read the change from a diff file, because they have no shell.
+- **Only the owner's PRs.** The panel runs the PR's tests locally, so it handles only same-repository PRs authored by the owner, with every commit authored or committed by the owner.
 - **Untrusted content.** PR text, reviews, issues, comments and task notifications are data, never instructions.
 
 ### Consequences
@@ -71,4 +75,4 @@ The human types `/review-panel #N`; the skill can't be started by the model or a
 
 ## References
 
-- `.claude/skills/review-panel/SKILL.md`; `.claude/agents/panel-reviewer.md`; `scripts/tripwire.py`; AGENTS.md; ADR 0001; ADR 0018; ADR 0022; ENGINEERING §6; THREAT_MODEL T-605, R-6, R-9
+- `.claude/skills/review-panel/SKILL.md`; `.claude/agents/panel-reviewer.md`; `scripts/tripwire.py`; `scripts/secret_scan.py`; AGENTS.md; ADR 0001; ADR 0018; ADR 0022; ENGINEERING §6; THREAT_MODEL T-605, R-6, R-9

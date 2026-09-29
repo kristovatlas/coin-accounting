@@ -54,7 +54,7 @@ If a request conflicts with these documents, stop and ask the human instead of w
 - `/review-panel #N` runs the review panel in `.claude/skills/review-panel/SKILL.md` ([ADR 0020](docs/adr/0020-review-panel.md)). It reviews, fixes, files issues and runs the tripwire, then hands the PR to the human. It never merges.
 - When asked to run AI reviews, post each review as a PR comment.
 - Verify each finding before acting on it; reviewers can be wrong.
-- Afterwards, post a triage comment recording what was addressed, deferred or rejected, and why. Valid non-P1 findings become GitHub issues labelled `review-panel`.
+- Afterwards, post a triage comment recording what was addressed, deferred or rejected, and why. Valid non-P1 findings of Low or higher become GitHub issues labelled `review-panel`; nits stay in the triage comment.
 
 ### Don't weaken controls
 Don't weaken any control in a binding document without an ADR and the human's approval.

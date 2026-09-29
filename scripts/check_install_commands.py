@@ -20,7 +20,7 @@ SELF_ALLOW = {"scripts/banned_commands.py", "scripts/check_install_commands.py",
               # Data, not commands: URLs, hashes and descriptive prose.
               "scripts/toolchain.lock",
               # Detection patterns for these very commands (ADR 0020 tripwire).
-              "scripts/tripwire.py"}
+              "scripts/tripwire.py", "scripts/secret_scan.py"}
 SFW_ALLOWED_DIRS = ("Makefile", "scripts/")
 
 

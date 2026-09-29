@@ -313,8 +313,8 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
 - **Review.** Every agent PR gets human review. Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
   - **The review panel** (`/review-panel #N`, [ADR 0020](adr/0020-review-panel.md)) does the AI review:
     - Rounds of four reviews (Opus 5.5 and Codex gpt-5.6-sol, security and functional) find issues, and the panel fixes valid P1s and files issues for the rest.
-    - When a round is clean, the **tripwire** checks the final commit: a mechanical scan (`scripts/tripwire.py`) plus a separate Opus check for malicious patterns. Examples: process or network use in tests, weakened guards, new hosts, obfuscated code, dependency or agent-instruction changes.
-    - The flags are posted for the human, and set as the `tripwire` commit status on that exact commit. A later push has no status until the tripwire runs again.
+    - When a round is clean and CI is green, the **tripwire** checks the final commit: a mechanical scan (`scripts/tripwire.py`, from `main`'s copy) plus a separate Opus check for malicious patterns. Examples: process or network use in tests, weakened or deleted guards and tests, new hosts, obfuscated code, dependency or agent-instruction changes. It is a heuristic that points the human's attention, not a guarantee.
+    - The flags are posted for the human (after the mechanical secret scan, `scripts/secret_scan.py`), and set as the advisory `tripwire` commit status on that exact commit. The hand-off names the SHA, and a later push has no status until the tripwire runs again.
     - **The human merges**, looking carefully at anything flagged. The panel never merges; afterwards it deletes the branch and cleans up.
 
 ## 7. Workflow
