@@ -429,7 +429,11 @@ class ToolchainTests(unittest.TestCase):
             lock = root / "scripts" / "toolchain.lock"
             lock.write_text("{}\n")
             git = lambda *a: subprocess.run(["git", "-C", d, *a], env=env, check=True, capture_output=True)
+            # Everything the install path touches points into the temporary repo, so a regression
+            # can't write into the real checkout's .toolchain (it once did, via a default argument).
             with mock.patch.object(toolchain, "ROOT", root), mock.patch.object(toolchain, "LOCK", lock), \
+                    mock.patch.object(toolchain, "TOOLCHAIN", root / ".toolchain"), \
+                    mock.patch.object(toolchain, "BIN", root / ".toolchain" / "bin"), \
                     mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}):
                 git("init", "-q")
                 with self.assertRaisesRegex(toolchain.ToolchainError, "unknown"):
@@ -441,9 +445,16 @@ class ToolchainTests(unittest.TestCase):
                 lock.write_text('{"sfw": {}}\n')
                 with self.assertRaisesRegex(toolchain.ToolchainError, "differs from origin/main.*AI agents: stop"):
                     toolchain.require_approved_lock(root)
-                with mock.patch.object(toolchain, "install_tool") as install:
+                with mock.patch.object(toolchain, "install_tool") as install, \
+                        mock.patch.object(toolchain, "link") as link:
                     self.assertEqual(toolchain.main(["install"]), 1)
                     install.assert_not_called()
+                    link.assert_not_called()
+                    # Once the pins are merged, the same call goes ahead.
+                    git("add", "-A")
+                    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "y")
+                    git("update-ref", "refs/remotes/origin/main", "HEAD")
+                    toolchain.require_approved_lock()
 
     def test_verify_without_an_artifact_for_this_platform_is_a_clean_error(self):
         lock = {"sfw": {"version": "1", "darwin-arm64": {}}}
