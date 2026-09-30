@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.13 |
+| Version | 0.2.14 |
 | Last updated | 2026-09-30 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -87,7 +87,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | Artifact | Verification |
   |---|---|
   | `sfw` | Committed SHA-256 (trust-on-first-use, as above) |
-  | pnpm | npm registry tarball checked against the registry's sha512 integrity, committed in the lock (registry signature and provenance: M0.2) |
+  | pnpm | the per-platform native binary (`@pnpm/exe.<platform>` npm registry tarball) checked against the registry's sha512 integrity, committed in the lock. The `pnpm` launcher package isn't used: it fetches or downloads the binary itself (registry signature and provenance: M0.2) |
   | uv | Release artifacts checked against the publisher's checksums, and our committed SHA-256 |
   | Node.js | `SHASUMS256.txt` verified against the Node release keys |
   | Python | Pinned interpreter build checked against a committed SHA-256 |
@@ -383,3 +383,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.11 | Review process: the `/review-panel` skill and the tripwire (ADR 0020); the human still merges |
 | 2026-09-29 | 0.2.12 | ADR 0023: review severity rules and the round-limit walkthrough; no symlinks or submodules in the repository (`scripts/check_repo_files.py`) |
 | 2026-09-30 | 0.2.13 | M0.2: installed toolchain trees are read-only, so running a tool (the pinned Python writes `.pyc` files) can't change what `make require-toolchain` verifies |
+| 2026-09-30 | 0.2.14 | M0.2: pnpm is pinned as its native binary (`@pnpm/exe.<platform>`); the launcher package would fetch or download it itself |

@@ -66,7 +66,7 @@ Verified as described in [`ENGINEERING.md` §2.3](ENGINEERING.md#23-all-installs
 | Artifact | Version | Platform | SHA-256 (committed) | Verification method | Added (date, PR) |
 |---|---|---|---|---|---|
 | `sfw` (Socket Firewall Free) | 1.15.2 | linux-x86_64, linux-arm64, darwin-arm64, darwin-x86_64 | in `scripts/toolchain.lock` | GitHub release asset digest; Socket publishes no checksums, so this is **trust-on-first-use** | 2026-09-28, M0.1 |
-| pnpm (npm registry tarball) | 12.5.1 | all (JavaScript, runs on the pinned Node) | sha512 integrity in `scripts/toolchain.lock` | npm registry integrity (computed by the registry at publish time; registry signature and provenance verification in M0.2) — user decision, PR #7 | 2026-09-28, M0.1 |
+| pnpm (native binary, npm registry tarball `@pnpm/exe.<platform>`) | 12.5.1 | linux-x86_64 and linux-arm64 (glibc builds), darwin-arm64, darwin-x86_64 | sha512 integrity in `scripts/toolchain.lock` | npm registry integrity (computed by the registry at publish time). The `pnpm` package itself is only a launcher that fetches this binary with an install script, or downloads one at run time, so it is not used. Changed in M0.2 (2026-09-30), **pending human approval** | 2026-09-28, M0.1; native binary 2026-09-30, M0.2 |
 | uv | 0.12.17 | as `sfw` | in `scripts/toolchain.lock` | Publisher `sha256.sum`; matches the GitHub asset digest | 2026-09-28, M0.1 |
 | Node.js | 24.21.0 (LTS) | same | in `scripts/toolchain.lock` | nodejs.org `SHASUMS256.txt` (GPG check of the `.asc` against the Node release keys: M0.2) | 2026-09-28, M0.1 |
 | CPython (python-build-standalone) | 3.13.15 (20260901) | same | in `scripts/toolchain.lock` | Publisher `SHA256SUMS` | 2026-09-28, M0.1 |
