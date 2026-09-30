@@ -178,7 +178,7 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
         binary.chmod(0o755)
         rel_bin = binary.relative_to(staging).as_posix()
         if tool_dir.exists():
-            shutil.rmtree(tool_dir)
+            remove_tree(tool_dir)
         tool_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(staging), str(tool_dir))
         if entry["kind"] == "npm-tgz":
@@ -195,7 +195,35 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
         (tool_dir / MARKER).write_text(json.dumps(
             {"artifact": artifact_id(entry), "bin": rel_bin, "root": str(TOOLCHAIN),
              "tree_sha256": tree_digest(tool_dir)}) + "\n")
+        make_read_only(tool_dir)
         return tool_dir / rel_bin
+
+
+def make_read_only(tool_dir: Path) -> None:
+    """Remove every write bit from an installed tree.
+
+    Running a tool must not change its install. The pinned Python, for one, writes `.pyc`
+    files next to its standard library, which broke the tree digest (M0.2). With the tree
+    read-only it skips them. Leaving `.pyc` files out of the digest instead would let a
+    tampered one run unnoticed.
+    """
+    for dirpath, dirnames, filenames in os.walk(tool_dir, topdown=False, followlinks=False):
+        for name in filenames + dirnames:
+            path = Path(dirpath) / name
+            if not path.is_symlink():
+                path.chmod(path.stat().st_mode & ~0o222)
+    tool_dir.chmod(tool_dir.stat().st_mode & ~0o222)
+
+
+def remove_tree(tool_dir: Path) -> None:
+    """Delete an installed tree, which `make_read_only` left without write bits."""
+    for dirpath, dirnames, _ in os.walk(tool_dir, followlinks=False):
+        Path(dirpath).chmod(Path(dirpath).stat().st_mode | 0o700)
+        for name in dirnames:
+            path = Path(dirpath) / name
+            if not path.is_symlink():
+                path.chmod(path.stat().st_mode | 0o700)
+    shutil.rmtree(tool_dir)
 
 
 def read_marker(tool_dir: Path) -> dict | None:

@@ -5,8 +5,8 @@
 
 | | |
 |---|---|
-| Version | 0.7.11 (M0 in progress) |
-| Last updated | 2026-09-29 |
+| Version | 0.7.12 (M0 in progress) |
+| Last updated | 2026-09-30 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
 
@@ -367,3 +367,4 @@ This applies to almost any project that vets its dependencies.
 | 2026-09-28 | 0.7.9 | T-508: automatic standing-method mode; the late flag is set only when the choice differs (ADR 0021) |
 | 2026-09-28 | 0.7.10 | T-605: the review panel's tripwire focuses the human's merge review (ADR 0020); new accepted risk R-9 (AI review panel), including unsandboxed AI agents (user decision 2026-09-29) |
 | 2026-09-29 | 0.7.11 | ADR 0023: R-9 drops the panel's data-volume clause (owner practice stated as an assumption, with the sole-pusher assumption); symlinks and submodules banned by a CI check |
+| 2026-09-30 | 0.7.12 | T-603: installed toolchain trees are read-only. Found at M0.2 setup: running the pinned Python wrote `.pyc` files into its own tree, which failed verification. Leaving `.pyc` files out of the digest would have let a planted one run unnoticed |
