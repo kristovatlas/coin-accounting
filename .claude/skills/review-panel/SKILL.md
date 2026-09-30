@@ -287,9 +287,20 @@ Every text the panel publishes goes through the same path: comments, issues, the
 1. Write the text to a file in `$PANEL`.
    - **The first line is the marker** `<!-- review-panel:N:R:<kind> -->`. The heading follows.
    - Remove any other `<!-- review-panel:` from the text first, so quoted report text can't forge a marker.
-2. Run **`main`'s copy** of the secret scan: `git show refs/remotes/origin/main:scripts/secret_scan.py > "$PANEL/pr-N-secret_scan.py"`, then `python3 "$PANEL/pr-N-secret_scan.py" --redact-home <file>`. Never run the PR's copy.
-   - **Any non-zero exit:** don't post. Exit 1 means a pattern matched: tell the user which one, without quoting it. Any other exit status means the scan failed, so go to `awaiting-human` (`blocker`).
-   - **Exit 0:** home-directory paths are now redacted, so post with `--body-file <file>`.
+2. Run **`main`'s copy** of the secret scan, and **fail closed**:
+
+   ```sh
+   git show refs/remotes/origin/main:scripts/secret_scan.py > "$PANEL/pr-N-secret_scan.py" \
+     && test -s "$PANEL/pr-N-secret_scan.py" \
+     && out="$(python3 "$PANEL/pr-N-secret_scan.py" --redact-home <file>)" \
+     && [ "$(printf '%s\n' "$out" | tail -n 1)" = "secret_scan: ok" ]
+   ```
+
+   Never run the PR's copy. Post **only** if this whole command succeeds. An empty or missing copy also exits 0, which is why the ok line is required.
+   - **A pattern matched** (exit 1): don't post. Tell the user which pattern, without quoting it.
+   - **Anything else** (the copy failed or is empty, another exit status, or no ok line): the scan did not run. Don't post; go to `awaiting-human` (`blocker`).
+   - **Until `main`'s copy prints the ok line** (before this change is merged), require a non-empty copy and exit 0 instead.
+   - **Success:** home-directory paths are now redacted, so post with `--body-file <file>`.
 3. **Idempotency.**
    - Record each posted comment's or issue's id in `posted`, under its marker.
    - Before posting, skip any marker already recorded, or found at the start of a comment written by the owner.
