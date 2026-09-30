@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-09-29
 deciders: repository owner (human), drafted by Claude Code
 amends: 0020
