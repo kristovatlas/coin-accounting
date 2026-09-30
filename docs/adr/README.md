@@ -29,5 +29,6 @@ MADR-format records of significant decisions (see [ADR 0001](0001-record-decisio
 | [0020](0020-review-panel.md) | Automated review panel and tripwire; the human merges |
 | [0021](0021-standing-method-automatic.md) | Accounts that use their standing method need no lot picking |
 | [0022](0022-install-guard-is-hygiene.md) | The install-command guard is hygiene against accidental installs |
+| [0023](0023-review-panel-refinements.md) | Review panel refinements: severity rules, round-limit walkthrough, no data-volume checks, no symlinks |
 
 Template: [0000-template.md](0000-template.md).

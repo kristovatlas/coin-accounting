@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.11 |
-| Last updated | 2026-09-28 |
+| Version | 0.2.12 |
+| Last updated | 2026-09-29 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -316,6 +316,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
     - When a round is clean and CI is green, the **tripwire** checks the final commit: a mechanical scan (`scripts/tripwire.py`, from `main`'s copy) plus a separate Opus check for malicious patterns. Examples: process or network use in tests, weakened or deleted guards and tests, new hosts, obfuscated code, dependency or agent-instruction changes. It is a heuristic that points the human's attention, not a guarantee.
     - The flags are posted for the human (after the mechanical secret scan, `scripts/secret_scan.py`), and set as the advisory `tripwire` commit status on that exact commit. The hand-off names the SHA, and a later push has no status until the tripwire runs again.
     - **The human merges**, looking carefully at anything flagged. The panel never merges; afterwards it deletes the branch and cleans up.
+    - Severity rules and the round limit ([ADR 0023](adr/0023-review-panel-refinements.md)): fail-safe process edge cases and "an AI could be steered" findings are not P1. After round 5, the human decides each remaining P1 in a plain-language walkthrough: downgrade, keep or accept.
 
 ## 7. Workflow
 
@@ -356,6 +357,7 @@ A change is done only when:
 | Mutation budget | Per-PR targeted run + weekly full run |
 | Banned APIs, float ban, CSP/XSS rules | ruff / AST check / `FloatOperation` trap / ESLint / bundle scan / E2E CSP check |
 | Module import edges and capability rules | `scripts/check-architecture` (architecture §2) |
+| No symbolic links or submodules in the tree | `scripts/check-repo-files` (ADR 0023) |
 | ADR immutability, diagram hash | CI checks |
 | Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review |
 | Test-slop rules | Partly automated (§3.5) + review checklist + periodic test audit |
@@ -379,3 +381,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.9 | PR #7 review round 6: approval checked against `refs/remotes/origin/main`, ignored files included; the toolchain installer checks its own pins; `propose-*` refuse unapproved install config, resolve with `--no-build` and `ignorePnpmfile`; the `MAKEFLAGS` and untrusted-branch limits stated |
 | 2026-09-28 | 0.2.10 | PR #7 review round 7: the `DEPS_APPROVED` rule is stated for all agents in AGENTS.md; only Claude Code has a technical block |
 | 2026-09-28 | 0.2.11 | Review process: the `/review-panel` skill and the tripwire (ADR 0020); the human still merges |
+| 2026-09-29 | 0.2.12 | ADR 0023: review severity rules and the round-limit walkthrough; no symlinks or submodules in the repository (`scripts/check_repo_files.py`) |

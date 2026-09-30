@@ -137,4 +137,5 @@ check: ## Run all repository checks
 	"$(SYS_PYTHON)" scripts/check_adrs.py $${BASE:+--base "$$BASE"}
 	"$(SYS_PYTHON)" scripts/check_install_commands.py
 	"$(SYS_PYTHON)" scripts/check_architecture.py
+	"$(SYS_PYTHON)" scripts/check_repo_files.py
 	"$(SYS_PYTHON)" -m unittest discover -s scripts/tests -p 'test_*.py'
