@@ -78,12 +78,14 @@ propose-js: require-pkg require-approved-config require-toolchain ## Resolve a J
 	@case "$$WORKSPACE" in frontend|e2e) ;; *) echo "WORKSPACE must be frontend or e2e" >&2; exit 1;; esac
 	"$(SFW)" "$(PNPM)" add --lockfile-only $${DEV:+--save-dev} --filter "./$$WORKSPACE" "$$PKG"
 	@git --no-pager diff --stat -- package.json '*/package.json' pnpm-lock.yaml
+	@git ls-files --others --exclude-standard -- package.json '*/package.json' pnpm-lock.yaml | sed 's/^/ new file: /'
 	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry and human approval. Only the human installs unmerged changes (DEPS_APPROVED=1 on the make command line)."
 
 .PHONY: propose-py
 propose-py: require-pkg require-approved-config require-toolchain ## Resolve a Python dependency into uv.lock only. Usage: make propose-py PKG=name==version [DEV=1]
 	"$(SFW)" "$(UV)" add --no-sync --no-build $${DEV:+--dev} "$$PKG"
 	@git --no-pager diff --stat -- pyproject.toml uv.lock
+	@git ls-files --others --exclude-standard -- pyproject.toml uv.lock | sed 's/^/ new file: /'
 	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry and human approval. Only the human installs unmerged changes (DEPS_APPROVED=1 on the make command line)."
 
 # Changes that haven't reached origin/main (i.e. aren't merged by the human) are unapproved
