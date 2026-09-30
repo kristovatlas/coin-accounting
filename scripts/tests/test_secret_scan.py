@@ -49,6 +49,18 @@ class SecretScanTests(unittest.TestCase):
             self.assertNotIn(secret, buf.getvalue())
             self.assertIn("GitHub token", buf.getvalue())
 
+    def test_a_clean_scan_prints_the_ok_line(self):
+        # PR #60 review: an empty copy of the script also exits 0, so callers need this line.
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "review.md"
+            f.write_text("nothing secret here\n")
+            import io
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(secret_scan.main([str(f)]), 0)
+            self.assertEqual(buf.getvalue().strip().splitlines()[-1], "secret_scan: ok")
+
     def test_home_directory_is_redacted(self):
         home = str(Path.home())
         self.assertEqual(secret_scan.redact_home(f"{home}/coin/x.py"), "~/coin/x.py")

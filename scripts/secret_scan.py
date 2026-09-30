@@ -10,7 +10,8 @@ place, so local paths and usernames aren't published.
 
 Usage:
     secret_scan.py [--redact-home] FILE...
-Exit status: 0 = clean; 1 = a secret pattern matched (don't post); 2 = could not read.
+Exit status: 0 = clean, and the last line printed is `secret_scan: ok`; 1 = a secret pattern
+matched (don't post); 2 = could not read. Callers must require both exit 0 and the ok line.
 """
 
 from __future__ import annotations
@@ -71,6 +72,10 @@ def main(argv: list[str] | None = None) -> int:
             status = 1
         if args.redact_home and name != "-" and status == 0:
             Path(name).write_text(redact_home(text), encoding="utf-8")
+    if status == 0:
+        # A fixed success line, so a caller can tell a clean scan from a scan that never ran
+        # (e.g. an empty or missing copy of this script also exits 0; PR #60 review).
+        print("secret_scan: ok")
     return status
 
 
