@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.7.13 (M0 in progress) |
+| Version | 0.7.14 (M0 in progress) |
 | Last updated | 2026-09-30 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -369,3 +369,4 @@ This applies to almost any project that vets its dependencies.
 | 2026-09-29 | 0.7.11 | ADR 0023: R-9 drops the panel's data-volume clause (owner practice stated as an assumption, with the sole-pusher assumption); symlinks and submodules banned by a CI check |
 | 2026-09-30 | 0.7.12 | T-603: installed toolchain trees are read-only. Found at M0.2 setup: running the pinned Python wrote `.pyc` files into its own tree, which failed verification. Leaving `.pyc` files out of the digest would have let a planted one run unnoticed |
 | 2026-09-30 | 0.7.13 | T-603: pnpm is pinned as its native binary; the `pnpm` npm package is only a launcher that fetches the binary in an install script, or downloads one at run time (found at M0.2 setup) |
+| 2026-09-30 | 0.7.14 | T-601, T-602: the lockfile policy check exists (`scripts/check_lockfiles.py`, in CI): `uv.lock` sources, hashes and age; no lifecycle scripts, `.pnpmfile` or `configDependencies`. The pnpm-lockfile part is still to come, so a pnpm lockfile fails the check. Both rows stay Planned until the rest of their mitigations exist |

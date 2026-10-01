@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.14 |
+| Version | 0.2.15 |
 | Last updated | 2026-09-30 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -128,6 +128,8 @@ The cooldown only applies when versions are *resolved*. A hand-edited or bot-gen
 - the version was published **≥ 7 days** ago (npm registry `time`; `upload-time` in `uv.lock`), unless it has a recorded, unexpired exception (§2.6)
 - our `package.json` files have no lifecycle scripts, and there is no `.pnpmfile.*` and no `configDependencies`
 - the pnpm lockfile is parsed in full. pnpm 12 can write multi-document lockfiles, and scanners that read only the first document report zero dependencies **(verify at setup that the Socket App and Dependabot handle this)**
+
+**Status (M0.2):** `scripts/check_lockfiles.py` runs in `make check` and CI. It checks every `uv.lock` entry and our `package.json` files, `.pnpmfile.*` and `configDependencies`. Its pnpm-lockfile part lands with the first JavaScript dependency; until then, a `pnpm-lock.yaml` fails the check. There are no cooldown exceptions yet, so the check allows none: recording one (§2.6) means extending the check in the same PR.
 
 ### 2.6 Updating dependencies
 
@@ -347,7 +349,7 @@ A change is done only when:
 
 | Practice | Enforced by |
 |---|---|
-| Cooldowns, exotic-source bans, no build scripts, wheels-only, no auto-install/auto-download | Tool config (§2.1, §2.2) + lockfile policy check (§2.5) |
+| Cooldowns, exotic-source bans, no build scripts, wheels-only, no auto-install/auto-download | Tool config (§2.1, §2.2) + lockfile policy check (§2.5, `scripts/check-lockfiles`) |
 | Vet before install | `make propose-*` (lockfile-only) + Socket App report + human approval |
 | Socket Firewall on all installs | `make` targets wrapping `sfw` with no fallback + install-command check (hygiene) |
 | Vulnerability audits | `make audit` on every PR + weekly clean-cache job |
@@ -384,3 +386,4 @@ A change is done only when:
 | 2026-09-29 | 0.2.12 | ADR 0023: review severity rules and the round-limit walkthrough; no symlinks or submodules in the repository (`scripts/check_repo_files.py`) |
 | 2026-09-30 | 0.2.13 | M0.2: installed toolchain trees are read-only, so running a tool (the pinned Python writes `.pyc` files) can't change what `make require-toolchain` verifies |
 | 2026-09-30 | 0.2.14 | M0.2: pnpm is pinned as its native binary (`@pnpm/exe.<platform>`); the launcher package would fetch or download it itself |
+| 2026-09-30 | 0.2.15 | M0.2: the lockfile policy check (`scripts/check-lockfiles`) runs in `make check` and CI; the pnpm part lands with the first JavaScript dependency, and a pnpm lockfile fails until then |
