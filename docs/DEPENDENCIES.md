@@ -8,7 +8,7 @@ Transitive packages are covered by the lockfiles, the lockfile policy check and 
 
 | Name | Ecosystem | Exact version | Runtime / Dev | Purpose | Alternatives considered | Licence | Network capability? | Native code / install scripts? | Socket result | Added (date, PR) | Approved by |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `pytest` | Python (uv), dev group | 9.1.1 (uploaded 2026-06-19) | Dev | Test runner (ENGINEERING §3) | stdlib `unittest` (used by the M0.1 repository checks); pytest's fixtures, parametrisation and plugin ecosystem (`hypothesis`, coverage) are what §3 is written against | MIT | No | No (pure-Python wheel). Transitive, all pure-Python wheels: `iniconfig` 2.3.0 (MIT), `packaging` 26.3 (Apache-2.0 OR BSD-2-Clause), `pluggy` 1.6.0 (MIT), `pygments` 2.21.0 (BSD-2-Clause); `colorama` 0.4.6 (BSD, Windows only, never installed here) | *pending: Socket report on this PR* | 2026-09-30, M0.2 | **pending the human's approval** |
+| `pytest` | Python (uv), dev group | 9.1.1 (uploaded 2026-06-19) | Dev | Test runner (ENGINEERING §3) | stdlib `unittest` (used by the M0.1 repository checks); pytest's fixtures, parametrisation and plugin ecosystem (`hypothesis`, coverage) are what §3 is written against | MIT | No | No (pure-Python wheel). Transitive, all pure-Python wheels: `iniconfig` 2.3.0 (MIT), `packaging` 26.3 (Apache-2.0 OR BSD-2-Clause), `pluggy` 1.6.0 (MIT), `pygments` 2.21.0 (BSD-2-Clause); `colorama` 0.4.6 (BSD, Windows only, never installed here) | Socket App on PR #65 (2026-09-30): Supply Chain 87, Vulnerability, Quality, Maintenance, License 100; "Pull Request Alerts" passed with no alerts | 2026-09-30, M0.2 | **pending the human's approval** |
 
 ## Proposed, awaiting approval
 
