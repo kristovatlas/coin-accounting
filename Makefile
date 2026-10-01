@@ -8,17 +8,21 @@ SHELL := /bin/bash
 
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
+# `override`: a command-line SFW=/TOOLBIN= must never replace the pinned tools (PR #7 review).
+override TOOLBIN := $(ROOT)/.toolchain/bin
+
 # The host interpreter that runs our scripts, including the toolchain verifier. It is
 # resolved once, here, before PATH is changed, and can't be overridden from the command
 # line or the environment: a substitute (e.g. SYS_PYTHON=true) would make every
-# verification pass (PR #7 review).
-override SYS_PYTHON := $(shell command -v python3)
+# verification pass (PR #7 review). It is never the pinned python3: a caller's PATH may
+# already start with .toolchain/bin (a make recipe, or `toolchain.py path`), and the pinned
+# interpreter must not verify itself, so that directory and anything that is the pinned
+# binary are skipped (PR #81 review, round 3).
+override SYS_PYTHON := $(shell set -f; IFS=:; for d in $$PATH; do [ -n "$$d" ] && [ -x "$$d/python3" ] || continue; if [ -d "$(TOOLBIN)" ]; then [ "$$d" -ef "$(TOOLBIN)" ] && continue; [ "$$d/python3" -ef "$(TOOLBIN)/python3" ] && continue; fi; echo "$$d/python3"; break; done)
 ifeq ($(SYS_PYTHON),)
-$(error python3 (3.9 or newer) is required on the host to run the repository scripts)
+$(error python3 (3.9 or newer) is required on the host, outside .toolchain/bin, to run the repository scripts)
 endif
 
-# `override`: a command-line SFW=/TOOLBIN= must never replace the pinned tools (PR #7 review).
-override TOOLBIN := $(ROOT)/.toolchain/bin
 override SFW := $(TOOLBIN)/sfw
 override PNPM := $(TOOLBIN)/pnpm
 override UV := $(TOOLBIN)/uv
@@ -140,7 +144,7 @@ require-approved-config:
 
 .PHONY: bootstrap
 bootstrap: require-approved-deps require-toolchain ## Install exactly what the lockfiles on origin/main say, through sfw
-	@if [ -f uv.lock ]; then "$(SFW)" "$(UV)" sync --locked && "$(SYS_PYTHON)" scripts/check_pth.py .venv; else echo "no uv.lock yet (no Python dependencies approved)"; fi
+	@if [ -f uv.lock ]; then rc=0; "$(SFW)" "$(UV)" sync --locked || rc=$$?; find .venv/lib*/python*/site-packages/__pycache__ -maxdepth 1 -iname '_virtualenv*' -delete 2>/dev/null || true; "$(SYS_PYTHON)" scripts/check_pth.py .venv; [ $$rc -eq 0 ]; else echo "no uv.lock yet (no Python dependencies approved)"; fi
 	@if [ -f pnpm-lock.yaml ]; then "$(SFW)" "$(PNPM)" install --frozen-lockfile; else echo "no pnpm-lock.yaml yet (no JS dependencies approved)"; fi
 
 .PHONY: audit
