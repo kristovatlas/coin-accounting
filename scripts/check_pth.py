@@ -36,16 +36,41 @@ def site_dirs(venv: Path) -> list[Path]:
     return sorted({p.resolve() for p in venv.glob("lib*/python*/site-packages") if p.is_dir()})
 
 
+HOOK_NAME = "_virtualenv"
+
+
+def is_hook_name(name: str) -> bool:
+    """`_virtualenv` itself or `_virtualenv.<anything>`: every name `import _virtualenv` could load."""
+    return name == HOOK_NAME or name.startswith(HOOK_NAME + ".")
+
+
 def recorded_hooks(site: Path) -> list[str]:
-    """Top-level `.pth` files and `_virtualenv.*` that an installed distribution claims (its RECORD)."""
+    """Start-up hooks an installed distribution claims in its RECORD: a top-level `.pth`, anything
+    `import _virtualenv` could resolve to (a module, package or extension), or cached bytecode for it."""
     found = []
     for record in sorted(site.glob("*.dist-info/RECORD")):
-        with record.open(newline="") as f:
+        with record.open(newline="", encoding="utf-8") as f:
             for row in csv.reader(f):
-                path = row[0] if row else ""
-                if "/" not in path and (path.endswith(".pth") or path.startswith("_virtualenv.")):
+                path = (row[0] if row else "").removeprefix("./")
+                parts = path.split("/")
+                if (len(parts) == 1 and path.endswith(".pth")) or is_hook_name(parts[0]) \
+                        or (parts[0] == "__pycache__" and len(parts) > 1 and parts[1].startswith(HOOK_NAME)):
                     found.append(f"{record.parent.name}: {path}")
     return found
+
+
+def pyc_matches_source(pyc: Path, source: Path) -> bool:
+    """A timestamp-based .pyc whose recorded source mtime and size are the source file's.
+
+    Python then checks it against the source on every import. An unchecked hash-based .pyc
+    (PEP 552) would be loaded without looking at the source at all.
+    """
+    header = pyc.read_bytes()[:16]
+    if len(header) < 16 or int.from_bytes(header[4:8], "little") != 0:
+        return False
+    st = source.stat()
+    return (int.from_bytes(header[8:12], "little") == int(st.st_mtime) & 0xFFFFFFFF
+            and int.from_bytes(header[12:16], "little") == st.st_size & 0xFFFFFFFF)
 
 
 def problems(venv: Path) -> list[str]:
@@ -54,16 +79,29 @@ def problems(venv: Path) -> list[str]:
         for pth in sorted(site.glob("*.pth")):
             if pth.name not in UV_HOOK:
                 found.append(f"unexpected .pth file (runs code on every interpreter start): {pth}")
-        for name, content in UV_HOOK.items():
-            path = site / name
-            if path.exists() or path.is_symlink():
-                if not stat.S_ISREG(path.lstat().st_mode) or path.read_bytes() != content:
-                    found.append(f"{path} is not uv's own file (content, or not a regular file)")
-        for name, digest in UV_HOOK_SHA256.items():
-            path = site / name
-            if path.exists() or path.is_symlink():
-                if not stat.S_ISREG(path.lstat().st_mode) or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-                    found.append(f"{path} is not uv's own file (hash, or not a regular file)")
+        # Everything `import _virtualenv` could load must be uv's own two regular files; a
+        # package, extension module or any other variant could shadow them (PR #74 review).
+        for entry in sorted(site.iterdir()):
+            if is_hook_name(entry.name) and (entry.name not in (*UV_HOOK, *UV_HOOK_SHA256)
+                                             or not stat.S_ISREG(entry.lstat().st_mode)):
+                found.append(f"{entry} could shadow uv's _virtualenv module")
+        pth, module = site / "_virtualenv.pth", site / "_virtualenv.py"
+        if pth.exists() or pth.is_symlink():
+            if not stat.S_ISREG(pth.lstat().st_mode) or pth.read_bytes() != UV_HOOK["_virtualenv.pth"]:
+                found.append(f"{pth} is not uv's own file (content, or not a regular file)")
+            if not (module.exists() or module.is_symlink()):
+                found.append(f"{pth} is present without uv's {module.name}, so its import would load something else")
+        if module.exists() or module.is_symlink():
+            if not stat.S_ISREG(module.lstat().st_mode) \
+                    or hashlib.sha256(module.read_bytes()).hexdigest() != UV_HOOK_SHA256["_virtualenv.py"]:
+                found.append(f"{module} is not uv's own file (hash, or not a regular file)")
+        cache = site / "__pycache__"
+        if cache.is_dir():
+            for pyc in sorted(cache.iterdir()):
+                if pyc.name.startswith(HOOK_NAME) and not (
+                        stat.S_ISREG(pyc.lstat().st_mode) and pyc.name.endswith(".pyc")
+                        and module.is_file() and pyc_matches_source(pyc, module)):
+                    found.append(f"{pyc} isn't bytecode checked against uv's {module.name}")
         for claim in recorded_hooks(site):
             found.append(f"an installed package ships a start-up hook: {claim}")
     return found
