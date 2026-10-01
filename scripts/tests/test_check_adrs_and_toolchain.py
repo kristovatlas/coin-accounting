@@ -170,6 +170,24 @@ class ToolchainTests(unittest.TestCase):
                     else:
                         self.assertRegex(entry["integrity"], r"^sha512-[A-Za-z0-9+/]{86}==$")
 
+    def test_pinned_urls_match_their_platform_and_differ(self):
+        # #67: a copy-paste slip between platforms would otherwise pass.
+        hints = {"linux-x86_64": ("linux",), "linux-arm64": ("linux",), "darwin-arm64": ("darwin", "apple", "macos"),
+                 "darwin-x86_64": ("darwin", "apple", "macos")}
+        arch = {"linux-x86_64": ("x86_64", "x64", "amd64"), "linux-arm64": ("arm64", "aarch64"),
+                "darwin-arm64": ("arm64", "aarch64"), "darwin-x86_64": ("x86_64", "x64", "amd64")}
+        for name, spec in toolchain.load_lock().items():
+            if name.startswith("_"):
+                continue
+            urls = [spec[k]["url"] for k in hints]
+            with self.subTest(tool=name):
+                self.assertEqual(len(set(urls)), len(urls))
+            for key in hints:
+                url = spec[key]["url"].lower()
+                with self.subTest(tool=name, platform=key):
+                    self.assertTrue(any(h in url for h in hints[key]), url)
+                    self.assertTrue(any(a in url for a in arch[key]), url)
+
     def test_pnpm_is_the_native_binary_from_the_npm_registry_pinned_by_integrity(self):
         # M0.2: the `pnpm` package is only a launcher that fetches (or downloads at run time) this
         # binary, so the pin is the per-platform @pnpm/exe.<platform> tarball itself.
@@ -427,28 +445,39 @@ class ToolchainTests(unittest.TestCase):
                 mock.patch.object(toolchain.platform, "machine", return_value="aarch64"):
             self.assertEqual(toolchain.platform_key(), "linux-arm64")
 
-    def npm_tarball(self, data: bytes) -> tuple[bytes, str]:
+    def integrity_tarball(self, files: dict) -> tuple[bytes, str]:
+        """A gzipped tarball and its npm-style sha512 integrity, like the @pnpm/exe.<platform> pins."""
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            info = tarfile.TarInfo("package/pnpm")
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                info.mode = 0o755
+                tar.addfile(info, io.BytesIO(data))
         blob = buf.getvalue()
         import base64
         return blob, "sha512-" + base64.b64encode(hashlib.sha512(blob).digest()).decode()
 
-    def test_npm_tarball_is_checked_by_integrity_and_wrapped_with_pinned_node(self):
-        blob, integrity = self.npm_tarball(b"console.log('pnpm')\n")
-        spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/p.tgz", "integrity": integrity,
-                                                  "kind": "npm-tgz", "bin": "package/pnpm"}}
+    def pinned_pnpm(self):
+        # The layout of the real @pnpm/exe.linux-x64 12.5.1 tarball: the native binary, its
+        # package.json, a licence and notices (#62). No Node, no wrapper, no install scripts.
+        blob, integrity = self.integrity_tarball({"package/pnpm": b"\x7fELF native pnpm",
+                                                  "package/package.json": b'{"name": "@pnpm/exe.linux-x64"}'})
+        lock = {"pnpm": {"version": "1", "linux-x86_64": {"url": "https://example.invalid/p.tgz", "integrity": integrity,
+                                                          "kind": "tar", "bin": "package/pnpm"}}}
+        return lock, blob
+
+    def test_pnpm_native_tarball_is_checked_by_integrity_with_no_wrapper(self):
+        # #67: the shipped configuration (kind tar + sha512 integrity) had no install test.
+        lock, blob = self.pinned_pnpm()
+        spec = lock["pnpm"]
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
-                mock.patch.object(toolchain, "BIN", Path(d) / "bin"), \
                 mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
             path = toolchain.install_tool("pnpm", spec, "linux-x86_64")
-            text = path.read_text()
-            self.assertIn(str(Path(d) / "bin" / "node"), text)
-            self.assertIn("package/pnpm", text)
+            self.assertEqual(path, Path(d) / "pnpm" / "1" / "package" / "pnpm")
+            self.assertEqual(path.read_bytes(), b"\x7fELF native pnpm")
+            self.assertFalse((Path(d) / "pnpm" / "1" / "run").exists())
             self.assertEqual(toolchain.install_tool("pnpm", spec, "linux-x86_64"), path)
         bad = dict(spec["linux-x86_64"], integrity="sha512-" + "A" * 86 + "==")
         with tempfile.TemporaryDirectory() as d, \
@@ -457,72 +486,45 @@ class ToolchainTests(unittest.TestCase):
             with self.assertRaisesRegex(toolchain.ToolchainError, "hash mismatch"):
                 toolchain.install_tool("pnpm", {"version": "1", "linux-x86_64": bad}, "linux-x86_64")
 
-    def npm_tarball_with(self, files: dict) -> tuple[bytes, str]:
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            for name, data in files.items():
-                info = tarfile.TarInfo(name)
-                info.size = len(data)
-                tar.addfile(info, io.BytesIO(data))
-        blob = buf.getvalue()
-        import base64
-        return blob, "sha512-" + base64.b64encode(hashlib.sha512(blob).digest()).decode()
-
-    def pinned_pnpm_and_node(self):
-        # The layout of the real pnpm 12 tarball: package.json's "bin" maps pnpm to "pnpm"
-        # (registry metadata for pnpm 12.5.1), and the code lives in dist/.
-        blob, integrity = self.npm_tarball_with({"package/pnpm": b"#!/usr/bin/env node\nrequire('./dist/pnpm.cjs')\n",
-                                                 "package/dist/pnpm.cjs": b"console.log('pnpm')\n"})
-        node = self.wrapped_tar("node-v1-linux-x64/bin/node", b"#!/bin/sh\n")
-        lock = {"pnpm": {"version": "1", "linux-x86_64": {"url": "https://example.invalid/p.tgz", "integrity": integrity,
-                                                          "kind": "npm-tgz", "bin": "package/pnpm"}},
-                "node": {"version": "1", "linux-x86_64": {"url": "https://example.invalid/n.tgz",
-                                                          "sha256": hashlib.sha256(node).hexdigest(),
-                                                          "kind": "tar", "bin": "bin/node"}}}
-        blobs = {"https://example.invalid/p.tgz": blob, "https://example.invalid/n.tgz": node}
-        return lock, lambda url, dest: dest.write_bytes(blobs[url])
-
-    def test_modified_pnpm_code_is_detected_not_just_the_wrapper(self):
-        # PR #7 review, round 4: only the generated wrapper used to be hashed.
-        lock, fake_download = self.pinned_pnpm_and_node()
+    def test_modified_pnpm_is_detected_and_verified_without_node(self):
+        # PR #7 review, round 4: every file is covered, not just the entry point. #67: pnpm is
+        # native now, so its verification no longer needs (or checks) a Node install.
+        lock, blob = self.pinned_pnpm()
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
                 mock.patch.object(toolchain, "BIN", Path(d) / "bin"), \
-                mock.patch.object(toolchain, "download", fake_download):
-            for name in ("node", "pnpm"):
-                toolchain.link(toolchain.install_tool(name, lock[name], "linux-x86_64"), name)
-            toolchain.verify_tool("pnpm", lock, "linux-x86_64")
-            code = Path(d) / "pnpm" / "1" / "package" / "dist" / "pnpm.cjs"
-            code.chmod(0o644)  # installs are read-only; tampering has to undo that first
-            code.write_bytes(b"steal()\n")
-            with self.assertRaisesRegex(toolchain.ToolchainError, "pnpm was modified"):
-                toolchain.verify_tool("pnpm", lock, "linux-x86_64")
-            toolchain.install_tool("pnpm", lock["pnpm"], "linux-x86_64")  # reinstalls from the artifact
-            self.assertEqual(code.read_bytes(), b"console.log('pnpm')\n")
-            toolchain.verify_tool("pnpm", lock, "linux-x86_64")
-            # The Node that runs pnpm is part of pnpm's verification.
-            (Path(d) / "node" / "1" / "node-v1-linux-x64").chmod(0o755)  # undo the read-only install
-            (Path(d) / "node" / "1" / "node-v1-linux-x64" / "lib").mkdir()
-            with self.assertRaisesRegex(toolchain.ToolchainError, "node was modified"):
-                toolchain.verify_tool("pnpm", lock, "linux-x86_64")
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
+            toolchain.link(toolchain.install_tool("pnpm", lock["pnpm"], "linux-x86_64"), "pnpm")
+            toolchain.verify_tool("pnpm", lock, "linux-x86_64")  # no "node" entry in the lock
+            for name in ("pnpm", "package.json"):
+                with self.subTest(file=name):
+                    target = Path(d) / "pnpm" / "1" / "package" / name
+                    target.chmod(0o755)  # installs are read-only; tampering has to undo that first
+                    target.write_bytes(b"tampered")
+                    with self.assertRaisesRegex(toolchain.ToolchainError, "pnpm was modified"):
+                        toolchain.verify_tool("pnpm", lock, "linux-x86_64")
+                    toolchain.install_tool("pnpm", lock["pnpm"], "linux-x86_64")  # reinstalls
+                    toolchain.verify_tool("pnpm", lock, "linux-x86_64")
 
     def test_moved_checkout_is_reinstalled_not_reused(self):
-        # PR #7 review, round 4: the wrapper embeds absolute paths of the original tree.
-        lock, fake_download = self.pinned_pnpm_and_node()
+        # PR #7 review, round 4: the marker records the toolchain root, so a copied tree is
+        # treated as not installed rather than trusted.
+        lock, blob = self.pinned_pnpm()
         with tempfile.TemporaryDirectory() as d:
             old, new = Path(d) / "a" / ".toolchain", Path(d) / "b" / ".toolchain"
             with mock.patch.object(toolchain, "TOOLCHAIN", old), mock.patch.object(toolchain, "BIN", old / "bin"), \
-                    mock.patch.object(toolchain, "download", fake_download):
+                    mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
                 old.mkdir(parents=True)
                 toolchain.install_tool("pnpm", lock["pnpm"], "linux-x86_64")
             shutil.copytree(old, new, symlinks=True)
             with mock.patch.object(toolchain, "TOOLCHAIN", new), mock.patch.object(toolchain, "BIN", new / "bin"), \
-                    mock.patch.object(toolchain, "download", fake_download):
+                    mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
                 with self.assertRaisesRegex(toolchain.ToolchainError, "not installed"):
                     toolchain.verify_tool("pnpm", lock, "linux-x86_64")
                 path = toolchain.install_tool("pnpm", lock["pnpm"], "linux-x86_64")
-                self.assertNotIn(str(old), path.read_text())
-                self.assertIn(str(new / "bin" / "node"), path.read_text())
+                self.assertTrue(path.is_relative_to(new))
+            for tree in (old, new):  # copytree kept the read-only modes
+                toolchain.remove_tree(tree)
 
     def test_planted_bytecode_is_detected(self):
         # Round 5: Python runs a matching .pyc instead of its source, so __pycache__ is covered.

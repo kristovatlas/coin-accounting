@@ -21,7 +21,6 @@ import hashlib
 import json
 import os
 import platform
-import shlex
 import shutil
 import stat
 import subprocess
@@ -168,7 +167,7 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
         staging.mkdir()
         if entry["kind"] == "binary":
             shutil.copyfile(artifact, staging / entry["bin"])
-        elif entry["kind"] in ("tar", "npm-tgz"):
+        elif entry["kind"] == "tar":
             safe_extract(artifact, staging)
         else:
             raise ToolchainError(f"{name}: unknown kind {entry['kind']!r}")
@@ -185,17 +184,9 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
             remove_tree(tool_dir)
         tool_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(staging), str(tool_dir))
-        if entry["kind"] == "npm-tgz":
-            # A JavaScript package: run its entry point with the pinned Node. Its npm
-            # lifecycle scripts are never run (ENGINEERING §2.1).
-            wrapper = tool_dir / "run"
-            node, script = shlex.quote(str(BIN / "node")), shlex.quote(str(tool_dir / rel_bin))
-            wrapper.write_text(f'#!/bin/sh\nexec {node} {script} "$@"\n')
-            wrapper.chmod(0o755)
-            rel_bin = "run"
-        # The digest covers every installed file, not just the entry point: pnpm's JavaScript,
-        # Node's libraries (PR #7 review, round 4). The root catches a moved checkout, whose
-        # wrapper would still point at the old tree.
+        # The digest covers every installed file, not just the entry point: Node's libraries,
+        # Python's standard library (PR #7 review, round 4). The root catches a moved or copied
+        # checkout, which is reinstalled rather than trusted.
         (tool_dir / MARKER).write_text(json.dumps(
             {"artifact": artifact_id(entry), "bin": rel_bin, "root": str(TOOLCHAIN),
              "tree_sha256": tree_digest(tool_dir)}) + "\n")
@@ -309,8 +300,8 @@ def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> 
     """Check that .toolchain/bin/<name> is the pinned, unmodified install; return its binary.
 
     Used by `make require-toolchain` so a stale or replaced tool can never run an install
-    (ENGINEERING §2.3, "no silent fallback"). Every file of the install is checked, and a
-    JavaScript tool (pnpm) also needs the pinned Node that runs it.
+    (ENGINEERING §2.3, "no silent fallback"). Every file of the install is checked, and the
+    tree must still be read-only.
     """
     lock = lock or load_lock()
     key = key or platform_key()
@@ -337,8 +328,6 @@ def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> 
                              "run 'make toolchain' to make it read-only again")
     if entry.get("kind") == "binary" and sha256_file(expected) != entry.get("sha256"):
         raise ToolchainError(f"{name} binary hash differs from the pinned artifact")
-    if entry.get("kind") == "npm-tgz":
-        verify_tool("node", lock, key)
     return expected
 
 

@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.7.21 (M0 in progress) |
+| Version | 0.7.22 (M0 in progress) |
 | Last updated | 2026-10-01 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -377,3 +377,4 @@ This applies to almost any project that vets its dependencies.
 | 2026-10-01 | 0.7.19 | T-603: actionlint and zizmor are pinned toolchain binaries (actionlint checked against the publisher's checksums; zizmor trust-on-first-use from GitHub's digest). zizmor runs `--offline`, so no dev-time GitHub API flow. CI runs them once the pins are merged. Status stays Planned |
 | 2026-10-01 | 0.7.20 | T-603 (#69): verification now also fails on a writable toolchain tree (`make toolchain` re-hardens it). `remove_tree` refuses a symlinked tool directory before any chmod. A failed hardening leaves no valid marker. Limits (root, owner `chmod`) are recorded in ENGINEERING §2.3 |
 | 2026-10-01 | 0.7.21 | §6 and T-601: `make audit` uses a pinned `osv-scanner`. It's a new dev-time flow to `api.osv.dev` carrying the lockfiles' package names and versions, the same information the lockfiles already publish in this public repository |
+| 2026-10-01 | 0.7.22 | T-603 (#67): the pinned pnpm 12 is a Rust binary with no embedded Node runtime (no V8 or Node symbols), so it doesn't depend on the pinned Node. The unused `npm-tgz` install path and its Node chaining are removed, and the shipped pin type (`tar` plus sha512 integrity) is now tested. The pnpm packages carry an npm registry signature and a SLSA provenance attestation, not yet verified at install (#15) |
