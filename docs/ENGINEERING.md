@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.19 |
+| Version | 0.2.20 |
 | Last updated | 2026-10-01 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -75,7 +75,9 @@ Configured in `pyproject.toml` `[tool.uv]`.
   Contributors, AI agents and CI all use these targets. CI jobs call `make toolchain` and `make bootstrap`, never raw installers.
 - **No silent fallback:** if `sfw` is missing, not the pinned version, or fails to start, the scripts **stop with an error**. They never drop through to an unwrapped install. Whether `sfw` fails open when the Socket API is unreachable must be tested at setup. If it does, the wrapper detects that and stops **(verify at setup)**.
 - **Fetch-and-run commands are banned:** `npx`, `pnpm dlx`, `pnpm exec` of packages not in the lockfile, `uvx`/`uv tool run`, `pip install`, `curl … | sh`, the `pre-commit` framework (it clones and builds hook environments). The same applies to IDE and agent configuration, e.g. `.mcp.json` servers started with `npx -y`. Tools we need become locked dev dependencies. Git hooks, if any, are `repo`-local scripts that call locked tools.
-- **Verifying before use:** every install target first runs `toolchain.py verify sfw pnpm uv node python`, with a host interpreter the caller can't override, and then calls the tools by absolute path. Verification covers **every file** of each install (a digest recorded at install time), not just the entry point, so pnpm's JavaScript, the Node that runs it and the Python that uv uses are checked too, bytecode caches included (`make` sets `PYTHONDONTWRITEBYTECODE`). A missing, modified or moved install stops the command; there's no fallback to a host `pnpm`/`uv`.
+- **Verifying before use:** every install target first runs `toolchain.py verify sfw pnpm uv node python`, with a host interpreter the caller can't override, and then calls the tools by absolute path. Verification covers **every file** of each install (a digest recorded at install time), not just the entry point, so pnpm's native binary, Node and the Python that uv uses are checked too, bytecode caches included. **Installed trees are read-only**, so running a tool can't write into its own install, and verification also fails on a writable tree. `make toolchain` re-applies read-only without reinstalling, and `PYTHONDONTWRITEBYTECODE` is a second layer. A missing, modified, writable or moved install stops the command; there's no fallback to a host `pnpm`/`uv`.
+  - **Limits:** read-only stops accidents, not someone who can `chmod`. Root ignores the bits, so don't run `make` with `sudo`. If `.toolchain` was created by another user, `make toolchain` says so instead of failing with a traceback.
+  - **Removing the toolchain:** `rm -rf .toolchain` and `git clean -fdx` need `chmod -R u+w .toolchain` first.
 - **Host requirement:** `python3` 3.9 or newer to run the repository scripts; the lock is JSON so no `tomllib` is needed.
 - **Bootstrapping `sfw` itself:** `make toolchain` (`scripts/toolchain.py`) downloads the pinned sfw-free release binary and checks it against the SHA-256 in `scripts/toolchain.lock`. **Socket publishes no checksums or signatures for sfw-free**, so that committed hash is trust-on-first-use. It is recorded when the version is first adopted, and changes only through `make update-sfw` in a reviewed PR. macOS binaries are unsigned. CI uses the same script, not `socketdev/action`, which installs the latest version.
 - **What `sfw` does and doesn't do:**
@@ -396,3 +398,4 @@ A change is done only when:
 | 2026-10-01 | 0.2.17 | M0.2 verify at setup: no `packageManager` field (pnpm 12 resolves it from the registry on every command, #51); the lockfile check rejects it |
 | 2026-10-01 | 0.2.18 | §2.5: the lockfile check is hardened (#71, #72): file-name binding, declared dependencies without `uv.lock`, escaped keys, hook and lockfile settings, `ignorePnpmfile` required, any-case `.pnpmfile`, nested and branch pnpm lockfiles; the pinned Python is verified before `make check` uses it; the accepted upload-time limit is recorded |
 | 2026-10-01 | 0.2.19 | M0.2: actionlint 1.7.12 and zizmor 1.30.1 pinned (pending approval); `make lint-tools` / `make lint-workflows` |
+| 2026-10-01 | 0.2.20 | §2.3 (#69, #67): read-only trees are verified on use and re-applied by `make toolchain`; their limits (root, `chmod`, cleanup); pnpm described as a native binary |

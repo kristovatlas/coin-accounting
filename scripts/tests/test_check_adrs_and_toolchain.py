@@ -252,6 +252,72 @@ class ToolchainTests(unittest.TestCase):
                 with self.subTest(path=path.relative_to(d).as_posix()):
                     self.assertEqual(path.stat().st_mode & 0o222, 0)
 
+    def tool_spec(self):
+        blob = self.wrapped_tar("python/bin/python3", b"#!/bin/sh\n")
+        return blob, {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x",
+                                                       "sha256": hashlib.sha256(blob).hexdigest(), "kind": "tar",
+                                                       "bin": "python/bin/python3"}}
+
+    def test_verify_rejects_a_writable_tree_and_install_rehardens_it(self):
+        # #69: read-only is what stops a tool changing itself, so verification checks it.
+        blob, spec = self.tool_spec()
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "BIN", Path(d) / "bin"), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
+            toolchain.link(toolchain.install_tool("python", spec, "linux-x86_64"), "python3")
+            lock = {"python": spec}
+            toolchain.verify_tool("python", lock, "linux-x86_64")
+            lib = Path(d) / "python" / "1" / "python" / "bin"
+            lib.chmod(0o755)
+            with self.assertRaisesRegex(toolchain.ToolchainError, "is writable"):
+                toolchain.verify_tool("python", lock, "linux-x86_64")
+            toolchain.install_tool("python", spec, "linux-x86_64")  # cached path re-hardens
+            toolchain.verify_tool("python", lock, "linux-x86_64")
+
+    def test_a_read_only_tree_needs_no_chmod(self):
+        # #69: chmod fails on files another user owns, even when the mode wouldn't change.
+        blob, spec = self.tool_spec()
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
+            toolchain.install_tool("python", spec, "linux-x86_64")
+            with mock.patch.object(Path, "chmod", side_effect=PermissionError(1, "Operation not permitted")):
+                toolchain.make_read_only(Path(d) / "python" / "1")  # nothing writable: no chmod, no error
+                again = toolchain.install_tool("python", spec, "linux-x86_64")
+            self.assertTrue(again.is_file())
+
+    def test_a_failed_hardening_is_an_error_and_leaves_no_valid_marker(self):
+        blob, spec = self.tool_spec()
+        real_chmod = Path.chmod
+
+        def refuse_removing_write_bits(path, mode, *a, **k):
+            if not mode & 0o200:
+                raise PermissionError(1, "Operation not permitted")
+            return real_chmod(path, mode, *a, **k)
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)), \
+                mock.patch.object(Path, "chmod", refuse_removing_write_bits):
+            with self.assertRaisesRegex(toolchain.ToolchainError, "another user"):
+                toolchain.install_tool("python", spec, "linux-x86_64")
+            self.assertIsNone(toolchain.read_marker(Path(d) / "python" / "1"))
+
+    def test_remove_tree_refuses_a_symlinked_tool_dir_before_any_chmod(self):
+        with tempfile.TemporaryDirectory() as d:
+            outside = Path(d) / "outside"
+            outside.mkdir()
+            outside.chmod(0o555)
+            link = Path(d) / "tool"
+            link.symlink_to(outside)
+            try:
+                with self.assertRaisesRegex(toolchain.ToolchainError, "not a real directory"):
+                    toolchain.remove_tree(link)
+                self.assertEqual(outside.stat().st_mode & 0o777, 0o555)
+            finally:
+                outside.chmod(0o755)
+
     def test_tar_with_path_traversal_is_refused(self):
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:

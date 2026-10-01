@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.7.19 (M0 in progress) |
+| Version | 0.7.20 (M0 in progress) |
 | Last updated | 2026-10-01 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -375,3 +375,4 @@ This applies to almost any project that vets its dependencies.
 | 2026-10-01 | 0.7.17 | T-601: ADR 0024 (proposed) allows prebuilt native-code wheels for four development tools only (`hypothesis`, `coverage`, `ruff`, `mypy`); their compiled parts are less reviewable than Python source. Any other native-code dependency, runtime ones included, still needs its own ADR |
 | 2026-10-01 | 0.7.18 | T-601, T-602: the lockfile check closes the #71/#72 gaps. Each `uv.lock` file must match its entry's name and version. Escaped `configDependencies`/`packageManager` keys, hook-file and per-branch/per-package lockfile settings, and a missing `ignorePnpmfile: true` all fail, as do `.pnpmfile` in any case and any pnpm lockfile in the tree. The upload-time limit is accepted (PR #63) and recorded in ENGINEERING §2.5. Statuses stay Planned |
 | 2026-10-01 | 0.7.19 | T-603: actionlint and zizmor are pinned toolchain binaries (actionlint checked against the publisher's checksums; zizmor trust-on-first-use from GitHub's digest). zizmor runs `--offline`, so no dev-time GitHub API flow. CI runs them once the pins are merged. Status stays Planned |
+| 2026-10-01 | 0.7.20 | T-603 (#69): verification now also fails on a writable toolchain tree (`make toolchain` re-hardens it). `remove_tree` refuses a symlinked tool directory before any chmod. A failed hardening leaves no valid marker. Limits (root, owner `chmod`) are recorded in ENGINEERING §2.3 |

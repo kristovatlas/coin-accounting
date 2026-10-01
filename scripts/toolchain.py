@@ -23,6 +23,7 @@ import os
 import platform
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -198,7 +199,13 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
         (tool_dir / MARKER).write_text(json.dumps(
             {"artifact": artifact_id(entry), "bin": rel_bin, "root": str(TOOLCHAIN),
              "tree_sha256": tree_digest(tool_dir)}) + "\n")
-        make_read_only(tool_dir)
+        try:
+            make_read_only(tool_dir)
+        except ToolchainError:
+            # Don't leave a valid marker on a half-hardened tree: the next run reinstalls (#69).
+            tool_dir.chmod(tool_dir.stat().st_mode | 0o700)
+            (tool_dir / MARKER).unlink(missing_ok=True)
+            raise
         return tool_dir / rel_bin
 
 
@@ -210,23 +217,49 @@ def make_read_only(tool_dir: Path) -> None:
     read-only it skips them. Leaving `.pyc` files out of the digest instead would let a
     tampered one run unnoticed.
     """
-    for dirpath, dirnames, filenames in os.walk(tool_dir, topdown=False, followlinks=False):
-        for name in filenames + dirnames:
-            path = Path(dirpath) / name
-            if not path.is_symlink():
-                path.chmod(path.stat().st_mode & ~0o222)
-    tool_dir.chmod(tool_dir.stat().st_mode & ~0o222)
+    paths = [Path(dirpath) / name
+             for dirpath, dirnames, filenames in os.walk(tool_dir, topdown=False, followlinks=False)
+             for name in filenames + dirnames]
+    for path in [*paths, tool_dir]:
+        try:
+            mode = path.lstat().st_mode
+            # Already read-only: no chmod, which fails on files another user owns even when the
+            # mode wouldn't change (#69). Symlinks are skipped; their modes mean nothing.
+            if not stat.S_ISLNK(mode) and mode & 0o222:
+                path.chmod(mode & ~0o222)
+        except OSError as e:
+            raise ToolchainError(f"can't make {path} read-only ({e.strerror}); was .toolchain created by another "
+                                 "user, e.g. with sudo? Fix its ownership, then run 'make toolchain'") from e
+
+
+def writable_paths(tool_dir: Path) -> list[Path]:
+    """Files and directories in an installed tree that still have a write bit (symlinks excluded)."""
+    found = [tool_dir] if tool_dir.lstat().st_mode & 0o222 else []
+    for dirpath, dirnames, filenames in os.walk(tool_dir, followlinks=False):
+        for name in dirnames + filenames:
+            mode = (Path(dirpath) / name).lstat().st_mode
+            if not stat.S_ISLNK(mode) and mode & 0o222:
+                found.append(Path(dirpath) / name)
+    return found
 
 
 def remove_tree(tool_dir: Path) -> None:
     """Delete an installed tree, which `make_read_only` left without write bits."""
-    for dirpath, dirnames, _ in os.walk(tool_dir, followlinks=False):
-        Path(dirpath).chmod(Path(dirpath).stat().st_mode | 0o700)
-        for name in dirnames:
-            path = Path(dirpath) / name
-            if not path.is_symlink():
-                path.chmod(path.stat().st_mode | 0o700)
-    shutil.rmtree(tool_dir)
+    # A symlinked or non-directory tool_dir is refused before any chmod: os.walk would follow
+    # the top-level link and add write bits outside .toolchain (#69).
+    if not stat.S_ISDIR(tool_dir.lstat().st_mode):
+        raise ToolchainError(f"{tool_dir} is not a real directory (a symlink?); refusing to remove it")
+    try:
+        for dirpath, dirnames, _ in os.walk(tool_dir, followlinks=False):
+            Path(dirpath).chmod(Path(dirpath).stat().st_mode | 0o700)
+            for name in dirnames:
+                path = Path(dirpath) / name
+                if not path.is_symlink():
+                    path.chmod(path.stat().st_mode | 0o700)
+        shutil.rmtree(tool_dir)
+    except OSError as e:
+        raise ToolchainError(f"can't remove {tool_dir} ({e.strerror}); was .toolchain created by another user, "
+                             "e.g. with sudo? Fix its ownership, then run 'make toolchain'") from e
 
 
 def read_marker(tool_dir: Path) -> dict | None:
@@ -248,8 +281,10 @@ def tree_digest(tool_dir: Path) -> str:
     under tool_dir, except the marker. Symlinks are recorded, never followed.
 
     Bytecode caches are included: Python runs a matching `.pyc` instead of its source
-    (PR #7 review, round 5). The Makefile sets PYTHONDONTWRITEBYTECODE so normal use doesn't
-    write into the tree; a stray write fails verification and `make toolchain` reinstalls.
+    (PR #7 review, round 5). Installed trees are read-only (`make_read_only`), so running a tool
+    can't write into them; PYTHONDONTWRITEBYTECODE in the Makefile is a second layer. A stray
+    write still fails verification, and `make toolchain` reinstalls. Write bits aren't part of
+    the digest: `verify_tool` checks them separately.
     """
     h = hashlib.sha256()
     entries = []
@@ -295,6 +330,11 @@ def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> 
         raise ToolchainError(f"{link_path} does not point at the pinned {name} {spec['version']}; run 'make toolchain'")
     if tree_digest(tool_dir) != cached["tree_sha256"]:
         raise ToolchainError(f"{name} was modified after install; check why, then run 'make toolchain'")
+    if writable_paths(tool_dir):
+        # Read-only is what keeps running a tool from changing it (#69); `make toolchain`
+        # re-applies it without reinstalling.
+        raise ToolchainError(f"{name} {spec['version']} is writable (e.g. {writable_paths(tool_dir)[0]}); "
+                             "run 'make toolchain' to make it read-only again")
     if entry.get("kind") == "binary" and sha256_file(expected) != entry.get("sha256"):
         raise ToolchainError(f"{name} binary hash differs from the pinned artifact")
     if entry.get("kind") == "npm-tgz":
