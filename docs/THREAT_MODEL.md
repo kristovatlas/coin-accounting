@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.7.18 (M0 in progress) |
+| Version | 0.7.19 (M0 in progress) |
 | Last updated | 2026-10-01 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -374,3 +374,4 @@ This applies to almost any project that vets its dependencies.
 | 2026-10-01 | 0.7.16 | T-602 (package managers auto-downloading): found at M0.2 setup that the pinned pnpm 12 resolved its `packageManager` pin from the registry on `pnpm --version`, outside `sfw`, and wrote a `pnpm-lock.yaml` (#51). The field is removed (the pin lives in `scripts/toolchain.lock`) and the lockfile check rejects it. Tested with the registry pointed at a dead port: with the field, pnpm hangs on the network; without it, it makes no request |
 | 2026-10-01 | 0.7.17 | T-601: ADR 0024 (proposed) allows prebuilt native-code wheels for four development tools only (`hypothesis`, `coverage`, `ruff`, `mypy`); their compiled parts are less reviewable than Python source. Any other native-code dependency, runtime ones included, still needs its own ADR |
 | 2026-10-01 | 0.7.18 | T-601/T-602: `coverage` 7.16.1 proposed as a development dependency (PR #78; native C tracer, allowed by ADR 0024). Its wheels ship a start-up hook, `a1_coverage.pth`, which imports coverage only when `COVERAGE_PROCESS_START`/`COVERAGE_PROCESS_CONFIG` is set. ADR 0025 adds it to the `.pth` allowlist, pinned by sha256 and by coverage's own `RECORD` claim; tests use the real file. Residual: a process started with those variables measures itself (R-6: never for a real-data run) |
+| 2026-10-01 | 0.7.19 | T-601, T-602: the lockfile check closes the #71/#72 gaps. Each `uv.lock` file must match its entry's name and version. Escaped `configDependencies`/`packageManager` keys, hook-file and per-branch/per-package lockfile settings, the `lockfile`/`lockfileDir` settings, indirect YAML key syntax (explicit keys, tags, anchors, aliases, document markers), a file URL not of PyPI's exact shape (query, fragment, `%`, backslash, dot segment), and a missing or repeated `ignorePnpmfile: true`, and non-ASCII text or a byte-order mark outside comments all fail, as do `.pnpmfile` in any case and any pnpm lockfile in the tree in any letter case. The wrapper and `make check` run the pinned Python only once a host `python3`, never the pinned one, has verified it. The upload-time limit is accepted (PR #63) and recorded in ENGINEERING §2.5. Statuses stay Planned |

@@ -8,17 +8,21 @@ SHELL := /bin/bash
 
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
+# `override`: a command-line SFW=/TOOLBIN= must never replace the pinned tools (PR #7 review).
+override TOOLBIN := $(ROOT)/.toolchain/bin
+
 # The host interpreter that runs our scripts, including the toolchain verifier. It is
 # resolved once, here, before PATH is changed, and can't be overridden from the command
 # line or the environment: a substitute (e.g. SYS_PYTHON=true) would make every
-# verification pass (PR #7 review).
-override SYS_PYTHON := $(shell command -v python3)
+# verification pass (PR #7 review). It is never the pinned python3: a caller's PATH may
+# already start with .toolchain/bin (a make recipe, or `toolchain.py path`), and the pinned
+# interpreter must not verify itself, so that directory and anything that is the pinned
+# binary are skipped (PR #81 review, round 3).
+override SYS_PYTHON := $(shell set -f; IFS=:; for d in $$PATH; do [ -n "$$d" ] && [ -x "$$d/python3" ] || continue; if [ -d "$(TOOLBIN)" ]; then [ "$$d" -ef "$(TOOLBIN)" ] && continue; [ "$$d/python3" -ef "$(TOOLBIN)/python3" ] && continue; fi; echo "$$d/python3"; break; done)
 ifeq ($(SYS_PYTHON),)
-$(error python3 (3.9 or newer) is required on the host to run the repository scripts)
+$(error python3 (3.9 or newer) is required on the host, outside .toolchain/bin, to run the repository scripts)
 endif
 
-# `override`: a command-line SFW=/TOOLBIN= must never replace the pinned tools (PR #7 review).
-override TOOLBIN := $(ROOT)/.toolchain/bin
 override SFW := $(TOOLBIN)/sfw
 override PNPM := $(TOOLBIN)/pnpm
 override UV := $(TOOLBIN)/uv
@@ -30,8 +34,9 @@ export UV_PYTHON_DOWNLOADS := never
 export UV_PYTHON := $(TOOLBIN)/python3
 
 # The lockfile check needs `tomllib` (Python 3.11+): the pinned interpreter once `make toolchain`
-# has run, otherwise the host's (CI runners have 3.12+).
-override LOCK_PYTHON := $(if $(wildcard $(TOOLBIN)/python3),$(TOOLBIN)/python3,$(SYS_PYTHON))
+# has run and it verifies, otherwise the host's (CI runners have 3.12+). Chosen in the recipe, so
+# the pinned tree is verified before it runs anything (#71).
+override LOCK_PYTHON_PICK = py="$(SYS_PYTHON)"; if [ -x "$(TOOLBIN)/python3" ] && "$(SYS_PYTHON)" scripts/toolchain.py verify python >/dev/null 2>&1; then py="$(TOOLBIN)/python3"; fi
 export UV_CACHE_DIR := $(ROOT)/.uv-cache
 # pytest plugins load only when named explicitly (ENGINEERING §3.1).
 export PYTEST_DISABLE_PLUGIN_AUTOLOAD := 1
@@ -144,5 +149,7 @@ check: ## Run all repository checks
 	"$(SYS_PYTHON)" scripts/check_install_commands.py
 	"$(SYS_PYTHON)" scripts/check_architecture.py
 	"$(SYS_PYTHON)" scripts/check_repo_files.py
-	"$(LOCK_PYTHON)" scripts/check_lockfiles.py
+	@$(LOCK_PYTHON_PICK); echo "$$py scripts/check_lockfiles.py"; "$$py" scripts/check_lockfiles.py
 	"$(SYS_PYTHON)" -m unittest discover -s scripts/tests -p 'test_*.py'
+	@# The lockfile tests skip on a host Python < 3.11; run them on the 3.11+ interpreter as well (#71).
+	@$(LOCK_PYTHON_PICK); "$$py" -m unittest -q scripts.tests.test_check_lockfiles
