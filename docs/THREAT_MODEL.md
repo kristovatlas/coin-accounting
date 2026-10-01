@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.7.16 (M0 in progress) |
+| Version | 0.7.17 (M0 in progress) |
 | Last updated | 2026-10-01 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -372,3 +372,4 @@ This applies to almost any project that vets its dependencies.
 | 2026-09-30 | 0.7.14 | T-601, T-602: the lockfile policy check exists (`scripts/check_lockfiles.py`, in CI): `uv.lock` sources, hashes and age; no lifecycle scripts, `.pnpmfile` or `configDependencies`. The pnpm-lockfile part is still to come, so a pnpm lockfile fails the check. Both rows stay Planned until the rest of their mitigations exist |
 | 2026-10-01 | 0.7.15 | T-602: the `.pth` allowlist check exists (`scripts/check_pth.py`, run by `make bootstrap` after every install; allowlist: uv's own `_virtualenv.pth`). At the first install (pytest, PR #65) no wheel shipped a `.pth` file. Status stays Planned until CI runs it (#44) |
 | 2026-10-01 | 0.7.16 | T-602 (package managers auto-downloading): found at M0.2 setup that the pinned pnpm 12 resolved its `packageManager` pin from the registry on `pnpm --version`, outside `sfw`, and wrote a `pnpm-lock.yaml` (#51). The field is removed (the pin lives in `scripts/toolchain.lock`) and the lockfile check rejects it. Tested with the registry pointed at a dead port: with the field, pnpm hangs on the network; without it, it makes no request |
+| 2026-10-01 | 0.7.17 | T-601: ADR 0024 (proposed) allows prebuilt native-code wheels for four development tools only (`hypothesis`, `coverage`, `ruff`, `mypy`); their compiled parts are less reviewable than Python source. Any other native-code dependency, runtime ones included, still needs its own ADR |
