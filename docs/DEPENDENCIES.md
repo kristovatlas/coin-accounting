@@ -12,6 +12,7 @@ Transitive packages are covered by the lockfiles, the lockfile policy check and 
 | `hypothesis` | Python (uv), dev group | 6.168.1 (uploaded 2026-09-23) | Dev | Property tests and fuzzing (ENGINEERING §3; T-205, T-501) | hand-written example tests only; no other maintained property-testing library for Python | MPL-2.0 | No | **Native code** (compiled extension; no pure-Python wheel), allowed by ADR 0024. No install scripts. Transitive: `sortedcontainers` 2.4.0 (Apache-2.0, pure Python, uploaded 2021-05-16) | *pending: Socket report on this PR* | 2026-10-01, M0.2 | the human, by merging this PR (ENGINEERING §2.4) |
 | `coverage` | Python (uv), dev group | 7.16.1 (uploaded 2026-09-13) | Dev | Coverage floors and ratchet, including E2E subprocess coverage (ENGINEERING §3.3) | none: the floors in §3.3 need line and branch coverage | Apache-2.0 | No | **Native code** (the C tracer in the `cp313` wheels; uv installs those ahead of the pure `py3-none-any` wheel), allowed by ADR 0024. No install scripts. No transitive dependencies | *pending: Socket report on this PR* | 2026-10-01, M0.2 | the human, by merging this PR (ENGINEERING §2.4) |
 | `ruff` | Python (uv), dev group | 0.16.8 (uploaded 2026-09-16) | Dev | Lint and format, with per-path `banned-api` rules (ENGINEERING §5) | `flake8` plus plugins and `black`: several packages, slower, and no single per-path import-ban config | MIT | No | **Native code**: the whole tool is a Rust binary inside a `py3-none-<platform>` wheel; there is no pure wheel. Allowed by ADR 0024. No install scripts. No transitive dependencies | *pending: Socket report on this PR* | 2026-10-01, M0.2 | the human, by merging this PR (ENGINEERING §2.4) |
+| `mypy` | Python (uv), dev group | 2.3.1 (uploaded 2026-08-15) | Dev | Strict typing (ENGINEERING §5) | `pyright` (needs Node at run time) | MIT | No | **Native code** (mypyc-compiled `cp313` wheels; uv installs them ahead of the pure wheel), allowed by ADR 0024. No install scripts. Transitive: **`librt` 0.15.0** (MIT, the mypyc runtime library, **native**) and **`ast-serialize` 0.11.2** (MIT, mypy's AST serializer, **native**), both published by the mypy project and covered by ADR 0024; `mypy-extensions` 1.1.0 (MIT), `pathspec` 1.1.1 (MPL-2.0) and `typing-extensions` 4.16.0 (PSF-2.0), all pure Python | *pending: Socket report on this PR* | 2026-10-01, M0.2 | the human, by merging this PR (ENGINEERING §2.4) |
 
 ## Proposed, awaiting approval
 
@@ -34,7 +35,6 @@ Deliberately **not** proposed, because the stdlib or our own code covers it:
 
 | Package | Purpose | Notes |
 |---|---|---|
-| `mypy` | Strict typing | Compiled (mypyc) wheels |
 | `mutmut` | Mutation testing (§3.4) | |
 | `pip-audit` | CVE audit of `uv.lock` (`make audit`) | Heavy dependency tree (`requests`, `cyclonedx`…). The alternative, `osv-scanner` (a Go binary pinned like the toolchain), is to be evaluated in M0.2 |
 
