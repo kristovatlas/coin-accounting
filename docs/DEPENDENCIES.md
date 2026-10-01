@@ -10,6 +10,7 @@ Transitive packages are covered by the lockfiles, the lockfile policy check and 
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | `pytest` | Python (uv), dev group | 9.1.1 (uploaded 2026-06-19) | Dev | Test runner (ENGINEERING §3) | stdlib `unittest` (used by the M0.1 repository checks); pytest's fixtures, parametrisation and plugin ecosystem (`hypothesis`, coverage) are what §3 is written against | MIT | No by default. Its built-in `pastebin` plugin uploads test output to `bpa.st` only when run with `--pastebin`; disabled for this repo with `-p no:pastebin` (`pyproject.toml`), so the dev-time flow list (THREAT_MODEL §6) stays accurate | No (pure-Python wheel; no `.pth` file in any of the six locked wheels, checked against their hashes on 2026-09-30). Transitive, all pure-Python wheels: `iniconfig` 2.3.0 (MIT), `packaging` 26.3 (Apache-2.0 OR BSD-2-Clause), `pluggy` 1.6.0 (MIT), `pygments` 2.21.0 (BSD-2-Clause); `colorama` 0.4.6 (BSD-3-Clause, Windows only, never installed here) | Socket App on PR #65 (2026-09-30): Supply Chain 87, Vulnerability, Quality, Maintenance, License 100; "Pull Request Alerts" passed with no alerts | 2026-09-30, PR #65 (M0.2) | the human, by merging PR #65 (ENGINEERING §2.4) |
 | `hypothesis` | Python (uv), dev group | 6.168.1 (uploaded 2026-09-23) | Dev | Property tests and fuzzing (ENGINEERING §3; T-205, T-501) | hand-written example tests only; no other maintained property-testing library for Python | MPL-2.0 | No | **Native code** (compiled extension; no pure-Python wheel), allowed by ADR 0024. No install scripts. Transitive: `sortedcontainers` 2.4.0 (Apache-2.0, pure Python, uploaded 2021-05-16) | *pending: Socket report on this PR* | 2026-10-01, M0.2 | the human, by merging this PR (ENGINEERING §2.4) |
+| `coverage` | Python (uv), dev group | 7.16.1 (uploaded 2026-09-13) | Dev | Coverage floors and ratchet, including E2E subprocess coverage (ENGINEERING §3.3) | none: the floors in §3.3 need line and branch coverage | Apache-2.0 | No | **Native code** (the C tracer in the `cp313` wheels; uv installs those ahead of the pure `py3-none-any` wheel), allowed by ADR 0024. No install scripts. No transitive dependencies | *pending: Socket report on this PR* | 2026-10-01, M0.2 | the human, by merging this PR (ENGINEERING §2.4) |
 
 ## Proposed, awaiting approval
 
@@ -32,7 +33,6 @@ Deliberately **not** proposed, because the stdlib or our own code covers it:
 
 | Package | Purpose | Notes |
 |---|---|---|
-| `coverage` | Coverage floors, including E2E subprocess coverage (§3.3) | Has an optional C tracer |
 | `ruff` | Lint and format, with per-path `banned-api` rules | Native binary wheel (Rust) |
 | `mypy` | Strict typing | Compiled (mypyc) wheels |
 | `mutmut` | Mutation testing (§3.4) | |
