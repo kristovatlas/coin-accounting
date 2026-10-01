@@ -30,8 +30,9 @@ export UV_PYTHON_DOWNLOADS := never
 export UV_PYTHON := $(TOOLBIN)/python3
 
 # The lockfile check needs `tomllib` (Python 3.11+): the pinned interpreter once `make toolchain`
-# has run, otherwise the host's (CI runners have 3.12+).
-override LOCK_PYTHON := $(if $(wildcard $(TOOLBIN)/python3),$(TOOLBIN)/python3,$(SYS_PYTHON))
+# has run and it verifies, otherwise the host's (CI runners have 3.12+). Chosen in the recipe, so
+# the pinned tree is verified before it runs anything (#71).
+override LOCK_PYTHON_PICK = py="$(SYS_PYTHON)"; if [ -x "$(TOOLBIN)/python3" ] && "$(SYS_PYTHON)" scripts/toolchain.py verify python >/dev/null 2>&1; then py="$(TOOLBIN)/python3"; fi
 export UV_CACHE_DIR := $(ROOT)/.uv-cache
 # pytest plugins load only when named explicitly (ENGINEERING §3.1).
 export PYTEST_DISABLE_PLUGIN_AUTOLOAD := 1
@@ -144,5 +145,7 @@ check: ## Run all repository checks
 	"$(SYS_PYTHON)" scripts/check_install_commands.py
 	"$(SYS_PYTHON)" scripts/check_architecture.py
 	"$(SYS_PYTHON)" scripts/check_repo_files.py
-	"$(LOCK_PYTHON)" scripts/check_lockfiles.py
+	@$(LOCK_PYTHON_PICK); echo "$$py scripts/check_lockfiles.py"; "$$py" scripts/check_lockfiles.py
 	"$(SYS_PYTHON)" -m unittest discover -s scripts/tests -p 'test_*.py'
+	@# The lockfile tests skip on a host Python < 3.11; run them on the 3.11+ interpreter as well (#71).
+	@$(LOCK_PYTHON_PICK); "$$py" -m unittest -q scripts.tests.test_check_lockfiles

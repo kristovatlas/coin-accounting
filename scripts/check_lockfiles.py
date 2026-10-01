@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Lockfile policy check (ENGINEERING §2.5). Runs on the pinned Python (it needs `tomllib`).
+"""Lockfile policy check (ENGINEERING §2.5). Needs Python 3.11+ (`tomllib`): `make check` uses the
+pinned interpreter when it verifies, otherwise the host's (CI runners have 3.12+).
 
 The cooldown only applies when versions are resolved, so a hand-edited or bot-written
 lockfile could still bring in a fresh or off-registry package. This check reads every entry:
 
 - `uv.lock`: each package except our own virtual project comes from the PyPI registry, and
-  every file (wheel or sdist) is an https URL on files.pythonhosted.org, carries a sha256
-  hash, and was uploaded at least 7 days ago.
-- `pnpm-lock.yaml`: not supported yet, so its presence fails the check. pnpm is re-pinned in
-  M0.2 (#62), and the pnpm part of this check lands with the first JavaScript dependency.
-- Our `package.json` files have no lifecycle scripts; there is no `.pnpmfile.*` and no
-  `configDependencies`.
+  every file (wheel or sdist) is an https URL on files.pythonhosted.org whose file name matches
+  the entry's name and version, carries a sha256 hash, and was uploaded at least 7 days ago.
+  Declared Python dependencies without a `uv.lock` fail.
+- pnpm lockfiles: not supported yet, so any `pnpm-lock*.yaml` in the tree fails the check, as do
+  the settings that create per-package or per-branch lockfiles.
+- Our `package.json` files have no lifecycle scripts and no `packageManager` field; there is no
+  `.pnpmfile.*` (any case), no `configDependencies` in any spelling, no `pnpmfile` or
+  `globalPnpmfile` setting, and `ignorePnpmfile: true` is present (#71, #72).
 
 There are no cooldown exceptions yet (§2.6): supporting one means extending this script in
 the same PR that records the exception.
@@ -29,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 if sys.version_info < (3, 11):  # noqa: UP036 - tomllib arrived in 3.11
-    sys.exit("check_lockfiles.py needs Python 3.11 or newer: run it with .toolchain/bin/python3 (make check-lockfiles)")
+    sys.exit("check_lockfiles.py needs Python 3.11 or newer: run `make toolchain`, then `make check`")
 
 import tomllib  # noqa: E402
 
@@ -42,14 +45,67 @@ LIFECYCLE = {"preinstall", "install", "postinstall", "prepublish", "preprepare",
 # pnpm's own hooks (e.g. `pnpm:devPreinstall`, run before a local install) are rejected by prefix,
 # so a hook added in a later pnpm release fails closed too (PR #63 review).
 PNPM_HOOK_PREFIX = "pnpm:"
+# Settings that make pnpm load hook code or write lockfiles this check doesn't see (#72).
+FORBIDDEN_WORKSPACE_KEYS = re.compile(
+    r"(?:^|[{,])\s*[\"']?(pnpmfile|globalPnpmfile|sharedWorkspaceLockfile|gitBranchLockfile)[\"']?\s*:", re.M)
+IGNORE_PNPMFILE = re.compile(r"^ignorePnpmfile:\s*true\s*(?:#.*)?$", re.M)
+SKIP_DIRS = {".git", ".venv", ".toolchain", "node_modules", ".pnpm-store", ".uv-cache"}
+
+
+def normalize(name: str) -> str:
+    """PEP 503 name normalization."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def file_name_and_version(filename: str) -> tuple[str, str] | None:
+    """Name and version from a wheel (PEP 427) or sdist (PEP 625) file name."""
+    if filename.endswith(".whl"):
+        parts = filename[:-4].split("-")
+        return (parts[0], parts[1]) if len(parts) >= 5 else None
+    for ext in (".tar.gz", ".zip"):
+        if filename.endswith(ext):
+            stem = filename[: -len(ext)]
+            return tuple(stem.rsplit("-", 1)) if "-" in stem else None  # type: ignore[return-value]
+    return None
+
+
+def declares_python_dependencies(pyproject: dict) -> bool:
+    project = pyproject.get("project", {})
+    groups = pyproject.get("dependency-groups", {})
+    return bool(project.get("dependencies") or any(project.get("optional-dependencies", {}).values())
+                or any(groups.values()))
+
+
+def walk(repo: Path):
+    """Every file under the repository, skipping tool and dependency directories."""
+    stack = [repo]
+    while stack:
+        here = stack.pop()
+        for entry in sorted(here.iterdir()):
+            if entry.is_dir() and not entry.is_symlink():
+                if entry.name not in SKIP_DIRS:
+                    stack.append(entry)
+            else:
+                yield entry
+
+
+def has_key(value, key: str) -> bool:
+    if isinstance(value, dict):
+        return any(k == key or has_key(v, key) for k, v in value.items())
+    if isinstance(value, list):
+        return any(has_key(v, key) for v in value)
+    return False
 
 
 def check_uv_lock(repo: Path, now: datetime) -> list[str]:
     path = repo / "uv.lock"
+    pyproject = tomllib.loads((repo / "pyproject.toml").read_text())
     if not path.exists():
+        if declares_python_dependencies(pyproject):
+            return ["pyproject.toml declares Python dependencies but there is no uv.lock (ENGINEERING §2.2)"]
         return []
     errors: list[str] = []
-    project = tomllib.loads((repo / "pyproject.toml").read_text())["project"]["name"]
+    project = pyproject["project"]["name"]
     lock = tomllib.loads(path.read_text())
     for pkg in lock.get("package", []):
         name, version = pkg.get("name", "?"), pkg.get("version", "?")
@@ -66,9 +122,15 @@ def check_uv_lock(repo: Path, now: datetime) -> list[str]:
         if not pkg.get("wheels"):
             errors.append(f"{where}: no wheels (sdist builds are not allowed, ENGINEERING §2.2)")
         for f in files:
+            if not isinstance(f, dict):
+                errors.append(f"{where}: malformed file entry")
+                continue
             url = f.get("url", "")
             if not url.startswith(FILES_HOST):
                 errors.append(f"{where}: file URL is not on files.pythonhosted.org: {url!r}")
+            parsed = file_name_and_version(url.rsplit("/", 1)[-1])
+            if parsed is None or normalize(parsed[0]) != normalize(name) or parsed[1] != version:
+                errors.append(f"{where}: file {url.rsplit('/', 1)[-1]!r} doesn't match the entry's name and version (#71)")
             if not SHA256.match(f.get("hash", "")):
                 errors.append(f"{where}: missing or malformed sha256 hash for {url.rsplit('/', 1)[-1]!r}")
             uploaded = f.get("upload-time")
@@ -86,32 +148,52 @@ def check_uv_lock(repo: Path, now: datetime) -> list[str]:
 
 def check_js_side(repo: Path) -> list[str]:
     errors: list[str] = []
-    if (repo / "pnpm-lock.yaml").exists():
-        errors.append("pnpm-lock.yaml: the pnpm lockfile check is not implemented yet (lands with the first "
-                      "JavaScript dependency, after pnpm is re-pinned in #62)")
+    files = list(walk(repo))
+    for lockfile in files:
+        if lockfile.name.startswith("pnpm-lock") and lockfile.name.endswith(".yaml"):
+            errors.append(f"{lockfile.relative_to(repo)}: the pnpm lockfile check is not implemented yet (lands "
+                          "with the first JavaScript dependency); if this file is untracked, delete it")
     for pkg_json in [repo / "package.json", *sorted(repo.glob("*/package.json"))]:
         if not pkg_json.exists():
             continue
+        rel = pkg_json.relative_to(repo)
         text = pkg_json.read_text()
-        scripts = json.loads(text).get("scripts", {}) or {}
+        manifest = json.loads(text)
+        if not isinstance(manifest, dict):
+            errors.append(f"{rel}: not a JSON object")
+            continue
+        scripts = manifest.get("scripts", {}) or {}
+        if not isinstance(scripts, dict):
+            errors.append(f"{rel}: \"scripts\" must be an object")
+            scripts = {}
         bad = sorted(name for name in scripts if name in LIFECYCLE or name.startswith(PNPM_HOOK_PREFIX))
         if bad:
-            errors.append(f"{pkg_json.relative_to(repo)}: lifecycle scripts are not allowed: {', '.join(bad)}")
-        if "configDependencies" in text:
-            errors.append(f"{pkg_json.relative_to(repo)}: configDependencies are not allowed (T-602)")
-        if "packageManager" in text:
+            errors.append(f"{rel}: lifecycle scripts are not allowed: {', '.join(bad)}")
+        # The decoded keys catch escaped spellings; the raw text catches everything else (#72).
+        if "configDependencies" in text or has_key(manifest, "configDependencies"):
+            errors.append(f"{rel}: configDependencies are not allowed (T-602)")
+        if "packageManager" in text or has_key(manifest, "packageManager"):
             # pnpm 12 resolves a `packageManager` (or `devEngines.packageManager`) pin against the
             # registry on every command, outside sfw, and records it in pnpm-lock.yaml (#51).
             # The pin lives in scripts/toolchain.lock; `engines.pnpm` checks the version.
             errors.append(f"{pkg_json.relative_to(repo)}: a packageManager field is not allowed (#51); "
                           "the pin lives in scripts/toolchain.lock")
-    for pnpmfile in sorted(repo.glob(".pnpmfile.*")) + sorted(repo.glob("*/.pnpmfile.*")):
-        errors.append(f"{pnpmfile.relative_to(repo)}: a .pnpmfile is not allowed (T-602)")
+    for pnpmfile in files:  # case-insensitive: macOS's default file system is (#72)
+        if pnpmfile.name.lower().startswith(".pnpmfile."):
+            errors.append(f"{pnpmfile.relative_to(repo)}: a .pnpmfile is not allowed (T-602)")
     workspace = repo / "pnpm-workspace.yaml"
-    # Any occurrence fails, comments included: a key can be quoted or written in flow style, and
-    # without a YAML parser failing closed is the safe reading (PR #63 review).
-    if workspace.exists() and "configDependencies" in workspace.read_text():
-        errors.append("pnpm-workspace.yaml: configDependencies are not allowed (T-602); remove every mention")
+    if workspace.exists():
+        text = workspace.read_text()
+        # Without a YAML parser, fail closed: any mention, and any backslash (a double-quoted
+        # key can spell a name with escapes), counts (PR #63 review, #72).
+        if "configDependencies" in text:
+            errors.append("pnpm-workspace.yaml: configDependencies are not allowed (T-602); remove every mention")
+        if "\\" in text:
+            errors.append("pnpm-workspace.yaml: backslashes are not allowed (an escaped key could hide a setting)")
+        for match in FORBIDDEN_WORKSPACE_KEYS.finditer(text):
+            errors.append(f"pnpm-workspace.yaml: the {match.group(1)} setting is not allowed (#72)")
+        if not IGNORE_PNPMFILE.search(text):
+            errors.append("pnpm-workspace.yaml: `ignorePnpmfile: true` must be set (T-602)")
     return errors
 
 
@@ -125,9 +207,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--now", help="ISO-8601 time to measure ages against (tests)")
     args = parser.parse_args(argv)
     now = datetime.fromisoformat(args.now) if args.now else datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     try:
         errors = check(Path(args.repo), now)
-    except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError) as e:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, tomllib.TOMLDecodeError) as e:
         print(f"check_lockfiles: could not read the lockfiles: {e}", file=sys.stderr)
         return 1
     for e in errors:

@@ -126,6 +126,70 @@ class CheckLockfilesTests(unittest.TestCase):
                 (self.repo / "package.json").write_text(text)
                 self.assertIn("a packageManager field is not allowed", self.errors())
 
+    def test_escaped_json_keys_are_decoded(self):
+        # #72: "configDependencies" is the same JSON key.
+        for key in (r"configDependencies", r"packageManager"):
+            with self.subTest(key=key):
+                (self.repo / "package.json").write_text('{"pnpm": {"%s": {}}}' % key)
+                self.assertRegex(self.errors(), "configDependencies are not allowed|packageManager field is not allowed")
+
+    def test_workspace_backslashes_and_hook_settings_fail(self):
+        cases = {'"config\\x44ependencies": {}\nignorePnpmfile: true\n': "backslashes are not allowed",
+                 "pnpmfile: tools/hooks.cjs\nignorePnpmfile: true\n": "the pnpmfile setting",
+                 "ignorePnpmfile: true\n'globalPnpmfile': x\n": "the globalPnpmfile setting",
+                 "ignorePnpmfile: true\nsharedWorkspaceLockfile: false\n": "the sharedWorkspaceLockfile setting",
+                 "{gitBranchLockfile: true}\nignorePnpmfile: true\n": "the gitBranchLockfile setting",
+                 "packages:\n  - frontend\n": "`ignorePnpmfile: true` must be set",
+                 "ignorePnpmfile: false\n": "`ignorePnpmfile: true` must be set"}
+        for text, needle in cases.items():
+            with self.subTest(workspace=text):
+                (self.repo / "pnpm-workspace.yaml").write_text(text)
+                self.assertIn(needle, self.errors())
+        (self.repo / "pnpm-workspace.yaml").write_text("# Never load a .pnpmfile (T-602).\nignorePnpmfile: true\n")
+        self.assertEqual(check_lockfiles.check(self.repo, NOW), [])
+
+    def test_pnpmfiles_and_pnpm_lockfiles_anywhere_fail(self):
+        (self.repo / "frontend" / "deep").mkdir(parents=True)
+        (self.repo / "frontend" / "deep" / ".PnpmFile.cjs").write_text("")
+        (self.repo / "frontend" / "pnpm-lock.yaml").write_text("")
+        (self.repo / "pnpm-lock.main.yaml").write_text("")
+        (self.repo / "node_modules" / "x").mkdir(parents=True)
+        (self.repo / "node_modules" / "x" / "pnpm-lock.yaml").write_text("")  # skipped: not ours
+        found = self.errors()
+        for needle in (".PnpmFile.cjs: a .pnpmfile is not allowed", "frontend/pnpm-lock.yaml:", "pnpm-lock.main.yaml:"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, found)
+        self.assertNotIn("node_modules", found)
+
+    def test_a_file_that_does_not_match_its_entry_fails(self):
+        # #71: an entry named "pytest" must not point at another project's wheel.
+        other = wheel("evil", url="https://files.pythonhosted.org/packages/xx/evil-1.0-py3-none-any.whl")
+        self.lock(self.pkg("pytest", wheels=f"[{other}]"))
+        self.assertIn("doesn't match the entry's name and version", self.errors())
+        newer = wheel("pytest", url="https://files.pythonhosted.org/packages/xx/pytest-9.9-py3-none-any.whl")
+        self.lock(self.pkg("pytest", wheels=f"[{newer}]"))
+        self.assertIn("doesn't match the entry's name and version", self.errors())
+
+    def test_declared_dependencies_without_a_lockfile_fail(self):
+        (self.repo / "pyproject.toml").write_text(
+            '[project]\nname = "coinacct"\nversion = "0.0.0"\n[dependency-groups]\ndev = ["pytest==9.1.1"]\n')
+        self.assertIn("there is no uv.lock", self.errors())
+
+    def test_malformed_input_fails_with_a_message_not_a_traceback(self):
+        with redirect_stdout(io.StringIO()):
+            (self.repo / "package.json").write_text('{"scripts": "postinstall"}')
+            self.assertIn('"scripts" must be an object', self.errors())
+            (self.repo / "package.json").write_text("[]")
+            self.assertIn("not a JSON object", self.errors())
+            (self.repo / "package.json").unlink()
+            self.lock(self.pkg("odd", wheels='["not-a-table"]'))
+            self.assertIn("malformed file entry", self.errors())
+
+    def test_a_naive_now_is_read_as_utc(self):
+        with redirect_stdout(io.StringIO()):
+            self.lock(self.pkg("pytest"))
+            self.assertEqual(check_lockfiles.main([str(self.repo), "--now", "2026-10-01T00:00:00"]), 0)
+
     def test_cli_exit_codes(self):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(check_lockfiles.main([str(self.repo), "--now", NOW.isoformat()]), 0)

@@ -1,3 +1,8 @@
 #!/bin/sh
-# Wrapper under the name used in the docs; the logic lives in check_lockfiles.py (needs Python 3.11+).
-exec python3 "$(dirname "$0")/check_lockfiles.py" "$@"
+# Wrapper under the name used in the docs; the logic lives in check_lockfiles.py, which needs
+# Python 3.11+. `make check` picks the interpreter (the pinned one once verified); this wrapper
+# prefers the pinned one when present and otherwise uses python3 from PATH.
+here="$(dirname "$0")"
+py="$here/../.toolchain/bin/python3"
+[ -x "$py" ] || py=python3
+exec "$py" "$here/check_lockfiles.py" "$@"
