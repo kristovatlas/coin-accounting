@@ -129,7 +129,7 @@ require-approved-config:
 
 .PHONY: bootstrap
 bootstrap: require-approved-deps require-toolchain ## Install exactly what the lockfiles on origin/main say, through sfw
-	@if [ -f uv.lock ]; then "$(SFW)" "$(UV)" sync --locked; else echo "no uv.lock yet (no Python dependencies approved)"; fi
+	@if [ -f uv.lock ]; then "$(SFW)" "$(UV)" sync --locked && "$(SYS_PYTHON)" scripts/check_pth.py .venv; else echo "no uv.lock yet (no Python dependencies approved)"; fi
 	@if [ -f pnpm-lock.yaml ]; then "$(SFW)" "$(PNPM)" install --frozen-lockfile; else echo "no pnpm-lock.yaml yet (no JS dependencies approved)"; fi
 
 .PHONY: audit

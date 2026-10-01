@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.15 |
-| Last updated | 2026-09-30 |
+| Version | 0.2.16 |
+| Last updated | 2026-10-01 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -54,7 +54,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
 | Auto-sync | `UV_NO_SYNC=1` is exported by the `Makefile` and required in `AGENTS.md`, so `uv run` never locks or syncs by itself |
 | Sources | PyPI only. No extra indexes, no `[tool.uv.sources]` git, URL or path entries, no PEP 508 direct URLs (CI check, §2.5) |
 | Lockfile | `uv.lock` (with hashes) committed; installs use `--locked` |
-| `.pth` files | Wheels can ship `.pth` files that run on every interpreter start. CI lists `.pth` files in the environment and fails on any not on an allowlist |
+| `.pth` files | Wheels can ship `.pth` files that run on every interpreter start. `make bootstrap` runs `scripts/check_pth.py` right after installing and fails on any `.pth` file not on its allowlist (only uv's own `_virtualenv.pth`). CI runs it too once CI installs dependencies (#44) |
 
 ### 2.3 All installs go through Socket Firewall, via the repo's scripts
 
@@ -387,3 +387,4 @@ A change is done only when:
 | 2026-09-30 | 0.2.13 | M0.2: installed toolchain trees are read-only, so running a tool (the pinned Python writes `.pyc` files) can't change what `make require-toolchain` verifies |
 | 2026-09-30 | 0.2.14 | M0.2: pnpm is pinned as its native binary (`@pnpm/exe.<platform>`); the launcher package would fetch or download it itself |
 | 2026-09-30 | 0.2.15 | M0.2: the lockfile policy check (`scripts/check-lockfiles`) runs in `make check` and CI; the pnpm part lands with the first JavaScript dependency, and a pnpm lockfile fails until then |
+| 2026-10-01 | 0.2.16 | M0.2: the `.pth` allowlist check exists (`scripts/check_pth.py`, run by `make bootstrap`); pytest's pastebin opt-out is pinned by a test |
