@@ -35,13 +35,43 @@ class CheckPthTests(unittest.TestCase):
             return check_pth.main([str(self.venv)])
 
     def test_uvs_own_file_passes(self):
-        (self.site / "_virtualenv.pth").write_text("import _virtualenv\n")
+        (self.site / "_virtualenv.pth").write_bytes(check_pth.UV_HOOK["_virtualenv.pth"])
         self.assertEqual(self.run_main(), 0)
 
     def test_any_other_pth_fails(self):
         (self.site / "evil.pth").write_text("import os\n")
         self.assertEqual(self.run_main(), 1)
         self.assertEqual([p.name for p in check_pth.unexpected(self.venv)], ["evil.pth"])
+
+    def test_uvs_own_file_with_other_content_fails(self):
+        # PR #74 review: the allowed name alone proves nothing.
+        (self.site / "_virtualenv.pth").write_text("import os; os.system('x')\n")
+        self.assertEqual(self.run_main(), 1)
+
+    def test_a_symlinked_hook_fails(self):
+        (self.site / "real.txt").write_bytes(check_pth.UV_HOOK["_virtualenv.pth"])
+        (self.site / "_virtualenv.pth").symlink_to(self.site / "real.txt")
+        self.assertEqual(self.run_main(), 1)
+
+    def test_a_replaced_virtualenv_module_fails(self):
+        (self.site / "_virtualenv.pth").write_bytes(check_pth.UV_HOOK["_virtualenv.pth"])
+        (self.site / "_virtualenv.py").write_text("import os\n")
+        self.assertEqual(self.run_main(), 1)
+
+    def test_a_package_that_ships_a_hook_in_its_record_fails(self):
+        (self.site / "_virtualenv.pth").write_bytes(check_pth.UV_HOOK["_virtualenv.pth"])
+        dist = self.site / "evil-1.0.dist-info"
+        dist.mkdir()
+        (dist / "RECORD").write_text("evil/__init__.py,sha256=x,1\n_virtualenv.pth,sha256=y,18\n")
+        self.assertEqual(self.run_main(), 1)
+        self.assertIn("evil-1.0.dist-info: _virtualenv.pth", " ".join(check_pth.problems(self.venv)))
+
+    def test_a_package_with_only_its_own_files_passes(self):
+        (self.site / "_virtualenv.pth").write_bytes(check_pth.UV_HOOK["_virtualenv.pth"])
+        dist = self.site / "fine-1.0.dist-info"
+        dist.mkdir()
+        (dist / "RECORD").write_text("fine/__init__.py,sha256=x,1\nfine-1.0.dist-info/RECORD,,\n")
+        self.assertEqual(self.run_main(), 0)
 
     def test_a_missing_environment_fails_rather_than_passing(self):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):

@@ -54,7 +54,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
 | Auto-sync | `UV_NO_SYNC=1` is exported by the `Makefile` and required in `AGENTS.md`, so `uv run` never locks or syncs by itself |
 | Sources | PyPI only. No extra indexes, no `[tool.uv.sources]` git, URL or path entries, no PEP 508 direct URLs (CI check, §2.5) |
 | Lockfile | `uv.lock` (with hashes) committed; installs use `--locked` |
-| `.pth` files | Wheels can ship `.pth` files that run on every interpreter start. `make bootstrap` runs `scripts/check_pth.py` right after installing and fails on any `.pth` file not on its allowlist (only uv's own `_virtualenv.pth`). CI runs it too once CI installs dependencies (#44) |
+| `.pth` files | Wheels can ship `.pth` files that run on every interpreter start. `make bootstrap` runs `scripts/check_pth.py` right after installing and fails on any `.pth` file not on its allowlist. The only allowed one is uv's own `_virtualenv.pth`, and only with uv's exact content, alongside a `_virtualenv.py` with uv's hash, both regular files and listed in no installed package's `RECORD` (PR #74 review). CI runs it too once CI installs dependencies (#44) |
 
 ### 2.3 All installs go through Socket Firewall, via the repo's scripts
 
