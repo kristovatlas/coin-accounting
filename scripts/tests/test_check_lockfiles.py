@@ -171,13 +171,17 @@ class CheckLockfilesTests(unittest.TestCase):
                  "k: &a pnpmfile\n*a : tools/hooks.cjs\nignorePnpmfile: true\n": "explicit keys, tags, anchors",
                  "ignorePnpmfile: true\n---\npnpmfile: x\n": "explicit keys, tags, anchors",
                  "ignorePnpmfile: true\nignorePnpmfile: false\n": "exactly once",
+                 # PR #81 round 3: a byte-order mark hides the first key from the text checks.
+                 "\ufefflockfileDir: ../elsewhere\nignorePnpmfile: true\n": "non-ASCII characters",
+                 "ignorePnpmfile: true\nlock\u200bfile: false\n": "non-ASCII characters",
+                 "\ufeff# a comment\nlockfileDir: x\nignorePnpmfile: true\n": "non-ASCII characters",
                  "packages:\n  - frontend\n": "`ignorePnpmfile: true` must be set",
                  "ignorePnpmfile: false\n": "`ignorePnpmfile: true` must be set"}
         for text, needle in cases.items():
             with self.subTest(workspace=text):
                 (self.repo / "pnpm-workspace.yaml").write_text(text)
                 self.assertIn(needle, self.errors())
-        (self.repo / "pnpm-workspace.yaml").write_text("# Never load a .pnpmfile (T-602).\nignorePnpmfile: true\n")
+        (self.repo / "pnpm-workspace.yaml").write_text("# Never load a .pnpmfile (T-602, §2.1).\nignorePnpmfile: true\n")
         self.assertEqual(check_lockfiles.check(self.repo, NOW), [])
 
     def test_pnpmfiles_and_pnpm_lockfiles_anywhere_fail(self):
@@ -275,6 +279,32 @@ class WrapperTests(unittest.TestCase):
         self.assertNotIn("PINNED", out)
         self.assertIn("did not verify", out)
         self.assertIn("PINNED", self.run_wrapper(0, pinned_first=True))
+
+
+class MakefileInterpreterTests(unittest.TestCase):
+    """PR #81 round 3: the Makefile's host python3 (SYS_PYTHON), which runs the toolchain verifier,
+    is never the pinned python3, even with .toolchain/bin first on the caller's PATH."""
+
+    def test_sys_python_skips_the_pinned_interpreter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Makefile").write_text((HERE.parent / "Makefile").read_text())
+            (root / "show.mk").write_text("show-sys-python:\n\t@echo $(SYS_PYTHON)\n")
+            pinned_dir = root / ".toolchain" / "bin"
+            pinned_dir.mkdir(parents=True)
+            pinned = pinned_dir / "python3"
+            pinned.write_text("#!/bin/sh\necho PINNED\n")
+            pinned.chmod(0o755)
+            host_dir = os.path.dirname(sys.executable)
+            for path in (f"{pinned_dir}{os.pathsep}{host_dir}{os.pathsep}/usr/bin:/bin",
+                         f"{host_dir}{os.pathsep}/usr/bin:/bin"):
+                with self.subTest(PATH=path):
+                    out = subprocess.run(["make", "-s", "-f", "Makefile", "-f", "show.mk", "show-sys-python"],
+                                         cwd=root, capture_output=True, text=True, check=True,
+                                         env={**os.environ, "PATH": path}).stdout.strip()
+                    self.assertTrue(out.endswith("/python3"), out)
+                    self.assertFalse(out.startswith(str(pinned_dir)), out)
+                    self.assertFalse(os.path.samefile(out, pinned), out)
 
 if __name__ == "__main__":
     unittest.main()

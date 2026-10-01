@@ -199,7 +199,18 @@ def check_js_side(repo: Path) -> list[str]:
             errors.append(f"{pnpmfile.relative_to(repo)}: a .pnpmfile is not allowed (T-602)")
     workspace = repo / "pnpm-workspace.yaml"
     if workspace.exists():
-        text = workspace.read_text()
+        try:
+            text = workspace.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return errors + ["pnpm-workspace.yaml: not valid UTF-8"]
+        # The text checks below see only ASCII. A leading byte-order mark (which YAML loaders
+        # drop) or any other non-ASCII character could hide a key from them, and is invisible
+        # in a diff, so only full-line comments may contain non-ASCII text, and a byte-order
+        # mark is rejected anywhere (PR #81 review, round 3).
+        if "\ufeff" in text or not all(line.isascii() or line.lstrip().startswith("#")
+                                        for line in text.splitlines()):
+            errors.append("pnpm-workspace.yaml: non-ASCII characters (including a byte-order mark) are only "
+                          "allowed in full-line comments")
         # Without a YAML parser, fail closed: any mention, and any backslash (a double-quoted
         # key can spell a name with escapes), counts (PR #63 review, #72).
         if "configDependencies" in text:
