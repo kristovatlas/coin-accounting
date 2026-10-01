@@ -7,7 +7,9 @@ requires-python = "==3.13.*"
 dependencies = []
 
 [dependency-groups]
-dev = []
+dev = [
+    "pytest==9.1.1",
+]
 
 [tool.uv]
 # ENGINEERING §2.2. The "(verify at setup)" items are confirmed in M0.2 with the pinned uv.
@@ -36,6 +38,12 @@ ignore = ["PLR2004"]
 [tool.ruff.lint.per-file-ignores]
 "scripts/tests/**" = ["S101", "S603", "PLC0415"]
 "backend/tests/**" = ["S101"]
+
+[tool.pytest.ini_options]
+# pytest's built-in pastebin plugin uploads test output to bpa.st when run with --pastebin.
+# It is built in, so PYTEST_DISABLE_PLUGIN_AUTOLOAD doesn't stop it; disable it explicitly
+# so no unlisted dev-time network flow exists (THREAT_MODEL §6, PR #65 review).
+addopts = "-p no:pastebin"
 
 [tool.mypy]
 python_version = "3.13"
