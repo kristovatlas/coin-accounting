@@ -147,6 +147,9 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
     if cached and marker_current(cached, entry) and not force:
         binary = tool_dir / cached["bin"]
         if binary.is_file() and tree_digest(tool_dir) == cached["tree_sha256"]:
+            # Installs made before trees were read-only (or whose modes changed since) are
+            # hardened here; the digest doesn't record write bits (PR #64 review).
+            make_read_only(tool_dir)
             return binary
         # Missing, modified or moved since install: reinstall from the pinned artifact.
 

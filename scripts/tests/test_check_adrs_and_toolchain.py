@@ -222,6 +222,32 @@ class ToolchainTests(unittest.TestCase):
             again = toolchain.install_tool("python", spec, "linux-x86_64", force=True)
             self.assertEqual(again, binary)
 
+    def test_a_valid_writable_install_is_made_read_only_without_reinstalling(self):
+        # PR #64 review: an install made before trees were read-only took the cached path and
+        # stayed writable, so the pinned Python could still write .pyc files into it.
+        blob = self.wrapped_tar("python/bin/python3", b"#!/bin/sh\n")
+        spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x",
+                                                  "sha256": hashlib.sha256(blob).hexdigest(), "kind": "tar",
+                                                  "bin": "python/bin/python3"}}
+        downloads = []
+
+        def fake_download(url, dest):
+            downloads.append(url)
+            dest.write_bytes(blob)
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "download", fake_download):
+            toolchain.install_tool("python", spec, "linux-x86_64")
+            tool_dir = Path(d) / "python" / "1"
+            for path in [tool_dir, *tool_dir.rglob("*")]:  # as an install from before this change
+                path.chmod(path.stat().st_mode | 0o200)
+            toolchain.install_tool("python", spec, "linux-x86_64")
+            self.assertEqual(len(downloads), 1)  # the cached install was kept, not replaced
+            for path in [tool_dir, *tool_dir.rglob("*")]:
+                with self.subTest(path=path.relative_to(d).as_posix()):
+                    self.assertEqual(path.stat().st_mode & 0o222, 0)
+
     def test_tar_with_path_traversal_is_refused(self):
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
