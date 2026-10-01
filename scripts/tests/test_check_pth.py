@@ -54,17 +54,37 @@ class CheckPthTests(unittest.TestCase):
     def test_any_other_pth_fails(self):
         (self.site / "evil.pth").write_text("import os\n")
         self.assertEqual(self.run_main(), 1)
-        self.assertEqual([p.name for p in check_pth.unexpected(self.venv)], ["evil.pth"])
+        self.assertIn("unexpected .pth file", " ".join(p for p in check_pth.problems(self.venv) if "evil.pth" in p))
 
     def test_uvs_own_file_with_other_content_fails(self):
-        # PR #74 review: the allowed name alone proves nothing.
+        # PR #74 review: the allowed name alone proves nothing. Round 3: start from a complete
+        # hook, so only the content check can catch this.
+        self.uv_hook()
         (self.site / "_virtualenv.pth").write_text("import os; os.system('x')\n")
-        self.assertEqual(self.run_main(), 1)
+        self.assertIn("_virtualenv.pth is not uv's own file", " ".join(check_pth.problems(self.venv)))
 
-    def test_a_symlinked_hook_fails(self):
-        (self.site / "real.txt").write_bytes(check_pth.UV_HOOK["_virtualenv.pth"])
-        (self.site / "_virtualenv.pth").symlink_to(self.site / "real.txt")
-        self.assertEqual(self.run_main(), 1)
+    def test_a_symlinked_hook_or_module_fails(self):
+        for name in ("_virtualenv.pth", "_virtualenv.py"):
+            with self.subTest(file=name):
+                self.uv_hook()
+                real = self.site / f"real-{name}"
+                real.write_bytes((self.site / name).read_bytes())
+                (self.site / name).unlink()
+                (self.site / name).symlink_to(real)
+                self.assertIn(f"{name} is not uv's own file", " ".join(check_pth.problems(self.venv)))
+                (self.site / name).unlink()
+                real.unlink()
+
+    def test_case_variant_names_fail(self):
+        # Round 3: with PYTHONCASEOK on a case-insensitive file system, `_VIRTUALENV/` is found too.
+        self.uv_hook()
+        (self.site / "_VIRTUALENV").mkdir()
+        (self.site / "_VIRTUALENV" / "__init__.py").write_text("import os\n")
+        self.assertIn("could shadow", " ".join(check_pth.problems(self.venv)))
+        dist = self.site / "evil-1.0.dist-info"
+        dist.mkdir()
+        (dist / "RECORD").write_text("_VirtualEnv.abi3.so,sha256=y,1\n", encoding="utf-8")
+        self.assertIn("ships a start-up hook", " ".join(check_pth.problems(self.venv)))
 
     def test_a_replaced_virtualenv_module_fails(self):
         (self.site / "_virtualenv.pth").write_bytes(check_pth.UV_HOOK["_virtualenv.pth"])
@@ -111,30 +131,22 @@ class CheckPthTests(unittest.TestCase):
                 else:
                     target.unlink()
 
-    def pyc(self, flags: int, mtime: int, size: int) -> None:
+    def test_any_cached_bytecode_for_the_hook_fails(self):
+        # Round 3: a .pyc whose header copies the source's mtime and size runs whatever code it
+        # holds, and Python accepts it. `make bootstrap` deletes these caches before the check.
+        self.uv_hook()
+        st = (self.site / "_virtualenv.py").stat()
         cache = self.site / "__pycache__"
-        cache.mkdir(exist_ok=True)
-        header = (b"\x00" * 4 + flags.to_bytes(4, "little") + (mtime & 0xFFFFFFFF).to_bytes(4, "little")
-                  + (size & 0xFFFFFFFF).to_bytes(4, "little"))
-        (cache / "_virtualenv.cpython-313.pyc").write_bytes(header + b"code")
-
-    def test_bytecode_checked_against_uvs_module_passes(self):
-        # What the venv's own Python writes on first start (seen in the real .venv).
-        self.uv_hook()
-        st = (self.site / "_virtualenv.py").stat()
-        self.pyc(0, int(st.st_mtime), st.st_size)
+        cache.mkdir()
+        header = (b"\x00" * 8 + (int(st.st_mtime) & 0xFFFFFFFF).to_bytes(4, "little")
+                  + st.st_size.to_bytes(4, "little"))
+        for name in ("_virtualenv.cpython-313.pyc", "_VIRTUALENV.cpython-313.pyc"):
+            with self.subTest(pyc=name):
+                (cache / name).write_bytes(header + b"forged code")
+                self.assertIn("cached bytecode for uv's hook isn't allowed", " ".join(check_pth.problems(self.venv)))
+                (cache / name).unlink()
+        (cache / "py.cpython-313.pyc").write_bytes(header)  # other modules' caches are fine
         self.assertEqual(check_pth.problems(self.venv), [])
-
-    def test_unchecked_or_stale_bytecode_fails(self):
-        self.uv_hook()
-        st = (self.site / "_virtualenv.py").stat()
-        for flags, mtime, size in ((0b01, int(st.st_mtime), st.st_size),  # unchecked hash-based (PEP 552)
-                                   (0b11, int(st.st_mtime), st.st_size),  # checked hash-based
-                                   (0, int(st.st_mtime) + 1, st.st_size),  # stale
-                                   (0, int(st.st_mtime), st.st_size + 1)):
-            with self.subTest(flags=flags, mtime=mtime, size=size):
-                self.pyc(flags, mtime, size)
-                self.assertIn("isn't bytecode checked against", " ".join(check_pth.problems(self.venv)))
 
     def test_record_entries_for_a_shadowing_package_or_bytecode_fail(self):
         self.uv_hook()

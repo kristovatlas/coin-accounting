@@ -7,7 +7,7 @@ bootstrap` runs this check right after installing; the allowlist holds only file
 pinned tools create themselves.
 
 Usage:
-    check_pth.py [VENV]    # default: .venv next to the repository root; exit 0 = ok, 1 = unexpected .pth
+    check_pth.py [VENV]    # default: .venv next to the repository root; exit 0 = ok, 1 = a start-up hook problem or no site-packages
 """
 
 from __future__ import annotations
@@ -40,7 +40,10 @@ HOOK_NAME = "_virtualenv"
 
 
 def is_hook_name(name: str) -> bool:
-    """`_virtualenv` itself or `_virtualenv.<anything>`: every name `import _virtualenv` could load."""
+    """`_virtualenv` itself or `_virtualenv.<anything>`: every name `import _virtualenv` could load.
+    Case-folded: on a case-insensitive file system with PYTHONCASEOK set, `_VIRTUALENV/` would be
+    found too (PR #74 review, round 3)."""
+    name = name.casefold()
     return name == HOOK_NAME or name.startswith(HOOK_NAME + ".")
 
 
@@ -53,31 +56,17 @@ def recorded_hooks(site: Path) -> list[str]:
             for row in csv.reader(f):
                 path = (row[0] if row else "").removeprefix("./")
                 parts = path.split("/")
-                if (len(parts) == 1 and path.endswith(".pth")) or is_hook_name(parts[0]) \
-                        or (parts[0] == "__pycache__" and len(parts) > 1 and parts[1].startswith(HOOK_NAME)):
+                if (len(parts) == 1 and path.casefold().endswith(".pth")) or is_hook_name(parts[0]) \
+                        or (parts[0] == "__pycache__" and len(parts) > 1 and parts[1].casefold().startswith(HOOK_NAME)):
                     found.append(f"{record.parent.name}: {path}")
     return found
-
-
-def pyc_matches_source(pyc: Path, source: Path) -> bool:
-    """A timestamp-based .pyc whose recorded source mtime and size are the source file's.
-
-    Python then checks it against the source on every import. An unchecked hash-based .pyc
-    (PEP 552) would be loaded without looking at the source at all.
-    """
-    header = pyc.read_bytes()[:16]
-    if len(header) < 16 or int.from_bytes(header[4:8], "little") != 0:
-        return False
-    st = source.stat()
-    return (int.from_bytes(header[8:12], "little") == int(st.st_mtime) & 0xFFFFFFFF
-            and int.from_bytes(header[12:16], "little") == st.st_size & 0xFFFFFFFF)
 
 
 def problems(venv: Path) -> list[str]:
     found = []
     for site in site_dirs(venv):
         for pth in sorted(site.glob("*.pth")):
-            if pth.name not in UV_HOOK:
+            if pth.name not in UV_HOOK:  # case-variant names like `_VIRTUALENV.pth` are unexpected too
                 found.append(f"unexpected .pth file (runs code on every interpreter start): {pth}")
         # Everything `import _virtualenv` could load must be uv's own two regular files; a
         # package, extension module or any other variant could shadow them (PR #74 review).
@@ -95,21 +84,19 @@ def problems(venv: Path) -> list[str]:
             if not stat.S_ISREG(module.lstat().st_mode) \
                     or hashlib.sha256(module.read_bytes()).hexdigest() != UV_HOOK_SHA256["_virtualenv.py"]:
                 found.append(f"{module} is not uv's own file (hash, or not a regular file)")
+        # No cached bytecode for the hook at all: a .pyc whose header copies the source's mtime
+        # and size runs whatever code it holds, and the host Python running this check can't
+        # recompile it for the venv's version to compare (PR #74 review, round 3). `make
+        # bootstrap` deletes these caches before the check; the venv's Python rebuilds them from
+        # uv's verified source.
         cache = site / "__pycache__"
         if cache.is_dir():
             for pyc in sorted(cache.iterdir()):
-                if pyc.name.startswith(HOOK_NAME) and not (
-                        stat.S_ISREG(pyc.lstat().st_mode) and pyc.name.endswith(".pyc")
-                        and module.is_file() and pyc_matches_source(pyc, module)):
-                    found.append(f"{pyc} isn't bytecode checked against uv's {module.name}")
+                if pyc.name.casefold().startswith(HOOK_NAME):
+                    found.append(f"{pyc}: cached bytecode for uv's hook isn't allowed (make bootstrap removes it)")
         for claim in recorded_hooks(site):
             found.append(f"an installed package ships a start-up hook: {claim}")
     return found
-
-
-def unexpected(venv: Path) -> list[Path]:
-    """The unexpected `.pth` files (kept for callers and tests that list them)."""
-    return sorted(pth for site in site_dirs(venv) for pth in site.glob("*.pth") if pth.name not in UV_HOOK)
 
 
 def main(argv: list[str] | None = None) -> int:
