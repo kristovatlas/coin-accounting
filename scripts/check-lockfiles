@@ -1,8 +1,12 @@
 #!/bin/sh
 # Wrapper under the name used in the docs; the logic lives in check_lockfiles.py, which needs
-# Python 3.11+. `make check` picks the interpreter (the pinned one once verified); this wrapper
-# prefers the pinned one when present and otherwise uses python3 from PATH.
+# Python 3.11+. Like `make check`, it uses the pinned interpreter only after the host python3 has
+# verified the pinned tree (toolchain.py verify python), and otherwise python3 from PATH: an
+# unverified pinned interpreter would decide whether a lockfile passes (#71, PR #81 review).
 here="$(dirname "$0")"
 py="$here/../.toolchain/bin/python3"
-[ -x "$py" ] || py=python3
+if [ -x "$py" ] && python3 "$here/toolchain.py" verify python >/dev/null 2>&1; then :; else
+    [ -x "$py" ] && echo "check-lockfiles: the pinned python3 did not verify; using python3 from PATH" >&2
+    py=python3
+fi
 exec "$py" "$here/check_lockfiles.py" "$@"

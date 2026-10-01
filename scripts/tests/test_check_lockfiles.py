@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -64,7 +66,17 @@ class CheckLockfilesTests(unittest.TestCase):
 
     def test_a_file_off_the_registry_host_fails(self):
         self.lock(self.pkg("evil", wheels=f"[{wheel('evil', url='https://example.invalid/evil.whl')}]"))
-        self.assertIn("not on files.pythonhosted.org", self.errors())
+        self.assertIn("not a plain https URL on files.pythonhosted.org", self.errors())
+
+    def test_a_query_or_fragment_cannot_supply_the_file_name(self):
+        # PR #81 review: the fetched file is evil-1.0; the name check must not read the suffix.
+        base = "https://files.pythonhosted.org/packages/xx/evil-1.0-py3-none-any.whl"
+        for url in (base + "#/pytest-1.0-py3-none-any.whl", base + "?/pytest-1.0-py3-none-any.whl",
+                    "http://files.pythonhosted.org/packages/xx/pytest-1.0-py3-none-any.whl",
+                    "https://files.pythonhosted.org.example.invalid/packages/xx/pytest-1.0-py3-none-any.whl"):
+            with self.subTest(url=url):
+                self.lock(self.pkg("pytest", wheels=f"[{wheel('pytest', url=url)}]"))
+                self.assertIn("not a plain https URL on files.pythonhosted.org", self.errors())
 
     def test_a_missing_hash_fails(self):
         self.lock(self.pkg("evil", wheels=f"[{wheel('evil', hash_='')}]"))
@@ -127,11 +139,17 @@ class CheckLockfilesTests(unittest.TestCase):
                 self.assertIn("a packageManager field is not allowed", self.errors())
 
     def test_escaped_json_keys_are_decoded(self):
-        # #72: "configDependencies" is the same JSON key.
-        for key in (r"configDependencies", r"packageManager"):
-            with self.subTest(key=key):
-                (self.repo / "package.json").write_text('{"pnpm": {"%s": {}}}' % key)
-                self.assertRegex(self.errors(), "configDependencies are not allowed|packageManager field is not allowed")
+        # #72: "config\u0044ependencies" decodes to the same JSON key. The raw text never contains
+        # the plain key, so only the decoded-key check can catch these (PR #81 review).
+        cases = {'{"pnpm": {"config\\u0044ependencies": {}}}': "configDependencies are not allowed",
+                 '{"package\\u004danager": "pnpm@1"}': "a packageManager field is not allowed",
+                 '{"devEngines": {"\\u0070ackageManager": {"name": "pnpm"}}}': "a packageManager field is not allowed"}
+        for text, needle in cases.items():
+            with self.subTest(package_json=text):
+                self.assertNotIn("configDependencies", text)
+                self.assertNotIn("packageManager", text)
+                (self.repo / "package.json").write_text(text)
+                self.assertIn(needle, self.errors())
 
     def test_workspace_backslashes_and_hook_settings_fail(self):
         cases = {'"config\\x44ependencies": {}\nignorePnpmfile: true\n': "backslashes are not allowed",
@@ -139,6 +157,15 @@ class CheckLockfilesTests(unittest.TestCase):
                  "ignorePnpmfile: true\n'globalPnpmfile': x\n": "the globalPnpmfile setting",
                  "ignorePnpmfile: true\nsharedWorkspaceLockfile: false\n": "the sharedWorkspaceLockfile setting",
                  "{gitBranchLockfile: true}\nignorePnpmfile: true\n": "the gitBranchLockfile setting",
+                 "ignorePnpmfile: true\nlockfile: false\n": "the lockfile setting",
+                 "ignorePnpmfile: true\nlockfileDir: ../elsewhere\n": "the lockfileDir setting",
+                 # PR #81 review: YAML spellings of a key the regex wouldn't see.
+                 "? pnpmfile\n: tools/hooks.cjs\nignorePnpmfile: true\n": "explicit keys, tags, anchors",
+                 "!!str pnpmfile: tools/hooks.cjs\nignorePnpmfile: true\n": "explicit keys, tags, anchors",
+                 "&a sharedWorkspaceLockfile: false\nignorePnpmfile: true\n": "explicit keys, tags, anchors",
+                 "k: &a pnpmfile\n*a : tools/hooks.cjs\nignorePnpmfile: true\n": "explicit keys, tags, anchors",
+                 "ignorePnpmfile: true\n---\npnpmfile: x\n": "explicit keys, tags, anchors",
+                 "ignorePnpmfile: true\nignorePnpmfile: false\n": "exactly once",
                  "packages:\n  - frontend\n": "`ignorePnpmfile: true` must be set",
                  "ignorePnpmfile: false\n": "`ignorePnpmfile: true` must be set"}
         for text, needle in cases.items():
@@ -153,10 +180,13 @@ class CheckLockfilesTests(unittest.TestCase):
         (self.repo / "frontend" / "deep" / ".PnpmFile.cjs").write_text("")
         (self.repo / "frontend" / "pnpm-lock.yaml").write_text("")
         (self.repo / "pnpm-lock.main.yaml").write_text("")
+        (self.repo / "e2e").mkdir(exist_ok=True)
+        (self.repo / "e2e" / "PNPM-LOCK.YAML").write_text("")  # PR #81 review: macOS is case-insensitive
         (self.repo / "node_modules" / "x").mkdir(parents=True)
         (self.repo / "node_modules" / "x" / "pnpm-lock.yaml").write_text("")  # skipped: not ours
         found = self.errors()
-        for needle in (".PnpmFile.cjs: a .pnpmfile is not allowed", "frontend/pnpm-lock.yaml:", "pnpm-lock.main.yaml:"):
+        for needle in (".PnpmFile.cjs: a .pnpmfile is not allowed", "frontend/pnpm-lock.yaml:", "pnpm-lock.main.yaml:",
+                       "e2e/PNPM-LOCK.YAML:"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, found)
         self.assertNotIn("node_modules", found)
@@ -200,6 +230,35 @@ class CheckLockfilesTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(check_lockfiles.main([str(HERE.parent)]), 0)
 
+
+
+class WrapperTests(unittest.TestCase):
+    """PR #81 review: scripts/check-lockfiles runs the pinned python3 only once it verifies."""
+
+    def run_wrapper(self, verify_exit: int) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            (root / ".toolchain" / "bin").mkdir(parents=True)
+            wrapper = root / "scripts" / "check-lockfiles"
+            wrapper.write_text((HERE / "check-lockfiles").read_text())
+            (root / "scripts" / "toolchain.py").write_text(f"import sys\nsys.exit({verify_exit})\n")
+            (root / "scripts" / "check_lockfiles.py").write_text("import sys\nprint(sys.executable)\n")
+            pinned = root / ".toolchain" / "bin" / "python3"
+            pinned.write_text("#!/bin/sh\necho PINNED\n")
+            for f in (wrapper, pinned):
+                f.chmod(0o755)
+            out = subprocess.run(["sh", str(wrapper)], capture_output=True, text=True, check=True,
+                                 env={**os.environ, "PATH": os.path.dirname(sys.executable) + os.pathsep + "/usr/bin:/bin"})
+            return out.stdout + out.stderr
+
+    def test_a_verified_pinned_python_is_used(self):
+        self.assertIn("PINNED", self.run_wrapper(0))
+
+    def test_an_unverified_pinned_python_is_not_run(self):
+        out = self.run_wrapper(1)
+        self.assertNotIn("PINNED", out)
+        self.assertIn("did not verify", out)
 
 if __name__ == "__main__":
     unittest.main()
