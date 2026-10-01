@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.20 |
+| Version | 0.2.21 |
 | Last updated | 2026-10-01 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -141,7 +141,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 ### 2.6 Updating dependencies
 
 - Updates come in **deliberate batches** (at most monthly, plus urgent security fixes), never as a side effect of other work.
-- Dependabot runs on a monthly schedule with grouped updates and a 7-day cooldown. It covers the `npm`, `uv` and `github-actions` ecosystems, the last so that SHA-pinned actions get updates. Dependabot changes **manifests as well as lockfiles**. Its PRs go through the §2.4 review in full.
+- Dependabot runs on a monthly schedule with grouped updates and a 7-day cooldown. It covers the `npm`, `uv` and `github-actions` ecosystems, the last so that SHA-pinned actions get updates. Dependabot changes **manifests as well as lockfiles**. Its PRs go through the §2.4 review in full. Configured in `.github/dependabot.yml` (M0.2); whether Dependabot reads pnpm 12's multi-document lockfile is checked with the first JavaScript dependency (§2.5).
 - **Dependabot security updates ignore the cooldown**, and its cooldown covers only version updates of direct dependencies. The lockfile policy check (§2.5) is what enforces the 7-day rule everywhere.
 - **Security-fix exceptions to the cooldown:**
   - Only for a vulnerability that is exploitable in this app. It runs locally on loopback, so many CVEs aren't.
@@ -399,3 +399,4 @@ A change is done only when:
 | 2026-10-01 | 0.2.18 | §2.5: the lockfile check is hardened (#71, #72): file-name binding, declared dependencies without `uv.lock`, escaped keys, hook and lockfile settings, `ignorePnpmfile` required, any-case `.pnpmfile`, nested and branch pnpm lockfiles; the pinned Python is verified before `make check` uses it; the accepted upload-time limit is recorded |
 | 2026-10-01 | 0.2.19 | M0.2: actionlint 1.7.12 and zizmor 1.30.1 pinned (pending approval); `make lint-tools` / `make lint-workflows` |
 | 2026-10-01 | 0.2.20 | §2.3 (#69, #67): read-only trees are verified on use and re-applied by `make toolchain`; their limits (root, `chmod`, cleanup); pnpm described as a native binary |
+| 2026-10-01 | 0.2.21 | §2.6: Dependabot configured (`.github/dependabot.yml`) |
