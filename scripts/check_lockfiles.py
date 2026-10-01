@@ -99,6 +99,12 @@ def check_js_side(repo: Path) -> list[str]:
             errors.append(f"{pkg_json.relative_to(repo)}: lifecycle scripts are not allowed: {', '.join(bad)}")
         if "configDependencies" in text:
             errors.append(f"{pkg_json.relative_to(repo)}: configDependencies are not allowed (T-602)")
+        if "packageManager" in text:
+            # pnpm 12 resolves a `packageManager` (or `devEngines.packageManager`) pin against the
+            # registry on every command, outside sfw, and records it in pnpm-lock.yaml (#51).
+            # The pin lives in scripts/toolchain.lock; `engines.pnpm` checks the version.
+            errors.append(f"{pkg_json.relative_to(repo)}: a packageManager field is not allowed (#51); "
+                          "the pin lives in scripts/toolchain.lock")
     for pnpmfile in sorted(repo.glob(".pnpmfile.*")) + sorted(repo.glob("*/.pnpmfile.*")):
         errors.append(f"{pnpmfile.relative_to(repo)}: a .pnpmfile is not allowed (T-602)")
     workspace = repo / "pnpm-workspace.yaml"

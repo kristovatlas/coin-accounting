@@ -119,6 +119,13 @@ class CheckLockfilesTests(unittest.TestCase):
         (self.repo / "package.json").write_text('{"pnpm": {"configDependencies": {"x": "1"}}}')
         self.assertIn("package.json: configDependencies are not allowed", self.errors())
 
+    def test_a_package_manager_field_fails(self):
+        # #51: pnpm 12 resolves a packageManager pin against the registry on every command.
+        for text in ('{"packageManager": "pnpm@12.5.1"}', '{"devEngines": {"packageManager": {"name": "pnpm"}}}'):
+            with self.subTest(package_json=text):
+                (self.repo / "package.json").write_text(text)
+                self.assertIn("a packageManager field is not allowed", self.errors())
+
     def test_cli_exit_codes(self):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(check_lockfiles.main([str(self.repo), "--now", NOW.isoformat()]), 0)

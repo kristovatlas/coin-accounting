@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.16 |
+| Version | 0.2.17 |
 | Last updated | 2026-10-01 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -30,7 +30,7 @@ Configured in `pnpm-workspace.yaml`. Since pnpm 11, `.npmrc` is read only for au
 
 | Control | Setting |
 |---|---|
-| Package manager | **pnpm ≥ 12**, version pinned via `packageManager` in `package.json`. `pmOnFail: error`, so pnpm never downloads a different version of itself. npm/yarn are not used |
+| Package manager | **pnpm ≥ 12**, version pinned in `scripts/toolchain.lock` (§2.3) and checked by `engines.pnpm` in `package.json`. There is **no `packageManager` field**: pnpm 12 resolves that pin against the registry on every command, even `pnpm --version`, outside `sfw`, and writes it into `pnpm-lock.yaml` (#51). The lockfile check (§2.5) rejects the field. `pmOnFail: error`, so pnpm never downloads a different version of itself. npm/yarn are not used |
 | Cooldown | `minimumReleaseAge: 10080` (**7 days**), `minimumReleaseAgeStrict: true`, `minimumReleaseAgeIgnoreMissingTime: false`. Exceptions (§2.6) are **version-specific** (`pkg@x.y.z` in `minimumReleaseAgeExclude`) and carry an expiry |
 | Dependency build scripts | `allowBuilds: {}` (empty) with `strictDepBuilds: true`: any dependency with a build script fails the install. Allowing one requires an ADR |
 | Our own scripts | Our `package.json` files contain **no lifecycle scripts** (`preinstall`/`install`/`postinstall`/`prepare`); there are no `.pnpmfile.*` hooks and no `configDependencies`. Enforced by the CI check in §2.5 |
@@ -388,3 +388,4 @@ A change is done only when:
 | 2026-09-30 | 0.2.14 | M0.2: pnpm is pinned as its native binary (`@pnpm/exe.<platform>`); the launcher package would fetch or download it itself |
 | 2026-09-30 | 0.2.15 | M0.2: the lockfile policy check (`scripts/check-lockfiles`) runs in `make check` and CI; the pnpm part lands with the first JavaScript dependency, and a pnpm lockfile fails until then |
 | 2026-10-01 | 0.2.16 | M0.2: the `.pth` allowlist check exists (`scripts/check_pth.py`, run by `make bootstrap`); pytest's pastebin opt-out is pinned by a test |
+| 2026-10-01 | 0.2.17 | M0.2 verify at setup: no `packageManager` field (pnpm 12 resolves it from the registry on every command, #51); the lockfile check rejects it |
