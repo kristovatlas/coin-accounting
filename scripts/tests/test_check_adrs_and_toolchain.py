@@ -170,13 +170,17 @@ class ToolchainTests(unittest.TestCase):
                     else:
                         self.assertRegex(entry["integrity"], r"^sha512-[A-Za-z0-9+/]{86}==$")
 
-    def test_pnpm_comes_from_the_npm_registry_pinned_by_integrity(self):
-        # User decision in PR #7: publisher-provided integrity instead of a GitHub digest.
+    def test_pnpm_is_the_native_binary_from_the_npm_registry_pinned_by_integrity(self):
+        # M0.2: the `pnpm` package is only a launcher that fetches (or downloads at run time) this
+        # binary, so the pin is the per-platform @pnpm/exe.<platform> tarball itself.
         for key, entry in toolchain.load_lock()["pnpm"].items():
             if key in ("version", "source"):
                 continue
-            self.assertTrue(entry["url"].startswith("https://registry.npmjs.org/pnpm/-/"))
-            self.assertEqual(entry["kind"], "npm-tgz")
+            with self.subTest(platform=key):
+                self.assertRegex(entry["url"], r"^https://registry\.npmjs\.org/@pnpm/exe\.[a-z0-9-]+/-/")
+                self.assertEqual(entry["kind"], "tar")
+                self.assertEqual(entry["bin"], "package/pnpm")
+                self.assertRegex(entry["integrity"], r"^sha512-")
 
     def test_sha256_mismatch_is_a_hard_error(self):
         spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x", "sha256": "0" * 64,
