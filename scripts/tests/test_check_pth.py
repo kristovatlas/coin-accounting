@@ -157,6 +157,73 @@ class CheckPthTests(unittest.TestCase):
                 (dist / "RECORD").write_text(f"evil/__init__.py,sha256=x,1\n{path},sha256=y,1\n", encoding="utf-8")
                 self.assertIn("ships a start-up hook", " ".join(check_pth.problems(self.venv)))
 
+    # coverage 7.16.1's `a1_coverage.pth`, byte for byte (identical in every locked wheel; ADR 0025).
+    COVERAGE_PTH = b'import sys; exec(\'import os\\n\\nif os.getenv("COVERAGE_PROCESS_START") or os.getenv("COVERAGE_PROCESS_CONFIG"):\\n try:\\n  import coverage\\n except:\\n  pass\\n else:\\n  coverage.process_startup(slug="pth")\')\n'
+
+    def coverage_hook(self, record_row=None):
+        """coverage's hook plus a coverage dist-info whose RECORD claims it with the pinned hash."""
+        (self.site / check_pth.COVERAGE_HOOK).write_bytes(self.COVERAGE_PTH)
+        dist = self.site / "coverage-7.16.1.dist-info"
+        dist.mkdir(exist_ok=True)
+        row = record_row or f"a1_coverage.pth,{check_pth.record_hash(check_pth.COVERAGE_HOOK_SHA256)},205"
+        (dist / "RECORD").write_text(f"coverage/__init__.py,sha256=x,1\n{row}\n", encoding="utf-8")
+
+    def test_the_pinned_hash_is_coverages_real_file(self):
+        import hashlib
+        self.assertEqual(hashlib.sha256(self.COVERAGE_PTH).hexdigest(), check_pth.COVERAGE_HOOK_SHA256)
+        self.assertEqual(check_pth.record_hash(check_pth.COVERAGE_HOOK_SHA256),
+                         "sha256=7y7QbRmGfsZpwJqAQGBmapzV44OvCp0Rqi3nm3fUSOg")  # from coverage's own RECORD
+
+    def test_coverages_own_hook_passes(self):
+        self.uv_hook()
+        self.coverage_hook()
+        self.assertEqual(check_pth.problems(self.venv), [])
+
+    def test_coverages_hook_with_other_content_fails(self):
+        self.uv_hook()
+        self.coverage_hook()
+        (self.site / check_pth.COVERAGE_HOOK).write_bytes(self.COVERAGE_PTH.replace(b"pass", b"import os"))
+        self.assertIn("is not coverage's own file", " ".join(check_pth.problems(self.venv)))
+
+    def test_a_symlinked_coverage_hook_fails(self):
+        self.uv_hook()
+        self.coverage_hook()
+        real = self.site / "real.txt"
+        real.write_bytes(self.COVERAGE_PTH)
+        (self.site / check_pth.COVERAGE_HOOK).unlink()
+        (self.site / check_pth.COVERAGE_HOOK).symlink_to(real)
+        self.assertIn("is not coverage's own file", " ".join(check_pth.problems(self.venv)))
+
+    def test_coverages_hook_without_coverage_installed_fails(self):
+        self.uv_hook()
+        (self.site / check_pth.COVERAGE_HOOK).write_bytes(self.COVERAGE_PTH)
+        self.assertIn("no installed coverage distribution claims it", " ".join(check_pth.problems(self.venv)))
+
+    def test_coverage_claiming_the_hook_with_another_hash_fails(self):
+        self.uv_hook()
+        self.coverage_hook(record_row="a1_coverage.pth,sha256=AAAA,205")
+        found = " ".join(check_pth.problems(self.venv))
+        self.assertIn("ships a start-up hook", found)
+        self.assertIn("no installed coverage distribution claims it", found)
+
+    def test_another_package_shipping_coverages_hook_or_module_fails(self):
+        # Only coverage may ship the hook, and only coverage may provide the module it imports.
+        self.uv_hook()
+        self.coverage_hook()
+        dist = self.site / "evil-1.0.dist-info"
+        dist.mkdir()
+        good = check_pth.record_hash(check_pth.COVERAGE_HOOK_SHA256)
+        for path in (f"a1_coverage.pth,{good},205", "coverage/__init__.py,sha256=y,1", "Coverage.abi3.so,sha256=y,1"):
+            with self.subTest(record=path):
+                (dist / "RECORD").write_text(f"evil/__init__.py,sha256=x,1\n{path}\n", encoding="utf-8")
+                self.assertIn("evil-1.0.dist-info", " ".join(check_pth.problems(self.venv)))
+
+    def test_case_variant_coverage_hook_name_fails(self):
+        self.uv_hook()
+        self.coverage_hook()
+        (self.site / check_pth.COVERAGE_HOOK).rename(self.site / "A1_Coverage.pth")
+        self.assertIn("unexpected .pth file", " ".join(check_pth.problems(self.venv)))
+
     def test_a_missing_environment_fails_rather_than_passing(self):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.assertEqual(check_pth.main([str(Path(self._tmp.name) / "nope")]), 1)
