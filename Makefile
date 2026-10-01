@@ -144,8 +144,15 @@ bootstrap: require-approved-deps require-toolchain ## Install exactly what the l
 	@if [ -f pnpm-lock.yaml ]; then "$(SFW)" "$(PNPM)" install --frozen-lockfile; else echo "no pnpm-lock.yaml yet (no JS dependencies approved)"; fi
 
 .PHONY: audit
-audit: ## Vulnerability audit of both lockfiles (enabled once the audit tools are approved; M0.2)
-	@echo "audit: pip-audit and pnpm audit are enabled in M0.2, after their dependency approval." >&2; exit 1
+audit: ## Vulnerability audit of the lockfiles with the pinned osv-scanner (queries api.osv.dev; dev-time flow, THREAT_MODEL §6)
+	@"$(SYS_PYTHON)" scripts/toolchain.py verify osv-scanner >/dev/null || { echo "Run 'make audit-tools' first (the pinned, unmodified osv-scanner is required)." >&2; exit 1; }
+	@locks=""; for f in uv.lock pnpm-lock.yaml; do [ -f "$$f" ] && locks="$$locks --lockfile=$$f"; done; \
+	  if [ -z "$$locks" ]; then echo "audit: no lockfiles yet"; exit 0; fi; \
+	  echo "osv-scanner scan source$$locks"; "$(TOOLBIN)/osv-scanner" scan source $$locks
+
+.PHONY: audit-tools
+audit-tools: ## Install the pinned osv-scanner (hash-verified; pins must be on origin/main)
+	"$(SYS_PYTHON)" scripts/toolchain.py install --only osv-scanner $(if $(DEPS_OK),--approved)
 
 # --- checks (standard library only, so they run before any dependency exists) ---
 

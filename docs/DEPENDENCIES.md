@@ -36,7 +36,6 @@ Deliberately **not** proposed, because the stdlib or our own code covers it:
 | Package | Purpose | Notes |
 |---|---|---|
 | `mutmut` | Mutation testing (§3.4) | |
-| `pip-audit` | CVE audit of `uv.lock` (`make audit`) | Heavy dependency tree (`requests`, `cyclonedx`…). The alternative, `osv-scanner` (a Go binary pinned like the toolchain), is to be evaluated in M0.2 |
 
 **JavaScript, runtime (bundled into the SPA)**
 
@@ -72,6 +71,7 @@ Verified as described in [`ENGINEERING.md` §2.3](ENGINEERING.md#23-all-installs
 | `bitcoind` (regtest only) | 31.1 | same | in `scripts/toolchain.lock` | bitcoincore.org `SHA256SUMS` (builder-signature threshold: M0.2); 31.0 is added for minimum-version tests in M0.2 | 2026-09-28, M0.1 |
 | `actionlint` (workflow checker) | 1.7.12 | linux-x86_64, linux-arm64, darwin-arm64, darwin-x86_64 | in `scripts/toolchain.lock` | GitHub release asset digest, matching the publisher's `checksums.txt`. Published 2026-03-30. Installed by `make lint-tools`, run by `make lint-workflows` | 2026-10-01, M0.2, **pending human approval** |
 | `zizmor` (workflow security checker) | 1.30.1 | same | in `scripts/toolchain.lock` | GitHub release asset digest. The publisher ships no checksum file, so this is **trust-on-first-use** (like `sfw`). Published 2026-09-09. Run with `--offline`, so its online audits (GitHub API) never run. Installed by `make lint-tools` | 2026-10-01, M0.2, **pending human approval** |
+| `osv-scanner` (vulnerability audit) | 2.6.0 | linux-x86_64, linux-arm64, darwin-arm64, darwin-x86_64 | in `scripts/toolchain.lock` | GitHub release asset digest, matching the publisher's `osv-scanner_SHA256SUMS`. Published 2026-09-14. Replaces the proposed `pip-audit` (a heavy dependency tree) and `pnpm audit`. Installed by `make audit-tools` | 2026-10-01, M0.2, **pending human approval** |
 | Playwright browsers | — | — | — | Pinned with `@playwright/test` (M0.2) | — |
 
 **Approved by the human** on 2026-09-28 in PR #7: the pins above, exactly as committed in `scripts/toolchain.lock`. A change to any pin needs a new approval (ENGINEERING §2.4).

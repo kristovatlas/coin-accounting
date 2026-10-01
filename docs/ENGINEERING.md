@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.21 |
+| Version | 0.2.22 |
 | Last updated | 2026-10-01 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -70,7 +70,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | `make update-deps` | Batch update (§2.6), lockfile-only, then the same review |
   | `make update-sfw` | Reviewed update of the pinned `sfw` version and checksum |
   | `make test-tools` | Pinned, verified test tooling downloads (see "Non-package downloads") |
-  | `make audit` | `pip-audit` and `pnpm audit` against the lockfiles (tools locked as dev dependencies; network through `sfw`) |
+  | `make audit` | The pinned `osv-scanner` binary (§2.3, `make audit-tools`) against `uv.lock` and `pnpm-lock.yaml`. It sends package names and versions to `api.osv.dev` (THREAT_MODEL §6). One tool for both ecosystems, so no `pip-audit` dependency tree |
 
   Contributors, AI agents and CI all use these targets. CI jobs call `make toolchain` and `make bootstrap`, never raw installers.
 - **No silent fallback:** if `sfw` is missing, not the pinned version, or fails to start, the scripts **stop with an error**. They never drop through to an unwrapped install. Whether `sfw` fails open when the Socket API is unreachable must be tested at setup. If it does, the wrapper detects that and stops **(verify at setup)**.
@@ -164,7 +164,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **Secrets:** CI needs none. The Socket GitHub App is used rather than the Socket CLI, which would need an API token.
 - **Caches:** no dependency caches in CI (`sfw` can't inspect cached artifacts). On developer machines, pnpm `storeDir` and uv `cache-dir` are project-local, so packages vetted for other projects are never reused unchecked.
 - **Checks on every PR:**
-  - `make audit` (`pip-audit` + `pnpm audit`)
+  - `make audit` (`osv-scanner`)
   - the lockfile policy check
   - the install-command check
   - the Socket App report
@@ -400,3 +400,4 @@ A change is done only when:
 | 2026-10-01 | 0.2.19 | M0.2: actionlint 1.7.12 and zizmor 1.30.1 pinned (pending approval); `make lint-tools` / `make lint-workflows` |
 | 2026-10-01 | 0.2.20 | §2.3 (#69, #67): read-only trees are verified on use and re-applied by `make toolchain`; their limits (root, `chmod`, cleanup); pnpm described as a native binary |
 | 2026-10-01 | 0.2.21 | §2.6: Dependabot configured (`.github/dependabot.yml`) |
+| 2026-10-01 | 0.2.22 | `make audit` uses a pinned `osv-scanner` binary (pending approval) instead of `pip-audit` + `pnpm audit` |

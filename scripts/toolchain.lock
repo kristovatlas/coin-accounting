@@ -229,5 +229,33 @@
       "kind": "tar",
       "bin": "zizmor"
     }
+  },
+  "osv-scanner": {
+    "version": "2.6.0",
+    "source": "GitHub release asset digest, matching the publisher's osv-scanner_SHA256SUMS. Published 2026-09-14. Vulnerability audit of the lockfiles (`make audit`); queries api.osv.dev with package names and versions. Installed by `make audit-tools`, not by `make toolchain`.",
+    "linux-x86_64": {
+      "url": "https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64",
+      "sha256": "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108",
+      "kind": "binary",
+      "bin": "osv-scanner"
+    },
+    "linux-arm64": {
+      "url": "https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_arm64",
+      "sha256": "2c71403eb443d05891c4f268c3ad771cf4f16e5443463fd7851ef8f454d3c7e4",
+      "kind": "binary",
+      "bin": "osv-scanner"
+    },
+    "darwin-arm64": {
+      "url": "https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_darwin_arm64",
+      "sha256": "98c460dcd37de25819babd757d04542045b6243113e209edcd4d89fedb0256b4",
+      "kind": "binary",
+      "bin": "osv-scanner"
+    },
+    "darwin-x86_64": {
+      "url": "https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_darwin_amd64",
+      "sha256": "60c5296637e977b28eeda5c7f13573e447659a632922737f94d11fa7e30ad6ca",
+      "kind": "binary",
+      "bin": "osv-scanner"
+    }
   }
 }
