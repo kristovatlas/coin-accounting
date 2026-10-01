@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.12 |
-| Last updated | 2026-09-29 |
+| Version | 0.2.13 |
+| Last updated | 2026-09-30 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -382,3 +382,4 @@ A change is done only when:
 | 2026-09-28 | 0.2.10 | PR #7 review round 7: the `DEPS_APPROVED` rule is stated for all agents in AGENTS.md; only Claude Code has a technical block |
 | 2026-09-28 | 0.2.11 | Review process: the `/review-panel` skill and the tripwire (ADR 0020); the human still merges |
 | 2026-09-29 | 0.2.12 | ADR 0023: review severity rules and the round-limit walkthrough; no symlinks or submodules in the repository (`scripts/check_repo_files.py`) |
+| 2026-09-30 | 0.2.13 | M0.2: installed toolchain trees are read-only, so running a tool (the pinned Python writes `.pyc` files) can't change what `make require-toolchain` verifies |

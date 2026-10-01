@@ -200,6 +200,54 @@ class ToolchainTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), data)
             self.assertTrue(path.stat().st_mode & 0o100)
 
+    def test_installed_tree_is_read_only_so_running_a_tool_cannot_change_it(self):
+        # M0.2: the pinned Python wrote .pyc files into its own tree and broke the digest.
+        blob = self.wrapped_tar("python/bin/python3", b"#!/bin/sh\n")
+        spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x",
+                                                  "sha256": hashlib.sha256(blob).hexdigest(), "kind": "tar",
+                                                  "bin": "python/bin/python3"}}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
+            binary = toolchain.install_tool("python", spec, "linux-x86_64")
+            tool_dir = Path(d) / "python" / "1"
+            for path in [tool_dir, *tool_dir.rglob("*")]:
+                with self.subTest(path=path.relative_to(d).as_posix()):
+                    self.assertEqual(path.stat().st_mode & 0o222, 0)
+            self.assertTrue(binary.stat().st_mode & 0o100)
+            if os.geteuid() != 0:  # root ignores permissions
+                with self.assertRaises(PermissionError):
+                    (binary.parent / "__pycache__").mkdir()
+            # A forced reinstall can still replace the read-only tree.
+            again = toolchain.install_tool("python", spec, "linux-x86_64", force=True)
+            self.assertEqual(again, binary)
+
+    def test_a_valid_writable_install_is_made_read_only_without_reinstalling(self):
+        # PR #64 review: an install made before trees were read-only took the cached path and
+        # stayed writable, so the pinned Python could still write .pyc files into it.
+        blob = self.wrapped_tar("python/bin/python3", b"#!/bin/sh\n")
+        spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x",
+                                                  "sha256": hashlib.sha256(blob).hexdigest(), "kind": "tar",
+                                                  "bin": "python/bin/python3"}}
+        downloads = []
+
+        def fake_download(url, dest):
+            downloads.append(url)
+            dest.write_bytes(blob)
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "download", fake_download):
+            toolchain.install_tool("python", spec, "linux-x86_64")
+            tool_dir = Path(d) / "python" / "1"
+            for path in [tool_dir, *tool_dir.rglob("*")]:  # as an install from before this change
+                path.chmod(path.stat().st_mode | 0o200)
+            toolchain.install_tool("python", spec, "linux-x86_64")
+            self.assertEqual(len(downloads), 1)  # the cached install was kept, not replaced
+            for path in [tool_dir, *tool_dir.rglob("*")]:
+                with self.subTest(path=path.relative_to(d).as_posix()):
+                    self.assertEqual(path.stat().st_mode & 0o222, 0)
+
     def test_tar_with_path_traversal_is_refused(self):
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -245,6 +293,7 @@ class ToolchainTests(unittest.TestCase):
                 mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
                 mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(data)):
             path = toolchain.install_tool("sfw", spec, "linux-x86_64")
+            path.chmod(0o755)  # installs are read-only; tampering has to undo that first
             path.write_bytes(b"tampered")
             again = toolchain.install_tool("sfw", spec, "linux-x86_64")
             self.assertEqual(again.read_bytes(), data)
@@ -269,6 +318,7 @@ class ToolchainTests(unittest.TestCase):
             with self.assertRaisesRegex(toolchain.ToolchainError, "does not point"):
                 toolchain.verify_tool("sfw", lock, "linux-x86_64")
             toolchain.link(path, "sfw")
+            path.chmod(0o755)  # installs are read-only; tampering has to undo that first
             path.write_bytes(b"tampered")
             with self.assertRaisesRegex(toolchain.ToolchainError, "modified"):
                 toolchain.verify_tool("sfw", lock, "linux-x86_64")
@@ -373,6 +423,7 @@ class ToolchainTests(unittest.TestCase):
                 toolchain.link(toolchain.install_tool(name, lock[name], "linux-x86_64"), name)
             toolchain.verify_tool("pnpm", lock, "linux-x86_64")
             code = Path(d) / "pnpm" / "1" / "package" / "dist" / "pnpm.cjs"
+            code.chmod(0o644)  # installs are read-only; tampering has to undo that first
             code.write_bytes(b"steal()\n")
             with self.assertRaisesRegex(toolchain.ToolchainError, "pnpm was modified"):
                 toolchain.verify_tool("pnpm", lock, "linux-x86_64")
@@ -380,6 +431,7 @@ class ToolchainTests(unittest.TestCase):
             self.assertEqual(code.read_bytes(), b"console.log('pnpm')\n")
             toolchain.verify_tool("pnpm", lock, "linux-x86_64")
             # The Node that runs pnpm is part of pnpm's verification.
+            (Path(d) / "node" / "1" / "node-v1-linux-x64").chmod(0o755)  # undo the read-only install
             (Path(d) / "node" / "1" / "node-v1-linux-x64" / "lib").mkdir()
             with self.assertRaisesRegex(toolchain.ToolchainError, "node was modified"):
                 toolchain.verify_tool("pnpm", lock, "linux-x86_64")
@@ -415,6 +467,8 @@ class ToolchainTests(unittest.TestCase):
             toolchain.link(toolchain.install_tool("python", lock["python"], "linux-x86_64"), "python3")
             toolchain.verify_tool("python", lock, "linux-x86_64")
             cache = Path(d) / "python" / "1" / "python" / "lib" / "__pycache__"
+            for parent in (cache.parents[1], cache.parents[2]):  # undo the read-only install
+                parent.chmod(0o755)
             cache.mkdir(parents=True)
             (cache / "os.cpython-313.pyc").write_bytes(b"planted")
             with self.assertRaisesRegex(toolchain.ToolchainError, "python was modified"):
