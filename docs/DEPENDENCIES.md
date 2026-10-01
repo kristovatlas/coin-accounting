@@ -31,7 +31,6 @@ Deliberately **not** proposed, because the stdlib or our own code covers it:
 
 | Package | Purpose | Notes |
 |---|---|---|
-| `pytest` | Test runner (ENGINEERING §3) | Moved to the Packages table (PR #65). Plugins load only when named (`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`); the built-in `pastebin` plugin is disabled |
 | `hypothesis` | Property tests and fuzzing (T-205, T-501) | |
 | `coverage` | Coverage floors, including E2E subprocess coverage (§3.3) | Has an optional C tracer |
 | `ruff` | Lint and format, with per-path `banned-api` rules | Native binary wheel (Rust) |
