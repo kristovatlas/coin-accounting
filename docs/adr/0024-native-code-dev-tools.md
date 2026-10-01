@@ -29,6 +29,8 @@ Native code is harder to review than Python: Socket's analysis and a human readi
 
 Chosen option: **1**. Prebuilt native-code wheels are allowed for **`hypothesis`, `coverage`, `ruff` and `mypy`**, as **development dependencies only** (the `dev` group, never imported by `backend/coinacct`).
 
+This also covers the native-code packages these four **require**, as long as their own project publishes them for that tool. Each one is named in its tool's proposal PR and register row. At the time of writing that is `librt` (the mypyc runtime library) and `ast-serialize` (mypy's AST serializer), both from the mypy project and required by mypy 2.3.1. A native package from anyone else, pulled in transitively, needs its own ADR.
+
 The following still apply unchanged:
 - every version is proposed in its own PR with `make propose-py`, past the 7-day cooldown
 - the Socket report and the human's approval of the lockfile diff (ENGINEERING §2.4)
