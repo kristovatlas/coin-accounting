@@ -1,12 +1,28 @@
 #!/bin/sh
 # Wrapper under the name used in the docs; the logic lives in check_lockfiles.py, which needs
-# Python 3.11+. Like `make check`, it uses the pinned interpreter only after the host python3 has
-# verified the pinned tree (toolchain.py verify python), and otherwise python3 from PATH: an
+# Python 3.11+. Like `make check`, it uses the pinned interpreter only after a host python3 has
+# verified the pinned tree (toolchain.py verify python), and otherwise the host python3: an
 # unverified pinned interpreter would decide whether a lockfile passes (#71, PR #81 review).
-here="$(dirname "$0")"
-py="$here/../.toolchain/bin/python3"
-if [ -x "$py" ] && python3 "$here/toolchain.py" verify python >/dev/null 2>&1; then :; else
-    [ -x "$py" ] && echo "check-lockfiles: the pinned python3 did not verify; using python3 from PATH" >&2
-    py=python3
+# The host python3 is looked up on PATH with .toolchain/bin skipped, and must not be the pinned
+# binary itself, so the pinned interpreter never verifies itself (PR #81 review, round 2).
+here="$(cd "$(dirname "$0")" && pwd)"
+pinned="$here/../.toolchain/bin/python3"
+host=
+old_ifs=$IFS; IFS=:
+for dir in $PATH; do
+    [ -n "$dir" ] && [ -x "$dir/python3" ] || continue
+    [ -d "$here/../.toolchain/bin" ] && [ "$dir/python3" -ef "$pinned" ] && continue
+    [ -d "$here/../.toolchain/bin" ] && [ "$dir" -ef "$here/../.toolchain/bin" ] && continue
+    host="$dir/python3"; break
+done
+IFS=$old_ifs
+if [ -z "$host" ]; then
+    echo "check-lockfiles: no python3 on PATH outside .toolchain/bin" >&2; exit 1
+fi
+export PYTHONDONTWRITEBYTECODE=1  # the pinned tree is verified file by file
+py="$host"
+if [ -x "$pinned" ]; then
+    if "$host" "$here/toolchain.py" verify python >/dev/null 2>&1; then py="$pinned"
+    else echo "check-lockfiles: the pinned python3 did not verify; using $host" >&2; fi
 fi
 exec "$py" "$here/check_lockfiles.py" "$@"

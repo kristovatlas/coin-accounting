@@ -33,7 +33,6 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
 
 if sys.version_info < (3, 11):  # noqa: UP036 - tomllib arrived in 3.11
     sys.exit("check_lockfiles.py needs Python 3.11 or newer: run `make toolchain`, then `make check`")
@@ -42,7 +41,11 @@ import tomllib  # noqa: E402
 
 COOLDOWN = timedelta(days=7)
 PYPI_INDEX = "https://pypi.org/simple"
-FILES_HOST = "https://files.pythonhosted.org/"
+# The exact shape of a PyPI file URL. Matching the whole URL rules out anything a URL parser could
+# read differently from this check: queries, fragments, %-escapes, backslashes (a WHATWG parser,
+# as uv uses, treats `\` as `/` and then collapses `..`), dot segments and whitespace (PR #81 review).
+FILES_URL = re.compile(
+    r"https://files\.pythonhosted\.org/packages/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{60}/([A-Za-z0-9_][A-Za-z0-9._+-]*)")
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 LIFECYCLE = {"preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare",
              "prepack", "postpack", "dependencies"}
@@ -137,13 +140,10 @@ def check_uv_lock(repo: Path, now: datetime) -> list[str]:
                 errors.append(f"{where}: malformed file entry")
                 continue
             url = f.get("url", "")
-            parts = urlsplit(url)
-            # The file name comes from the path alone: a query or fragment could otherwise carry
-            # a name that isn't the file fetched (PR #81 review).
-            # The prefix ends in "/", so the host is exactly files.pythonhosted.org over https.
-            if not url.startswith(FILES_HOST) or parts.query or parts.fragment or "%" in parts.path:
+            match = FILES_URL.fullmatch(url) if isinstance(url, str) else None
+            if match is None:
                 errors.append(f"{where}: file URL is not a plain https URL on files.pythonhosted.org: {url!r}")
-            filename = parts.path.rsplit("/", 1)[-1]
+            filename = match.group(1) if match else str(url).rsplit("/", 1)[-1]
             parsed = file_name_and_version(filename)
             if parsed is None or normalize(parsed[0]) != normalize(name) or parsed[1] != version:
                 errors.append(f"{where}: file {filename!r} doesn't match the entry's name and version (#71)")

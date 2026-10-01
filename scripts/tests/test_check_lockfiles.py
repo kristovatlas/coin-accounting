@@ -20,11 +20,12 @@ except SystemExit:  # host Python < 3.11: the check itself runs on the pinned Py
 
 NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
 HASH = "sha256:" + "a" * 64
+FILES = "https://files.pythonhosted.org/packages/ab/cd/" + "e" * 60 + "/"  # the real URL shape
 OLD = "2026-09-01T00:00:00Z"
 
 
 def wheel(name: str, uploaded: str = OLD, url: str | None = None, hash_: str = HASH) -> str:
-    url = url or f"https://files.pythonhosted.org/packages/xx/{name}-1.0-py3-none-any.whl"
+    url = url or f"{FILES}{name}-1.0-py3-none-any.whl"
     return f'{{ url = "{url}", hash = "{hash_}", size = 1, upload-time = "{uploaded}" }}'
 
 
@@ -70,10 +71,14 @@ class CheckLockfilesTests(unittest.TestCase):
 
     def test_a_query_or_fragment_cannot_supply_the_file_name(self):
         # PR #81 review: the fetched file is evil-1.0; the name check must not read the suffix.
-        base = "https://files.pythonhosted.org/packages/xx/evil-1.0-py3-none-any.whl"
+        base = FILES + "evil-1.0-py3-none-any.whl"
         for url in (base + "#/pytest-1.0-py3-none-any.whl", base + "?/pytest-1.0-py3-none-any.whl",
-                    "http://files.pythonhosted.org/packages/xx/pytest-1.0-py3-none-any.whl",
-                    "https://files.pythonhosted.org.example.invalid/packages/xx/pytest-1.0-py3-none-any.whl"):
+                    FILES.replace("https:", "http:") + "pytest-1.0-py3-none-any.whl",
+                    FILES.replace(".org/", ".org.example.invalid/", 1) + "pytest-1.0-py3-none-any.whl",
+                    # A WHATWG parser (uv's) reads `\` as `/` and collapses `..`: this fetches evil-1.0.
+                    FILES + "pytest-1.0-py3-none-any.whl\\\\..\\\\evil-1.0-py3-none-any.whl",  # TOML-escaped `\`
+                    base.replace("/evil-", "/./evil-"), FILES + "pytest%2D1.0-py3-none-any.whl",
+                    FILES + "pytest-1.0-py3-none-any.whl ", "https://files.pythonhosted.org/pytest-1.0-py3-none-any.whl"):
             with self.subTest(url=url):
                 self.lock(self.pkg("pytest", wheels=f"[{wheel('pytest', url=url)}]"))
                 self.assertIn("not a plain https URL on files.pythonhosted.org", self.errors())
@@ -87,7 +92,7 @@ class CheckLockfilesTests(unittest.TestCase):
         self.assertIn("less than 7 days ago", self.errors())
 
     def test_a_missing_upload_time_fails(self):
-        w = '{ url = "https://files.pythonhosted.org/packages/xx/a.whl", hash = "' + HASH + '", size = 1 }'
+        w = '{ url = "' + FILES + 'a.whl", hash = "' + HASH + '", size = 1 }'
         self.lock(self.pkg("undated", wheels=f"[{w}]"))
         self.assertIn("no upload-time", self.errors())
 
@@ -193,10 +198,10 @@ class CheckLockfilesTests(unittest.TestCase):
 
     def test_a_file_that_does_not_match_its_entry_fails(self):
         # #71: an entry named "pytest" must not point at another project's wheel.
-        other = wheel("evil", url="https://files.pythonhosted.org/packages/xx/evil-1.0-py3-none-any.whl")
+        other = wheel("evil", url=FILES + "evil-1.0-py3-none-any.whl")
         self.lock(self.pkg("pytest", wheels=f"[{other}]"))
         self.assertIn("doesn't match the entry's name and version", self.errors())
-        newer = wheel("pytest", url="https://files.pythonhosted.org/packages/xx/pytest-9.9-py3-none-any.whl")
+        newer = wheel("pytest", url=FILES + "pytest-9.9-py3-none-any.whl")
         self.lock(self.pkg("pytest", wheels=f"[{newer}]"))
         self.assertIn("doesn't match the entry's name and version", self.errors())
 
@@ -235,7 +240,7 @@ class CheckLockfilesTests(unittest.TestCase):
 class WrapperTests(unittest.TestCase):
     """PR #81 review: scripts/check-lockfiles runs the pinned python3 only once it verifies."""
 
-    def run_wrapper(self, verify_exit: int) -> str:
+    def run_wrapper(self, verify_exit: int, pinned_first: bool = False) -> str:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "scripts").mkdir()
@@ -248,8 +253,11 @@ class WrapperTests(unittest.TestCase):
             pinned.write_text("#!/bin/sh\necho PINNED\n")
             for f in (wrapper, pinned):
                 f.chmod(0o755)
+            path = os.path.dirname(sys.executable) + os.pathsep + "/usr/bin:/bin"
+            if pinned_first:  # PR #81 round 2: the pinned python3 must not verify itself
+                path = str(pinned.parent) + os.pathsep + path
             out = subprocess.run(["sh", str(wrapper)], capture_output=True, text=True, check=True,
-                                 env={**os.environ, "PATH": os.path.dirname(sys.executable) + os.pathsep + "/usr/bin:/bin"})
+                                 env={**os.environ, "PATH": path})
             return out.stdout + out.stderr
 
     def test_a_verified_pinned_python_is_used(self):
@@ -259,6 +267,14 @@ class WrapperTests(unittest.TestCase):
         out = self.run_wrapper(1)
         self.assertNotIn("PINNED", out)
         self.assertIn("did not verify", out)
+
+    def test_the_pinned_python_never_verifies_itself(self):
+        # With .toolchain/bin first on PATH, a bare `python3` would be the pinned binary: it could
+        # "verify" itself and then run the check. The wrapper skips that directory.
+        out = self.run_wrapper(1, pinned_first=True)
+        self.assertNotIn("PINNED", out)
+        self.assertIn("did not verify", out)
+        self.assertIn("PINNED", self.run_wrapper(0, pinned_first=True))
 
 if __name__ == "__main__":
     unittest.main()
