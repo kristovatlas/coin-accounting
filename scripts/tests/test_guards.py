@@ -166,7 +166,8 @@ class MakefileOverrideTests(unittest.TestCase):
         # checks its own lock (its dry run shows the call without --approved).
         gate, verify = "dependency or toolchain files differ", "toolchain.py verify sfw pnpm uv node python"
         config = "install config files"
-        for args, needs in ((("bootstrap",), (gate, verify)),
+        pth = ("-iname '_virtualenv*' -delete", "scripts/check_pth.py .venv", "|| rc=$?")
+        for args, needs in ((("bootstrap",), (gate, verify, *pth)),
                             (("toolchain",), ("scripts/toolchain.py install \n",)),
                             (("propose-js", "PKG=a@1", "WORKSPACE=frontend"), (config, verify)),
                             (("propose-py", "PKG=a==1"), (config, verify, "add --no-sync --no-build"))):

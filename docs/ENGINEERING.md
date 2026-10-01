@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.17 |
+| Version | 0.2.18 |
 | Last updated | 2026-10-01 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -54,7 +54,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
 | Auto-sync | `UV_NO_SYNC=1` is exported by the `Makefile` and required in `AGENTS.md`, so `uv run` never locks or syncs by itself |
 | Sources | PyPI only. No extra indexes, no `[tool.uv.sources]` git, URL or path entries, no PEP 508 direct URLs (CI check, §2.5) |
 | Lockfile | `uv.lock` (with hashes) committed; installs use `--locked` |
-| `.pth` files | Wheels can ship `.pth` files that run on every interpreter start. `make bootstrap` runs `scripts/check_pth.py` right after installing and fails on any `.pth` file not on its allowlist (only uv's own `_virtualenv.pth`). CI runs it too once CI installs dependencies (#44) |
+| `.pth` files | Wheels can ship `.pth` files that run on every interpreter start. `make bootstrap` runs `scripts/check_pth.py` right after installing and fails on any `.pth` file not on its allowlist. Two are allowed. One is uv's own `_virtualenv.pth`, and only with uv's exact content, alongside the `_virtualenv.py` it imports with uv's hash, both regular files. Nothing else that `import _virtualenv` could load may exist: no `_virtualenv` package, no other `_virtualenv.*` file, and no cached bytecode for it at all, since a `.pyc` with a copied header would run anything. `make bootstrap` deletes those caches before the check, and the venv's Python rebuilds them from uv's verified source. Names are compared case-insensitively. No installed package's `RECORD` may claim any of these (PR #74 review, rounds 1–2). The other is coverage.py's `a1_coverage.pth`, which starts subprocess measurement only when `COVERAGE_PROCESS_START`/`COVERAGE_PROCESS_CONFIG` is set (§3.3). It is allowed only with its pinned sha256, as a regular file, claimed by coverage's own `RECORD` with that hash, and with nothing else providing the `coverage` module (ADR 0025). CI runs it too once CI installs dependencies (#44) |
 
 ### 2.3 All installs go through Socket Firewall, via the repo's scripts
 
@@ -389,3 +389,4 @@ A change is done only when:
 | 2026-09-30 | 0.2.15 | M0.2: the lockfile policy check (`scripts/check-lockfiles`) runs in `make check` and CI; the pnpm part lands with the first JavaScript dependency, and a pnpm lockfile fails until then |
 | 2026-10-01 | 0.2.16 | M0.2: the `.pth` allowlist check exists (`scripts/check_pth.py`, run by `make bootstrap`); pytest's pastebin opt-out is pinned by a test |
 | 2026-10-01 | 0.2.17 | M0.2 verify at setup: no `packageManager` field (pnpm 12 resolves it from the registry on every command, #51); the lockfile check rejects it |
+| 2026-10-01 | 0.2.18 | M0.2: the `.pth` allowlist also admits coverage.py's own `a1_coverage.pth`, pinned by content (ADR 0025, PR #78) |
