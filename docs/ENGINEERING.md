@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.18 |
+| Version | 0.2.19 |
 | Last updated | 2026-10-01 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -152,7 +152,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **GitHub Actions:**
   - pinned to full commit SHAs with a version comment
   - only `actions/*` or vetted publishers
-  - `zizmor` and `actionlint` run on workflow files (they catch impostor-commit pins and unsafe patterns)
+  - `zizmor` and `actionlint` run on workflow files (they catch impostor-commit pins and unsafe patterns). They're pinned binaries (§2.3), installed by `make lint-tools` and run by `make lint-workflows`; zizmor runs with `--offline`. CI runs them once the pins are on `main`
   - `permissions: contents: read` by default, and the repository default token is read-only
   - `persist-credentials: false` on checkout
   - no `pull_request_target`
@@ -395,3 +395,4 @@ A change is done only when:
 | 2026-10-01 | 0.2.16 | M0.2: the `.pth` allowlist check exists (`scripts/check_pth.py`, run by `make bootstrap`); pytest's pastebin opt-out is pinned by a test |
 | 2026-10-01 | 0.2.17 | M0.2 verify at setup: no `packageManager` field (pnpm 12 resolves it from the registry on every command, #51); the lockfile check rejects it |
 | 2026-10-01 | 0.2.18 | §2.5: the lockfile check is hardened (#71, #72): file-name binding, declared dependencies without `uv.lock`, escaped keys, hook and lockfile settings, `ignorePnpmfile` required, any-case `.pnpmfile`, nested and branch pnpm lockfiles; the pinned Python is verified before `make check` uses it; the accepted upload-time limit is recorded |
+| 2026-10-01 | 0.2.19 | M0.2: actionlint 1.7.12 and zizmor 1.30.1 pinned (pending approval); `make lint-tools` / `make lint-workflows` |

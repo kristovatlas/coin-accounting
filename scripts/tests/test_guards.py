@@ -169,7 +169,9 @@ class MakefileOverrideTests(unittest.TestCase):
         for args, needs in ((("bootstrap",), (gate, verify)),
                             (("toolchain",), ("scripts/toolchain.py install \n",)),
                             (("propose-js", "PKG=a@1", "WORKSPACE=frontend"), (config, verify)),
-                            (("propose-py", "PKG=a==1"), (config, verify, "add --no-sync --no-build"))):
+                            (("propose-py", "PKG=a==1"), (config, verify, "add --no-sync --no-build")),
+                            (("lint-tools",), ("scripts/toolchain.py install --only actionlint zizmor \n",)),
+                            (("lint-workflows",), ("toolchain.py verify actionlint zizmor", "zizmor\" --offline"))):
             out = self.dry_run(*args)
             for text in needs:
                 with self.subTest(target=args[0], needs=text):

@@ -58,6 +58,16 @@ help: ## List targets
 toolchain: ## Install the pinned sfw, pnpm, uv, Node and Python into .toolchain/ (hash-verified; pins must be on origin/main)
 	"$(SYS_PYTHON)" scripts/toolchain.py install $(if $(DEPS_OK),--approved)
 
+.PHONY: lint-tools
+lint-tools: ## Install the pinned actionlint and zizmor (hash-verified; pins must be on origin/main)
+	"$(SYS_PYTHON)" scripts/toolchain.py install --only actionlint zizmor $(if $(DEPS_OK),--approved)
+
+.PHONY: lint-workflows
+lint-workflows: ## Check the GitHub workflows with the pinned actionlint and zizmor (offline)
+	@"$(SYS_PYTHON)" scripts/toolchain.py verify actionlint zizmor >/dev/null || { echo "Run 'make lint-tools' first (the pinned, unmodified actionlint and zizmor are required)." >&2; exit 1; }
+	"$(TOOLBIN)/actionlint" -no-color .github/workflows/*.yml
+	"$(TOOLBIN)/zizmor" --offline .github/workflows
+
 .PHONY: test-tools
 test-tools: ## Install the pinned bitcoind for regtest tests (hash-verified; pins must be on origin/main)
 	"$(SYS_PYTHON)" scripts/toolchain.py install --only bitcoind $(if $(DEPS_OK),--approved)
