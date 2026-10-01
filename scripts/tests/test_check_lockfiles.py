@@ -97,6 +97,28 @@ class CheckLockfilesTests(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, found)
 
+    def test_every_lifecycle_and_pnpm_hook_name_fails(self):
+        # PR #63 review: pnpm's own `pnpm:devPreinstall` hook runs before a local install.
+        for name in sorted(check_lockfiles.LIFECYCLE) + ["pnpm:devPreinstall", "pnpm:someFutureHook"]:
+            with self.subTest(script=name):
+                (self.repo / "package.json").write_text('{"scripts": {"%s": "x", "build": "vite"}}' % name)
+                self.assertIn(f"lifecycle scripts are not allowed: {name}", self.errors())
+
+    def test_ordinary_scripts_pass(self):
+        (self.repo / "package.json").write_text('{"scripts": {"build": "vite", "test": "vitest", "lint": "eslint"}}')
+        self.assertEqual(check_lockfiles.check(self.repo, NOW), [])
+
+    def test_config_dependencies_fail_in_any_spelling(self):
+        # PR #63 review: quoted and flow-style YAML keys are the same pnpm setting.
+        for text in ('"configDependencies":\n  x: 1\n', "'configDependencies': {x: 1}\n",
+                     "{configDependencies: {x: 1}}\n", "packages:\n  - frontend\n  configDependencies : {}\n"):
+            with self.subTest(workspace=text):
+                (self.repo / "pnpm-workspace.yaml").write_text(text)
+                self.assertIn("pnpm-workspace.yaml: configDependencies are not allowed", self.errors())
+        (self.repo / "pnpm-workspace.yaml").unlink()
+        (self.repo / "package.json").write_text('{"pnpm": {"configDependencies": {"x": "1"}}}')
+        self.assertIn("package.json: configDependencies are not allowed", self.errors())
+
     def test_cli_exit_codes(self):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(check_lockfiles.main([str(self.repo), "--now", NOW.isoformat()]), 0)

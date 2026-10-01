@@ -39,6 +39,9 @@ FILES_HOST = "https://files.pythonhosted.org/"
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 LIFECYCLE = {"preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare",
              "prepack", "postpack", "dependencies"}
+# pnpm's own hooks (e.g. `pnpm:devPreinstall`, run before a local install) are rejected by prefix,
+# so a hook added in a later pnpm release fails closed too (PR #63 review).
+PNPM_HOOK_PREFIX = "pnpm:"
 
 
 def check_uv_lock(repo: Path, now: datetime) -> list[str]:
@@ -89,15 +92,20 @@ def check_js_side(repo: Path) -> list[str]:
     for pkg_json in [repo / "package.json", *sorted(repo.glob("*/package.json"))]:
         if not pkg_json.exists():
             continue
-        scripts = json.loads(pkg_json.read_text()).get("scripts", {}) or {}
-        bad = sorted(set(scripts) & LIFECYCLE)
+        text = pkg_json.read_text()
+        scripts = json.loads(text).get("scripts", {}) or {}
+        bad = sorted(name for name in scripts if name in LIFECYCLE or name.startswith(PNPM_HOOK_PREFIX))
         if bad:
             errors.append(f"{pkg_json.relative_to(repo)}: lifecycle scripts are not allowed: {', '.join(bad)}")
+        if "configDependencies" in text:
+            errors.append(f"{pkg_json.relative_to(repo)}: configDependencies are not allowed (T-602)")
     for pnpmfile in sorted(repo.glob(".pnpmfile.*")) + sorted(repo.glob("*/.pnpmfile.*")):
         errors.append(f"{pnpmfile.relative_to(repo)}: a .pnpmfile is not allowed (T-602)")
     workspace = repo / "pnpm-workspace.yaml"
-    if workspace.exists() and re.search(r"^configDependencies\s*:", workspace.read_text(), re.M):
-        errors.append("pnpm-workspace.yaml: configDependencies are not allowed (T-602)")
+    # Any occurrence fails, comments included: a key can be quoted or written in flow style, and
+    # without a YAML parser failing closed is the safe reading (PR #63 review).
+    if workspace.exists() and "configDependencies" in workspace.read_text():
+        errors.append("pnpm-workspace.yaml: configDependencies are not allowed (T-602); remove every mention")
     return errors
 
 
