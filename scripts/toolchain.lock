@@ -36,29 +36,29 @@
   },
   "pnpm": {
     "version": "12.5.1",
-    "source": "npm registry tarball, verified by the registry's sha512 integrity (the package also carries a registry signature and a provenance attestation; verifying those is M0.2, #15). Runs on the pinned Node. User decision, PR #7, 2026-09-28. Published 2026-09-18.",
+    "source": "npm registry tarballs of pnpm's per-platform native binary (@pnpm/exe.<platform>; the linux entries are the glibc builds), verified by the registry's sha512 integrity. The `pnpm` package itself is only a launcher whose install script fetches this binary, and without it falls back to downloading one at run time, so it is not used (M0.2, 2026-09-30). No install scripts; runs without Node. Published 2026-09-18.",
     "linux-x86_64": {
-      "url": "https://registry.npmjs.org/pnpm/-/pnpm-12.5.1.tgz",
-      "integrity": "sha512-4/MFvHhKK8ifWtO2E4iJRw+ujSr182thIW7JHCw9ZAiXdfneOKrDMQROpA8kXLDVZmOS399lgk4ZB+9qLGLeXw==",
-      "kind": "npm-tgz",
+      "url": "https://registry.npmjs.org/@pnpm/exe.linux-x64/-/exe.linux-x64-12.5.1.tgz",
+      "integrity": "sha512-3PkUBYo5z4dgtlnTNIFj7QGpcDUAuqXz9WGVigPDCeccEnhGiRkWmA5102TmYJHtwJP3LfmE+ZF9PGeWhn8p9Q==",
+      "kind": "tar",
       "bin": "package/pnpm"
     },
     "linux-arm64": {
-      "url": "https://registry.npmjs.org/pnpm/-/pnpm-12.5.1.tgz",
-      "integrity": "sha512-4/MFvHhKK8ifWtO2E4iJRw+ujSr182thIW7JHCw9ZAiXdfneOKrDMQROpA8kXLDVZmOS399lgk4ZB+9qLGLeXw==",
-      "kind": "npm-tgz",
+      "url": "https://registry.npmjs.org/@pnpm/exe.linux-arm64/-/exe.linux-arm64-12.5.1.tgz",
+      "integrity": "sha512-6hbMWW2/eQo1b5wvQPe/ndLHVTH88Rav6N+ffD4/h6IuFMjWCgasFYYsFv0GrvpqREAx3SwmZSvli+0NFXqbxA==",
+      "kind": "tar",
       "bin": "package/pnpm"
     },
     "darwin-arm64": {
-      "url": "https://registry.npmjs.org/pnpm/-/pnpm-12.5.1.tgz",
-      "integrity": "sha512-4/MFvHhKK8ifWtO2E4iJRw+ujSr182thIW7JHCw9ZAiXdfneOKrDMQROpA8kXLDVZmOS399lgk4ZB+9qLGLeXw==",
-      "kind": "npm-tgz",
+      "url": "https://registry.npmjs.org/@pnpm/exe.darwin-arm64/-/exe.darwin-arm64-12.5.1.tgz",
+      "integrity": "sha512-r1vEMQPVjRexZMyL2HonxJoo3+nuB/+G+tg+f2PK6faRdXX1TDwevKXOxJAfqlPInTy6W/pm912+s+m0NcR4BQ==",
+      "kind": "tar",
       "bin": "package/pnpm"
     },
     "darwin-x86_64": {
-      "url": "https://registry.npmjs.org/pnpm/-/pnpm-12.5.1.tgz",
-      "integrity": "sha512-4/MFvHhKK8ifWtO2E4iJRw+ujSr182thIW7JHCw9ZAiXdfneOKrDMQROpA8kXLDVZmOS399lgk4ZB+9qLGLeXw==",
-      "kind": "npm-tgz",
+      "url": "https://registry.npmjs.org/@pnpm/exe.darwin-x64/-/exe.darwin-x64-12.5.1.tgz",
+      "integrity": "sha512-YHwI1g2B+Y2cAEylOR31r781GWijdJL7Gy7TEn/ZpZ5v/Cuwp5/Pz0EFCgo0M2MKLafAbL/laUMGvOpAdnerAw==",
+      "kind": "tar",
       "bin": "package/pnpm"
     }
   },
