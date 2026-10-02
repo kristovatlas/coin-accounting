@@ -10,6 +10,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -374,6 +375,45 @@ class ToolchainTests(unittest.TestCase):
             args = argparse.Namespace(approved=True, only=["python"], include=None, force=False)
             with self.assertRaisesRegex(toolchain.ToolchainError, "another user"):
                 toolchain.cmd_install(args)
+
+    def test_a_symlinked_bin_directory_is_refused_before_any_link_change(self):
+        # PR #83 round 2: link() followed a symlinked .toolchain/bin and replaced files outside it.
+        with tempfile.TemporaryDirectory() as d:
+            tc, outside = Path(d) / ".toolchain", Path(d) / "outside"
+            tc.mkdir()
+            outside.mkdir()
+            (outside / "python3").write_text("not ours")
+            (tc / "bin").symlink_to(outside)
+            with mock.patch.object(toolchain, "TOOLCHAIN", tc), mock.patch.object(toolchain, "BIN", tc / "bin"):
+                with self.assertRaisesRegex(toolchain.ToolchainError, "not a real directory"):
+                    toolchain.link(tc / "python" / "1" / "bin" / "python3", "python3")
+                blob, spec = self.tool_spec()
+                with self.assertRaisesRegex(toolchain.ToolchainError, "not a real directory"):
+                    toolchain.verify_tool("python", {"python": spec}, "linux-x86_64")
+            self.assertEqual((outside / "python3").read_text(), "not ours")
+
+    def test_download_failures_keep_their_cause_and_are_not_called_ownership(self):
+        # PR #83 round 2: a TLS or network failure was reported as "created by another user".
+        import ssl
+        import urllib.error
+        for err in (urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed")),
+                    urllib.error.URLError("Name or service not known"), TimeoutError("timed out")):
+            with self.subTest(err=repr(err)), tempfile.TemporaryDirectory() as d, \
+                    mock.patch.object(urllib.request, "urlopen", side_effect=err):
+                with self.assertRaises(toolchain.ToolchainError) as cm:
+                    toolchain.download("https://example.invalid/x", Path(d) / "x")
+                self.assertIn("download failed: https://example.invalid/x", str(cm.exception))
+                self.assertNotIn("another user", str(cm.exception))
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d) / ".toolchain"), \
+                mock.patch.object(toolchain, "BIN", Path(d) / ".toolchain" / "bin"), \
+                mock.patch.object(toolchain, "load_lock", lambda: {"python": {"version": "1"}}), \
+                mock.patch.object(toolchain, "platform_key", lambda: "linux-x86_64"), \
+                mock.patch.object(toolchain, "install_tool", side_effect=OSError(28, "No space left on device")):
+            args = argparse.Namespace(approved=True, only=["python"], include=None, force=False)
+            with self.assertRaises(OSError) as cm:  # not rewritten as an ownership problem
+                toolchain.cmd_install(args)
+            self.assertNotIsInstance(cm.exception, toolchain.ToolchainError)
 
     def test_a_failed_hardening_that_cannot_be_undone_still_reports_the_original_error(self):
         # PR #83 review: the cleanup after a failed hardening could itself raise a bare OSError

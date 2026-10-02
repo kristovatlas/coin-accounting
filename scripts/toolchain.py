@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -88,13 +89,18 @@ def download(url: str, dest: Path) -> None:
         raise ToolchainError(f"refusing non-HTTPS URL: {url}")
     req = urllib.request.Request(url, headers={"User-Agent": "coinacct-toolchain"})
     # Default SSL context: certificate and hostname verification are on.
-    with urllib.request.urlopen(req, timeout=60) as resp, dest.open("wb") as out:
-        total = 0
-        while chunk := resp.read(1 << 20):
-            total += len(chunk)
-            if total > MAX_DOWNLOAD:
-                raise ToolchainError(f"download too large: {url}")
-            out.write(chunk)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp, dest.open("wb") as out:
+            total = 0
+            while chunk := resp.read(1 << 20):
+                total += len(chunk)
+                if total > MAX_DOWNLOAD:
+                    raise ToolchainError(f"download too large: {url}")
+                out.write(chunk)
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        # Reported as what it is, with its cause: a certificate failure here can mean the
+        # connection is being intercepted (T-603), which must not look like a local problem.
+        raise ToolchainError(f"download failed: {url}: {getattr(e, 'reason', None) or e}") from e
 
 
 def safe_extract(archive: Path, target: Path) -> None:
@@ -156,6 +162,8 @@ def check_tool_path(tool_dir: Path) -> None:
             mode = path.lstat().st_mode
         except FileNotFoundError:
             return
+        except PermissionError as e:
+            raise ToolchainError(f"can't read {path} ({e.strerror}); was .toolchain created by another user, e.g. with sudo? Fix its ownership, then run 'make toolchain'") from e
         if not stat.S_ISDIR(mode):
             raise ToolchainError(f"{path} is not a real directory (a symlink?); refusing to use it. "
                                  "Remove it, then run 'make toolchain'")
@@ -361,6 +369,8 @@ def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> 
     if entry is None:
         raise ToolchainError(f"{name}: no artifact pinned for {key}")
     tool_dir = TOOLCHAIN / name / spec["version"]
+    check_tool_path(tool_dir)
+    check_tool_path(BIN)
     cached = read_marker(tool_dir)
     if not cached or not marker_current(cached, entry):
         raise ToolchainError(f"{name} {spec['version']} is not installed from the pinned artifact; run 'make toolchain'")
@@ -384,7 +394,11 @@ def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> 
 
 
 def link(bin_path: Path, name: str) -> None:
+    # .toolchain/bin must be a real directory: unlink and symlink_to would otherwise follow a
+    # symlinked bin and replace files outside .toolchain (PR #83 review, round 2).
+    check_tool_path(BIN)
     BIN.mkdir(parents=True, exist_ok=True)
+    check_tool_path(BIN)
     link_path = BIN / name
     if link_path.is_symlink() or link_path.exists():
         link_path.unlink()
@@ -421,8 +435,9 @@ def cmd_install(args: argparse.Namespace) -> int:
     lock = load_lock()
     tools = list(args.only or DEFAULT_TOOLS) + list(args.include or [])
     try:
-        TOOLCHAIN.mkdir(exist_ok=True)
         check_tool_path(TOOLCHAIN)
+        TOOLCHAIN.mkdir(exist_ok=True)
+        check_tool_path(BIN)
         for name in tools:
             if name not in lock:
                 raise ToolchainError(f"unknown tool {name!r}")
@@ -431,9 +446,10 @@ def cmd_install(args: argparse.Namespace) -> int:
             # and are deliberately not put on PATH (ENGINEERING §2.3).
             link(path, {"python": "python3"}.get(name, name))
             print(f"ok  {name} {lock[name]['version']}", file=sys.stderr)
-    except OSError as e:
-        # Anything else that fails on a .toolchain owned by another user (the temporary
-        # directory, the links in .toolchain/bin) gets the same message (PR #83 review).
+    except PermissionError as e:
+        # Only a permission failure (the temporary directory, the links in .toolchain/bin on a
+        # .toolchain owned by another user) gets the ownership message; any other error keeps
+        # its own text (PR #83 review, round 2).
         raise ToolchainError(f"can't write {e.filename or '.toolchain'} ({e.strerror}); was .toolchain created by another user, e.g. with sudo? Fix its ownership, then run 'make toolchain'") from e
     return 0
 
