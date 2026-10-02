@@ -33,7 +33,7 @@ default = true
 [tool.ruff]
 target-version = "py313"
 line-length = 110
-src = ["backend", "scripts"]
+src = ["backend", "e2e", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "T20", "TID", "PL", "RUF"]
@@ -42,6 +42,7 @@ ignore = ["PLR2004"]
 [tool.ruff.lint.per-file-ignores]
 "scripts/tests/**" = ["S101", "S603", "PLC0415"]
 "backend/tests/**" = ["S101", "S104", "S105", "S106"]  # asserts; test addresses and fake credentials
+"e2e/harness/**" = ["S101"]
 
 [tool.pytest.ini_options]
 # pytest's built-in pastebin plugin uploads test output to bpa.st when run with --pastebin.
@@ -49,7 +50,7 @@ ignore = ["PLR2004"]
 # so no unlisted dev-time network flow exists (THREAT_MODEL §6, PR #65 review).
 addopts = "-p no:pastebin -p no:cacheprovider --strict-markers"
 testpaths = ["backend/tests"]
-pythonpath = ["backend"]
+pythonpath = ["backend", "e2e"]
 
 [tool.coverage.run]
 branch = true
@@ -63,5 +64,5 @@ skip_covered = true
 [tool.mypy]
 python_version = "3.13"
 strict = true
-mypy_path = "backend"
+mypy_path = "backend:e2e"
 explicit_package_bases = true

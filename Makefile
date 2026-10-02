@@ -184,7 +184,8 @@ COV_FLOOR_STRICT := 95
 COV_STRICT_MODULES := chain tax doxx
 
 .PHONY: test
-test: require-toolchain ## Run the backend tests with coverage (socket guard on; floors per ENGINEERING §3.3)
+test: require-toolchain ## Run the backend tests with coverage (socket guard on; floors per ENGINEERING §3.3; needs make test-tools)
+	@"$(SYS_PYTHON)" scripts/toolchain.py verify bitcoind >/dev/null || { echo "Run 'make test-tools' first: the integration tests need the pinned regtest bitcoind." >&2; exit 1; }
 	@# Plugins load only when named (PYTEST_DISABLE_PLUGIN_AUTOLOAD above); hypothesis is the one we use.
 	"$(ROOT)/.venv/bin/python" -m coverage erase
 	"$(ROOT)/.venv/bin/python" -m coverage run -m pytest -p hypothesis.extra.pytestplugin backend/tests
@@ -197,10 +198,10 @@ test: require-toolchain ## Run the backend tests with coverage (socket guard on;
 	done
 
 .PHONY: lint
-lint: require-toolchain ## Lint, format check and strict typing for the backend (ruff, mypy --strict)
-	"$(ROOT)/.venv/bin/ruff" check backend
-	"$(ROOT)/.venv/bin/ruff" format --check backend
-	"$(ROOT)/.venv/bin/mypy" backend/coinacct backend/tests
+lint: require-toolchain ## Lint, format check and strict typing for the backend and test harness (ruff, mypy --strict)
+	"$(ROOT)/.venv/bin/ruff" check backend e2e/harness
+	"$(ROOT)/.venv/bin/ruff" format --check backend e2e/harness
+	"$(ROOT)/.venv/bin/mypy" backend/coinacct backend/tests e2e/harness
 
 # --- checks (standard library only, so they run before any dependency exists) ---
 
