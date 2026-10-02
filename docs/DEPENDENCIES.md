@@ -82,7 +82,7 @@ Verified as described in [`ENGINEERING.md` §2.3](ENGINEERING.md#23-all-installs
 |---|---|---|---|---|
 | `actions/checkout` | Action | `3d3c42e5aac5ba805825da76410c181273ba90b1` (v7.0.1, released 2026-07-20); `contents: read`, `persist-credentials: false` | Check out the repo in CI | 2026-09-28, M0.1 |
 | Socket GitHub App | App | installed on this repository by the human (checks "Project Report" and "Pull Request Alerts") | Socket report on every PR | present by 2026-09-28 (seen on PR #7) |
-| Dependabot | GitHub feature | configured in M0.2 (monthly, grouped, 7-day cooldown) | Dependency update PRs | M0.2 |
+| Dependabot | GitHub feature | `.github/dependabot.yml`: `uv`, `npm` (pnpm workspace) and `github-actions`; monthly, one grouped PR per ecosystem, 7-day cooldown. Security updates are a repository setting (the owner's choice) | Dependency update PRs, reviewed under ENGINEERING §2.4 | 2026-10-01, M0.2 |
 
 ## Cooldown exceptions
 

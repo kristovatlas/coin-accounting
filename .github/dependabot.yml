@@ -1,0 +1,39 @@
+# Dependency update PRs (ENGINEERING §2.6): monthly, grouped, after a 7-day cooldown.
+# Every PR goes through the full §2.4 review: Socket report, the lockfile policy check
+# (scripts/check_lockfiles.py, which enforces the 7-day rule on every entry, including the
+# transitive ones Dependabot's cooldown doesn't cover) and the owner's approval by merging.
+# Security updates are a repository setting, not configured here, and ignore the cooldown.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: "/"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      python:
+        patterns: ["*"]
+    open-pull-requests-limit: 1
+
+  - package-ecosystem: npm   # pnpm workspace (frontend, e2e); the lockfile is pnpm-lock.yaml
+    directory: "/"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      javascript:
+        patterns: ["*"]
+    open-pull-requests-limit: 1
+
+  - package-ecosystem: github-actions   # keeps the SHA-pinned actions current
+    directory: "/"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 1
