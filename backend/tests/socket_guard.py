@@ -52,6 +52,7 @@ def installed() -> Iterator[None]:
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
     real_sendto = socket.socket.sendto
+    real_sendmsg = socket.socket.sendmsg
     real_getaddrinfo = socket.getaddrinfo
 
     def connect(self: socket.socket, address: Any) -> None:
@@ -63,8 +64,17 @@ def installed() -> Iterator[None]:
         return real_connect_ex(self, address)
 
     def sendto(self: socket.socket, data: Any, *args: Any) -> int:
-        _check(self.family, args[-1], "sendto")
+        if args:  # sendto(data, address) or sendto(data, flags, address)
+            _check(self.family, args[-1], "sendto")
         return real_sendto(self, data, *args)
+
+    def sendmsg(self: socket.socket, buffers: Any, *args: Any, **kwargs: Any) -> int:
+        # sendmsg(buffers[, ancdata[, flags[, address]]]): an unconnected datagram socket can send
+        # to `address` without connect() or sendto().
+        address = args[2] if len(args) >= 3 else kwargs.get("address")
+        if address is not None:
+            _check(self.family, address, "sendmsg")
+        return real_sendmsg(self, buffers, *args, **kwargs)
 
     def getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
         if host is not None and not is_loopback(host):
@@ -87,6 +97,7 @@ def installed() -> Iterator[None]:
         mp.setattr(socket.socket, "connect", connect)
         mp.setattr(socket.socket, "connect_ex", connect_ex)
         mp.setattr(socket.socket, "sendto", sendto)
+        mp.setattr(socket.socket, "sendmsg", sendmsg)
         mp.setattr(socket, "getaddrinfo", getaddrinfo)
         # Older resolver entry points that bypass getaddrinfo. Loopback stays allowed: the stdlib
         # HTTP server asks getfqdn("127.0.0.1") when it binds.

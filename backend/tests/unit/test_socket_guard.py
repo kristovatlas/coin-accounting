@@ -54,6 +54,18 @@ def test_legacy_resolver_calls_are_blocked_t305(lookup: str) -> None:
         getattr(socket, lookup)("example.invalid")
 
 
+def test_sendmsg_to_a_non_loopback_address_is_blocked_t305() -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        with pytest.raises(OutboundConnectionBlockedError, match="sendmsg"):
+            s.sendmsg([b"x"], [], 0, ("192.0.2.1", 53))
+
+
+def test_sendto_without_an_address_still_fails_normally() -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        with pytest.raises(TypeError):
+            s.sendto(b"x")  # type: ignore[call-overload]  # the missing address is the point
+
+
 def test_reverse_lookup_of_a_non_loopback_address_is_blocked_t305() -> None:
     with pytest.raises(OutboundConnectionBlockedError, match="getnameinfo"):
         socket.getnameinfo(("192.0.2.1", 80), 0)
