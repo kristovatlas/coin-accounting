@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -91,7 +92,8 @@ class AgentGuardTests(unittest.TestCase):
 
     def test_allows_repository_make_targets_and_normal_commands(self):
         for cmd in ("make bootstrap", "make propose-js PKG=react@19.0.0 WORKSPACE=frontend DEV=1",
-                    "make check BASE=origin/main", "make propose-py PKG='a==1'", "git log --oneline", "make"):
+                    "make check BASE=origin/main", "make propose-py PKG='a==1'", "git log --oneline", "make",
+                    "make test", "make lint"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.bash(cmd), 0)
 
@@ -159,6 +161,29 @@ class MakefileOverrideTests(unittest.TestCase):
         self.assertNotIn("/usr/bin/env", out)
         self.assertNotIn("true scripts/toolchain.py", out)
         self.assertIn("toolchain.py verify sfw pnpm uv node python", out)
+
+    def test_a_failed_strict_coverage_floor_fails_make_test_without_errexit(self):
+        # PR #100 review, round 2: GNU Make 3.81 (macOS) has no .SHELLFLAGS, so recipes run without
+        # -e. Run the floor loop that way, with a stub coverage that fails only for chain/.
+        out = self.dry_run("test")
+        lines = out.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith("for m in "))
+        end = next(i for i in range(start, len(lines)) if lines[i].strip().startswith("done"))
+        loop = "\n".join(lines[start:end + 1])
+        with tempfile.TemporaryDirectory() as d:
+            for module in ("chain", "tax"):
+                os.makedirs(os.path.join(d, "backend", "coinacct", module))
+            venv_python = next(part for part in loop.split('"') if part.endswith("/.venv/bin/python"))
+            results = {}
+            for failing in ("chain", "none"):
+                stub = os.path.join(d, f"fakepython-{failing}")
+                with open(stub, "w") as f:
+                    f.write(f"#!/bin/sh\ncase \"$*\" in *coinacct/{failing}/*) exit 2;; esac\nexit 0\n")
+                os.chmod(stub, 0o755)
+                script = loop.replace(f'"{venv_python}"', f'"{stub}"')
+                results[failing] = subprocess.run(["/bin/bash", "-c", script], cwd=d, capture_output=True).returncode
+        self.assertNotEqual(results["chain"], 0)
+        self.assertEqual(results["none"], 0)
 
     def test_install_targets_are_wired_to_the_approval_gate_and_the_verifier(self):
         # Round 5: removing either prerequisite must fail a test (ENGINEERING §3.5).

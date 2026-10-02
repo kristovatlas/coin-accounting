@@ -41,14 +41,30 @@ ignore = ["PLR2004"]
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/tests/**" = ["S101", "S603", "PLC0415"]
-"backend/tests/**" = ["S101"]
+"backend/tests/**" = ["S101", "S104", "S105", "S106"]  # asserts; test addresses and fake credentials
 
 [tool.pytest.ini_options]
 # pytest's built-in pastebin plugin uploads test output to bpa.st when run with --pastebin.
 # It is built in, so PYTEST_DISABLE_PLUGIN_AUTOLOAD doesn't stop it; disable it explicitly
 # so no unlisted dev-time network flow exists (THREAT_MODEL §6, PR #65 review).
-addopts = "-p no:pastebin"
+addopts = "-p no:pastebin -p no:cacheprovider --strict-markers"
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+
+[tool.coverage.run]
+branch = true
+source = ["backend/coinacct"]
+data_file = ".coverage"
+
+[tool.coverage.report]
+# coverage.py rounds the total to `precision` digits before comparing it with --fail-under; with
+# the default of 0, 94.6 % would pass the 95 % floor (ENGINEERING §3.3).
+precision = 2
+show_missing = true
+skip_covered = true
 
 [tool.mypy]
 python_version = "3.13"
 strict = true
+mypy_path = "backend"
+explicit_package_bases = true
