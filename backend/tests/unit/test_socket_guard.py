@@ -105,3 +105,12 @@ def test_loopback_connections_still_work() -> None:
 )
 def test_loopback_classification(host: object, expected: bool) -> None:
     assert is_loopback(host) is expected
+
+
+def test_the_guard_wraps_every_other_plugins_configure_and_unconfigure_t305() -> None:
+    # pluggy runs newest-registered hooks first; tryfirst/trylast keep the guard on around the
+    # built-in and `-p` plugins (e.g. pastebin, which uploads in its own pytest_unconfigure).
+    from tests import conftest  # noqa: PLC0415 - the hooks under test live there
+
+    assert conftest.pytest_configure.pytest_impl["tryfirst"] is True  # type: ignore[attr-defined]
+    assert conftest.pytest_unconfigure.pytest_impl["trylast"] is True  # type: ignore[attr-defined]

@@ -16,9 +16,13 @@ from tests import socket_guard
 _guard = ExitStack()
 
 
+# tryfirst/trylast: pluggy calls hooks newest-registered first, so without these the guard would
+# go up after, and come down before, the built-in and `-p` plugins' own configure/unconfigure.
+@pytest.hookimpl(tryfirst=True)
 def pytest_configure(config: pytest.Config) -> None:
     _guard.enter_context(socket_guard.installed())
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_unconfigure(config: pytest.Config) -> None:
     _guard.close()

@@ -189,10 +189,12 @@ test: require-toolchain ## Run the backend tests with coverage (socket guard on;
 	"$(ROOT)/.venv/bin/python" -m coverage erase
 	"$(ROOT)/.venv/bin/python" -m coverage run -m pytest -p hypothesis.extra.pytestplugin backend/tests
 	"$(ROOT)/.venv/bin/python" -m coverage report --fail-under=$(COV_FLOOR_ALL)
+	@# `|| exit 1`: GNU Make 3.81 (macOS) has no .SHELLFLAGS, so without -e the loop would
+	@# return the last module's status and hide an earlier failed floor.
 	@for m in $(COV_STRICT_MODULES); do \
 	  if [ -d "backend/coinacct/$$m" ]; then \
 	    echo "coverage floor $(COV_FLOOR_STRICT)% for $$m/"; \
-	    "$(ROOT)/.venv/bin/python" -m coverage report --include="backend/coinacct/$$m/*" --fail-under=$(COV_FLOOR_STRICT); \
+	    "$(ROOT)/.venv/bin/python" -m coverage report --include="backend/coinacct/$$m/*" --fail-under=$(COV_FLOOR_STRICT) || exit 1; \
 	  fi; \
 	done
 
