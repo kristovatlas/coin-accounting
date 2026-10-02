@@ -45,7 +45,11 @@ CAPABILITY_OF_MODULE = {
                 "asyncio.open_connection", "asyncio.start_server", "asyncio.open_unix_connection",
                 "asyncio.start_unix_server", "asyncio.streams"},
     "webbrowser": {"webbrowser"},
-    "subprocess": {"subprocess", "pty", "ctypes", "multiprocessing", "concurrent.futures.process"},
+    "subprocess": {"subprocess", "pty", "multiprocessing", "concurrent.futures.process"},
+    # Foreign function calls can do anything a C program can, so they get their own capability.
+    # Architecture §1: the launcher needs prctl(PR_SET_DUMPABLE, 0) on Linux, which Python's
+    # standard library only reaches through ctypes.
+    "ctypes": {"ctypes", "_ctypes"},
     "filesystem": {"tempfile", "shutil", "sqlite3", "glob", "fileinput", "pathlib.Path", "pathlib.PosixPath",
                    "pathlib.WindowsPath", "io.open", "io.FileIO", "codecs.open", "os.fdopen", "os.open"},
 }
@@ -69,6 +73,7 @@ CAPABILITY_ALLOWED = {
     "network": {"rpc", "prices", "launcher"},
     "webbrowser": {"launcher"},
     "subprocess": {"storage/volume.py"},
+    "ctypes": {"launcher"},
     "filesystem": {"storage", "launcher"},
 }
 

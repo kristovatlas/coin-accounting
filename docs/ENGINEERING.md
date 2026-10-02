@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.25 |
+| Version | 0.2.26 |
 | Last updated | 2026-10-01 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -294,7 +294,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 
 | Rule | Why | Enforcement |
 |---|---|---|
-| Import edges and capabilities (network, `webbrowser`, `subprocess`, filesystem, clock, `importlib`/`__import__`) follow the per-path rules in [architecture §2](architecture.md#2-module-structure-dependency-rules-and-capability-rules) | T-305, T-402, purity of `tax/`/`doxx/`/`domain/` | `scripts/check-architecture` (custom AST check, no dependency) + ruff `banned-api` per path. Hygiene, not a security boundary |
+| Import edges and capabilities (network, `webbrowser`, `subprocess`, `ctypes` (launcher only, for `prctl`), filesystem, clock, `importlib`/`__import__`) follow the per-path rules in [architecture §2](architecture.md#2-module-structure-dependency-rules-and-capability-rules) | T-305, T-402, purity of `tax/`/`doxx/`/`domain/` | `scripts/check-architecture` (custom AST check, no dependency) + ruff `banned-api` per path. Hygiene, not a security boundary |
 | No floats in `tax/`: no float literals, **no true division `/` or `/=` at all** (`//` for exact integer division; Decimal division only through a named helper in `domain/`), no `float()`, no `math`; money arrives as strings or `Decimal`; the `decimal` context in `tax/` traps `FloatOperation`; property tests check that no intermediate value is a float | T-502 | custom AST check + runtime trap + tests |
 | No `eval`/`exec`, `pickle`, `shell=True` | Code execution | ruff (`S` rules) + banned-api |
 | No `dangerouslySetInnerHTML`; no runtime CSS-in-JS (it injects `<style>` tags that the CSP blocks); no `setAttribute('style', …)` | T-104 | ESLint rules + E2E CSP-violation check (§3.1) |
@@ -411,3 +411,4 @@ A change is done only when:
 | 2026-10-01 | 0.2.23 | `make audit` uses a pinned `osv-scanner` binary (pending approval; ADR 0027) instead of `pip-audit` + `pnpm audit`: trust-on-first-use against GitHub, run with an empty config, `--no-resolve` and an empty environment; `check_repo_files` rejects a committed `osv-scanner.toml` |
 | 2026-10-02 | 0.2.24 | M0.3: `make test` (pytest with the socket guard, coverage floors) and `make lint` (ruff, mypy --strict) for `backend/`; agents may run both |
 | 2026-10-02 | 0.2.25 | M0.3: the regtest harness (`e2e/harness/regtest.py`); `make test` runs the integration tests and needs `make test-tools` |
+| 2026-10-02 | 0.2.26 | §5.2: `ctypes` is its own capability in `scripts/check_architecture.py`, allowed only in `launcher.py` (for `prctl(PR_SET_DUMPABLE, 0)`, architecture §1); `storage/volume.py` no longer gets it with `subprocess` |
