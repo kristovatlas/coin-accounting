@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.7.22 (M0 in progress) |
+| Version | 0.7.23 (M0 in progress) |
 | Last updated | 2026-10-01 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -378,3 +378,4 @@ This applies to almost any project that vets its dependencies.
 | 2026-10-01 | 0.7.20 | T-603: actionlint and zizmor are pinned toolchain binaries (ADR 0026), hash-pinned, trust-on-first-use against GitHub (the provenance listing isn't verified yet). zizmor runs its online audits (impostor-commit, known-vulnerable-actions, ref-confusion, ref-version-mismatch, stale-action-refs, typosquat-uses) with `--no-config`; `check_repo_files` rejects linter config and zizmor ignore comments: a new dev-time flow to the GitHub API (§6) with a dedicated no-permission token; both tools run with an otherwise empty environment, so neither sees the caller's tokens. actionlint runs no unpinned helpers. Architecture §9 shows the flow (0.2.2). CI runs them once the pins are merged (#94). Status stays Implemented (partly) |
 | 2026-10-01 | 0.7.21 | T-603 (#69): verification now also fails on a writable toolchain tree (`make toolchain` re-hardens it). `remove_tree` refuses a symlinked tool directory before any chmod. A failed hardening leaves no valid marker. Limits (root, owner `chmod`) are recorded in ENGINEERING §2.3; PR #83 review: tool paths with a symlinked component (`.toolchain`, `.toolchain/bin`, `.toolchain/<name>`, the version directory) are refused, and an unreadable directory fails the digest and write-bit checks instead of being skipped |
 | 2026-10-01 | 0.7.22 | §6, T-601 and T-603 (ADR 0027): `make audit` uses a pinned `osv-scanner`, trust-on-first-use against GitHub. It adds a dev-time flow to `api.osv.dev` carrying the local lockfiles' package names and versions (for merged lockfiles, what the public repository already shows) and the requester's IP address. It runs with an empty config from outside the repository (a committed `osv-scanner.toml` is also rejected), `--no-resolve` (no deps.dev or registry lookups) and an empty environment. Statuses stay Planned |
+| 2026-10-01 | 0.7.23 | T-603 (#67): the pinned pnpm 12 is a Rust binary with no embedded Node runtime (no V8 or Node symbols), so it doesn't depend on the pinned Node. The unused `npm-tgz` install path and its Node chaining are removed, and the shipped pin type (`tar` plus sha512 integrity) is now tested. The pnpm packages carry an npm registry signature and a SLSA provenance attestation, not yet verified at install (#15) |
