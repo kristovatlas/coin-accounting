@@ -176,7 +176,7 @@
   },
   "actionlint": {
     "version": "1.7.12",
-    "source": "GitHub release asset digest, matching the publisher's actionlint_1.7.12_checksums.txt. Published 2026-03-30. Workflow checker (ENGINEERING \u00a72.7); run by `make lint-workflows`, not installed by `make toolchain`.",
+    "source": "GitHub release asset digest, trust-on-first-use against GitHub (ADR 0026): at pin time it matched the release's actionlint_1.7.12_checksums.txt (same release) and GitHub's SLSA provenance listing (rhysd/actionlint release.yaml @ v1.7.12; signatures not verified). Published 2026-03-30. Workflow checker (ENGINEERING \u00a72.7): run by `make lint-workflows` without its shellcheck/pyflakes integrations; installed by `make lint-tools`, not by `make toolchain`.",
     "linux-x86_64": {
       "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz",
       "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
@@ -204,7 +204,7 @@
   },
   "zizmor": {
     "version": "1.30.1",
-    "source": "GitHub release asset digest; the publisher ships no checksum file, so this is trust-on-first-use (like sfw). Published 2026-09-09. Workflow security checker (ENGINEERING \u00a72.7); run with --offline by `make lint-workflows`, not installed by `make toolchain`.",
+    "source": "GitHub release asset digest, trust-on-first-use against GitHub (ADR 0026): no checksum file is published, and GitHub's SLSA provenance listing for it (zizmorcore/zizmor release-binaries.yml @ v1.30.1) was read at pin time but its signatures not verified. Published 2026-09-09. Workflow security checker (ENGINEERING \u00a72.7): `make lint-workflows` runs it with its online audits (GitHub API, no-permission ZIZMOR_GITHUB_TOKEN, empty environment, --no-config); installed by `make lint-tools`, not by `make toolchain`.",
     "linux-x86_64": {
       "url": "https://github.com/zizmorcore/zizmor/releases/download/v1.30.1/zizmor-x86_64-unknown-linux-gnu.tar.gz",
       "sha256": "e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a",

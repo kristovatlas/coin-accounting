@@ -166,15 +166,23 @@ class MakefileOverrideTests(unittest.TestCase):
         # checks its own lock (its dry run shows the call without --approved).
         gate, verify = "dependency or toolchain files differ", "toolchain.py verify sfw pnpm uv node python"
         config = "install config files"
-        for args, needs in ((("bootstrap",), (gate, verify)),
+        pth = ("-iname '_virtualenv*' -delete", "scripts/check_pth.py .venv", "|| rc=$?")
+        for args, needs in ((("bootstrap",), (gate, verify, *pth)),
                             (("toolchain",), ("scripts/toolchain.py install \n",)),
                             (("propose-js", "PKG=a@1", "WORKSPACE=frontend"), (config, verify)),
                             (("propose-py", "PKG=a==1"), (config, verify, "add --no-sync --no-build")),
                             (("lint-tools",), ("scripts/toolchain.py install --only actionlint zizmor \n",)),
-                            (("lint-workflows",), ("toolchain.py verify actionlint zizmor", "zizmor\" --offline")),
+                            (("lint-workflows",), ("toolchain.py verify actionlint zizmor", "scripts/check_repo_files.py", "ZIZMOR_GITHUB_TOKEN",
+                                                   "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin \"",
+                                                   "actionlint\" -no-color -shellcheck= -pyflakes=",
+                                                   "PATH=/usr/bin:/bin ZIZMOR_GITHUB_TOKEN=\"$ZIZMOR_GITHUB_TOKEN\" \"",
+                                                   "zizmor\" --no-config .")),
                             (("audit-tools",), ("scripts/toolchain.py install --only osv-scanner \n",)),
                             (("audit",), ("toolchain.py verify osv-scanner",))):
             out = self.dry_run(*args)
+            if args[0] == "lint-workflows":  # online audits on; no inherited environment (ADR 0026)
+                self.assertNotIn("--offline", out)
+                self.assertEqual(out.count("env -i "), 2, out)
             for text in needs:
                 with self.subTest(target=args[0], needs=text):
                     self.assertIn(text, out)
