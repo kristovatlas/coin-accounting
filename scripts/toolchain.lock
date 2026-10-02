@@ -232,7 +232,7 @@
   },
   "osv-scanner": {
     "version": "2.6.0",
-    "source": "GitHub release asset digest, matching the publisher's osv-scanner_SHA256SUMS. Published 2026-09-14. Vulnerability audit of the lockfiles (`make audit`); queries api.osv.dev with package names and versions. Installed by `make audit-tools`, not by `make toolchain`.",
+    "source": "GitHub release asset digest: trust-on-first-use against GitHub (ADR 0027); matches the publisher's osv-scanner_SHA256SUMS, in the same release. Published 2026-09-14. Vulnerability audit of the lockfiles (`make audit`); queries api.osv.dev with package names and versions. Installed by `make audit-tools`, not by `make toolchain`.",
     "linux-x86_64": {
       "url": "https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64",
       "sha256": "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108",

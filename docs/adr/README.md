@@ -33,5 +33,6 @@ MADR-format records of significant decisions (see [ADR 0001](0001-record-decisio
 | [0024](0024-native-code-dev-tools.md) | Prebuilt native-code wheels for four development tools |
 | [0025](0025-coverage-startup-hook.md) | Allow coverage.py's own start-up hook, pinned by content |
 | [0026](0026-workflow-linters.md) | actionlint and zizmor as pinned toolchain binaries, with zizmor's online audits |
+| [0027](0027-osv-scanner-audit.md) | osv-scanner as the pinned vulnerability audit, with a dev-time flow to OSV |
 
 Template: [0000-template.md](0000-template.md).

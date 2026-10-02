@@ -162,7 +162,7 @@ class AdrBaseComparisonTests(unittest.TestCase):
 class ToolchainTests(unittest.TestCase):
     def test_lock_has_every_tool_for_every_platform(self):
         lock = toolchain.load_lock()
-        for name in ("sfw", "pnpm", "uv", "node", "python", "bitcoind"):
+        for name in ("sfw", "pnpm", "uv", "node", "python", "bitcoind", "osv-scanner"):
             for key in ("linux-x86_64", "linux-arm64", "darwin-arm64", "darwin-x86_64"):
                 with self.subTest(tool=name, platform=key):
                     entry = lock[name][key]

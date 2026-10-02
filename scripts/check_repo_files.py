@@ -11,7 +11,9 @@ zizmor and actionlint read their own config files from the repository they check
 honours inline `zizmor: ignore[...]` comments in any file it audits (workflows, dependabot.yml,
 and local actions anywhere in the tree), so a single PR could add an impostor-commit pin and
 quietly switch that audit off. Linter config files, and ignore comments in any tracked YAML file,
-are therefore rejected; adding a reviewed config means changing this check (ADR 0026). The YAML
+are therefore rejected; adding a reviewed config means changing this check (ADR 0026). The same
+goes for osv-scanner.toml, whose IgnoredVulns and PackageOverrides entries hide audit findings
+(ADR 0027; `make audit` also passes its own empty config). The YAML
 contents are read from the index (what will be committed), not the working tree.
 
 Usage:
@@ -30,8 +32,9 @@ if sys.version_info < (3, 9):  # noqa: UP036 - runs on the host Python
     sys.exit("check_repo_files.py needs Python 3.9 or newer")
 
 BANNED_MODES = {"120000": "symbolic link", "160000": "git submodule"}
-# zizmor reads zizmor.yml / .github/zizmor.yml; actionlint reads .github/actionlint.yml (ADR 0026).
-LINTER_CONFIG_NAMES = {"zizmor.yml", "zizmor.yaml", "actionlint.yml", "actionlint.yaml"}
+# zizmor reads zizmor.yml / .github/zizmor.yml; actionlint reads .github/actionlint.yml (ADR 0026);
+# osv-scanner reads osv-scanner.toml next to each lockfile it scans, and can ignore findings there (ADR 0027).
+LINTER_CONFIG_NAMES = {"zizmor.yml", "zizmor.yaml", "actionlint.yml", "actionlint.yaml", "osv-scanner.toml"}
 ZIZMOR_IGNORE = re.compile(rb"zizmor\s*:\s*ignore", re.IGNORECASE)
 
 
@@ -63,7 +66,7 @@ def check(repo: Path) -> list[str]:
         elif name == ".gitmodules":
             errors.append("'.gitmodules': submodule configuration (banned, ADR 0023)")
         elif name.rsplit("/", 1)[-1].lower() in LINTER_CONFIG_NAMES:
-            errors.append(f"{name!r}: workflow-linter config could switch checks off (ADR 0026)")
+            errors.append(f"{name!r}: linter or audit config could switch checks off (ADR 0026, ADR 0027)")
         elif name.lower().endswith((".yml", ".yaml")):
             yaml_blobs.append((meta.split(b" ")[1].decode(), name))
     # zizmor audits workflows, dependabot.yml and local actions anywhere in the tree (ADR 0026).
