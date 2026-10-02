@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import socket
 
+from tests import socket_guard
 from tests.socket_guard import OutboundConnectionBlockedError
 
 try:
@@ -17,7 +18,11 @@ except OutboundConnectionBlockedError:
     AT_IMPORT = "blocked"
 except OSError:
     AT_IMPORT = "reached the resolver"
+# This block was on purpose; the guard records every block and would otherwise fail the first test.
+EXPECTED_RECORD = list(socket_guard.BLOCKED)
+socket_guard.BLOCKED.clear()
 
 
 def test_the_guard_is_on_while_test_modules_are_imported_t305() -> None:
     assert AT_IMPORT == "blocked"
+    assert EXPECTED_RECORD == ["socket guard: name lookup of 'example.invalid' (T-305)"]

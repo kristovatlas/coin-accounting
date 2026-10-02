@@ -9,10 +9,19 @@ from __future__ import annotations
 
 import re
 import socket
+from collections.abc import Iterator
 
 import pytest
 
+from tests import socket_guard
 from tests.socket_guard import OutboundConnectionBlockedError, is_loopback
+
+
+@pytest.fixture(autouse=True)
+def _expected_blocks() -> Iterator[None]:
+    """These tests trigger blocks on purpose; clear them before conftest's check runs."""
+    yield
+    socket_guard.BLOCKED.clear()
 
 
 def test_connect_to_a_non_loopback_ipv4_address_is_blocked_t305() -> None:
@@ -114,3 +123,15 @@ def test_the_guard_wraps_every_other_plugins_configure_and_unconfigure_t305() ->
 
     assert conftest.pytest_configure.pytest_impl["tryfirst"] is True  # type: ignore[attr-defined]
     assert conftest.pytest_unconfigure.pytest_impl["trylast"] is True  # type: ignore[attr-defined]
+
+
+def test_a_swallowed_block_is_still_recorded_and_fails_the_check_t305() -> None:
+    # Telemetry code typically wraps its phone-home in `except Exception`.
+    try:
+        socket.getaddrinfo("telemetry.example.invalid", 443)
+    except Exception:  # noqa: S110 - the swallowing is the point
+        pass
+    assert socket_guard.BLOCKED == ["socket guard: name lookup of 'telemetry.example.invalid' (T-305)"]
+    with pytest.raises(OutboundConnectionBlockedError, match=re.escape("telemetry.example.invalid")):
+        socket_guard.raise_if_blocked()
+    assert socket_guard.BLOCKED == []

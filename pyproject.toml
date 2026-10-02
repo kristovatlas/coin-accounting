@@ -57,6 +57,9 @@ source = ["backend/coinacct"]
 data_file = ".coverage"
 
 [tool.coverage.report]
+# coverage.py rounds the total to `precision` digits before comparing it with --fail-under; with
+# the default of 0, 94.6 % would pass the 95 % floor (ENGINEERING §3.3).
+precision = 2
 show_missing = true
 skip_covered = true
 

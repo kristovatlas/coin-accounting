@@ -205,7 +205,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 
 ### 3.2 Socket guard (tests)
 
-A pytest fixture, active for the whole suite, patches `socket.socket.connect` and `socket.getaddrinfo`. It fails any test that opens a connection or does a DNS lookup other than:
+A pytest hook (`pytest_configure` in `backend/tests/conftest.py`, before test modules are collected, until `pytest_unconfigure`) patches `socket.socket.connect`, `connect_ex`, `sendto` and `sendmsg`, `socket.getaddrinfo` and the legacy resolver calls. Every blocked attempt is recorded, so a test fails even if the code under test swallows the error, and attempts outside any test fail the session. It allows only:
 - loopback to the regtest node
 - loopback to the app under test
 
@@ -223,7 +223,7 @@ Price-fetch tests use a local stub server. The guard catches accidental phoning 
   - coverage.py ≥ 7.10 with `[run] parallel = true`, `patch = ["subprocess"]` and `sigterm = true`
   - the server is shut down gracefully so its data is written
   - `coverage combine` merges the results
-- Floors are minimums, not targets.
+- Floors are minimums, not targets. They compare unrounded totals (`precision = 2`): coverage.py rounds before comparing, so at its default 94.6 % would pass a 95 % floor.
 - A merge-base comparison fails a PR that lowers coverage in a floored module by more than 0.5 percentage points. The ratchet uses the deterministic unit + integration numbers only.
 
 ### 3.4 Mutation testing
