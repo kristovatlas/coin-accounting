@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.20 |
+| Version | 0.2.21 |
 | Last updated | 2026-10-01 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -54,7 +54,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
 | Auto-sync | `UV_NO_SYNC=1` is exported by the `Makefile` and required in `AGENTS.md`, so `uv run` never locks or syncs by itself |
 | Sources | PyPI only. No extra indexes, no `[tool.uv.sources]` git, URL or path entries, no PEP 508 direct URLs (CI check, §2.5) |
 | Lockfile | `uv.lock` (with hashes) committed; installs use `--locked` |
-| `.pth` files | Wheels can ship `.pth` files that run on every interpreter start. `make bootstrap` runs `scripts/check_pth.py` right after installing and fails on any `.pth` file not on its allowlist (only uv's own `_virtualenv.pth`). CI runs it too once CI installs dependencies (#44) |
+| `.pth` files | Wheels can ship `.pth` files that run on every interpreter start. `make bootstrap` runs `scripts/check_pth.py` right after installing and fails on any `.pth` file not on its allowlist. Two are allowed. One is uv's own `_virtualenv.pth`, and only with uv's exact content, alongside the `_virtualenv.py` it imports with uv's hash, both regular files. Nothing else that `import _virtualenv` could load may exist: no `_virtualenv` package, no other `_virtualenv.*` file, and no cached bytecode for it at all, since a `.pyc` with a copied header would run anything. `make bootstrap` deletes those caches before the check, and the venv's Python rebuilds them from uv's verified source. Names are compared case-insensitively. No installed package's `RECORD` may claim any of these (PR #74 review, rounds 1–2). The other is coverage.py's `a1_coverage.pth`, which starts subprocess measurement only when `COVERAGE_PROCESS_START`/`COVERAGE_PROCESS_CONFIG` is set (§3.3). It is allowed only with its pinned sha256, as a regular file, claimed by coverage's own `RECORD` with that hash, and with nothing else providing the `coverage` module (ADR 0025). CI runs it too once CI installs dependencies (#44) |
 
 ### 2.3 All installs go through Socket Firewall, via the repo's scripts
 
@@ -70,6 +70,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | `make update-deps` | Batch update (§2.6), lockfile-only, then the same review |
   | `make update-sfw` | Reviewed update of the pinned `sfw` version and checksum |
   | `make test-tools` | Pinned, verified test tooling downloads (see "Non-package downloads") |
+  | `make lint-tools` / `make lint-workflows` | Install the pinned actionlint and zizmor; check the workflows with them (§2.7, ADR 0026) |
   | `make audit` | `pip-audit` and `pnpm audit` against the lockfiles (tools locked as dev dependencies; network through `sfw`) |
 
   Contributors, AI agents and CI all use these targets. CI jobs call `make toolchain` and `make bootstrap`, never raw installers.
@@ -94,6 +95,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | Node.js | `SHASUMS256.txt` verified against the Node release keys |
   | Python | Pinned interpreter build checked against a committed SHA-256 |
   | `bitcoind` (regtest) | `SHA256SUMS` plus a threshold of builder signatures (pinned `guix.sigs` builder keys), minimum and latest supported versions |
+  | actionlint, zizmor | Committed per-platform SHA-256 of the GitHub release asset: trust-on-first-use against GitHub, like `sfw`. At pin time it was cross-checked against actionlint's `checksums.txt` and GitHub's SLSA provenance listing; the provenance signatures aren't verified yet (ADR 0026) |
   | Playwright browsers | Pinned `@playwright/test` version; each downloaded browser archive checked against a committed per-platform SHA-256; fails closed if no hash is recorded |
 
 - **Enforcement:** a CI check (`scripts/check-install-commands`) scans the `Makefile`, `scripts/`, `.github/workflows/` and config files for install or fetch-and-run commands without the `sfw` wrapper. It can be bypassed by obfuscation, so it is **hygiene, not a security boundary** (ADR 0022: the Claude Code guard and this check catch accidental or habitual installs; deliberate evasion is accepted risk R-8), and it allowlists documentation files that quote the banned commands. `AGENTS.md` repeats the rule for agents.
@@ -131,12 +133,14 @@ The cooldown only applies when versions are *resolved*. A hand-edited or bot-gen
 - our `package.json` files have no lifecycle scripts, and there is no `.pnpmfile.*` and no `configDependencies`
 - the pnpm lockfile is parsed in full. pnpm 12 can write multi-document lockfiles, and scanners that read only the first document report zero dependencies **(verify at setup that the Socket App and Dependabot handle this)**
 
-**Status (M0.2):** `scripts/check_lockfiles.py` runs in `make check` and CI, on the pinned Python once it verifies, otherwise the host's (3.11+), and its tests run on that interpreter too. It checks every `uv.lock` entry: source, file host, a file name matching the entry's name and version, sha256 and age. Declared Python dependencies without a `uv.lock` fail. It also checks our `package.json` files (lifecycle scripts, `configDependencies` and `packageManager`, including escaped keys) and `pnpm-workspace.yaml`:
+**Status (M0.2):** `scripts/check_lockfiles.py` runs in `make check` and CI, on the pinned Python once it verifies, otherwise the host's (3.11+), and its tests run on that interpreter too. It checks every `uv.lock` entry: source, a file URL of exactly PyPI's shape (`https://files.pythonhosted.org/packages/xx/yy/<60 hex>/<file>`, so no query, fragment, `%`-escape, backslash or dot segment), a file name from that URL matching the entry's name and version, sha256 and age. Declared Python dependencies without a `uv.lock` fail. It also checks our `package.json` files (lifecycle scripts, `configDependencies` and `packageManager`, including escaped keys) and `pnpm-workspace.yaml`:
 - no `configDependencies` and no backslashes
-- no `pnpmfile`, `globalPnpmfile`, `sharedWorkspaceLockfile` or `gitBranchLockfile` setting
-- `ignorePnpmfile: true` must be present
+- no `pnpmfile`, `globalPnpmfile`, `sharedWorkspaceLockfile`, `gitBranchLockfile`, `lockfile` or `lockfileDir` setting
+- no non-ASCII text outside full-line comments, and no byte-order mark (it would hide a first-line key from the text checks)
+- none of these YAML constructs: explicit keys (`?`), tags, anchors, aliases, merge keys, document markers, or a flow collection at the start of a line. This is a text heuristic, not a YAML parser; the approval gate and the owner's review of `pnpm-workspace.yaml` cover what it doesn't model
+- `ignorePnpmfile: true` must be present, exactly once
 
-A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile part lands with the first JavaScript dependency; until then, any `pnpm-lock*.yaml` in the tree fails the check. There are no cooldown exceptions yet, so the check allows none: recording one (§2.6) means extending the check in the same PR. **Known limit, accepted by the owner (PR #63):** the age check trusts the `upload-time` recorded in `uv.lock`, so a hand-edited lockfile could back-date a package. Every lockfile change still needs the owner's approval with the Socket report (§2.4).
+A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile part lands with the first JavaScript dependency; until then, any `pnpm-lock*.yaml` in the tree, in any letter case, fails the check. The `scripts/check-lockfiles` wrapper and the Makefile (its `SYS_PYTHON`, which also runs every toolchain verification) find the host `python3` on `PATH` skipping `.toolchain/bin` and the pinned binary, so the pinned Python never verifies itself; it runs only after that host interpreter has verified it. There are no cooldown exceptions yet, so the check allows none: recording one (§2.6) means extending the check in the same PR. **Known limit, accepted by the owner (PR #63):** the age check trusts the `upload-time` recorded in `uv.lock`, so a hand-edited lockfile could back-date a package. Every lockfile change still needs the owner's approval with the Socket report (§2.4).
 
 ### 2.6 Updating dependencies
 
@@ -154,7 +158,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **GitHub Actions:**
   - pinned to full commit SHAs with a version comment
   - only `actions/*` or vetted publishers
-  - `zizmor` and `actionlint` run on workflow files (they catch impostor-commit pins and unsafe patterns). They're pinned binaries (§2.3), installed by `make lint-tools` and run by `make lint-workflows`; zizmor runs with `--offline`. CI runs them once the pins are on `main`
+  - `zizmor` and `actionlint` run on workflow files (they catch impostor-commit pins and unsafe patterns). They're pinned binaries (§2.3), installed by `make lint-tools` and run by `make lint-workflows`. actionlint runs without its shellcheck/pyflakes integrations; both run with an otherwise empty environment, and zizmor runs its online audits (impostor-commit among them) over the whole repository against the GitHub API, with a dedicated no-permission `ZIZMOR_GITHUB_TOKEN` and no config file. `scripts/check_repo_files.py` rejects linter config files and `zizmor: ignore` comments in any tracked YAML file, so a PR can't switch a check off (ADR 0026). CI runs them once the pins are on `main` (#94)
   - `permissions: contents: read` by default, and the repository default token is read-only
   - `persist-credentials: false` on checkout
   - no `pull_request_target`
@@ -396,6 +400,7 @@ A change is done only when:
 | 2026-09-30 | 0.2.15 | M0.2: the lockfile policy check (`scripts/check-lockfiles`) runs in `make check` and CI; the pnpm part lands with the first JavaScript dependency, and a pnpm lockfile fails until then |
 | 2026-10-01 | 0.2.16 | M0.2: the `.pth` allowlist check exists (`scripts/check_pth.py`, run by `make bootstrap`); pytest's pastebin opt-out is pinned by a test |
 | 2026-10-01 | 0.2.17 | M0.2 verify at setup: no `packageManager` field (pnpm 12 resolves it from the registry on every command, #51); the lockfile check rejects it |
-| 2026-10-01 | 0.2.18 | §2.5: the lockfile check is hardened (#71, #72): file-name binding, declared dependencies without `uv.lock`, escaped keys, hook and lockfile settings, `ignorePnpmfile` required, any-case `.pnpmfile`, nested and branch pnpm lockfiles; the pinned Python is verified before `make check` uses it; the accepted upload-time limit is recorded |
-| 2026-10-01 | 0.2.19 | M0.2: actionlint 1.7.12 and zizmor 1.30.1 pinned (pending approval); `make lint-tools` / `make lint-workflows` |
-| 2026-10-01 | 0.2.20 | §2.3 (#69, #67): read-only trees are verified on use and re-applied by `make toolchain`; their limits (root, `chmod`, cleanup); pnpm described as a native binary |
+| 2026-10-01 | 0.2.18 | M0.2: the `.pth` allowlist also admits coverage.py's own `a1_coverage.pth`, pinned by content (ADR 0025, PR #78) |
+| 2026-10-01 | 0.2.19 | §2.5: the lockfile check is hardened (#71, #72): file-name binding, declared dependencies without `uv.lock`, escaped keys, hook and lockfile settings, `ignorePnpmfile` required, any-case `.pnpmfile`, nested and branch pnpm lockfiles; after PR #81 review: `lockfile`/`lockfileDir` and indirect YAML key syntax rejected, exact PyPI URL shape only, any-case lockfile names; the pinned Python is verified before `make check` or the wrapper uses it; the accepted upload-time limit is recorded |
+| 2026-10-01 | 0.2.20 | M0.2: actionlint 1.7.12 and zizmor 1.30.1 pinned (pending approval; ADR 0026); `make lint-tools` / `make lint-workflows`; actionlint without its shellcheck/pyflakes integrations; zizmor with its online audits and a dedicated no-permission token (§2.3, §2.7) |
+| 2026-10-01 | 0.2.21 | §2.3 (#69, #67): read-only trees are verified on use and re-applied by `make toolchain`; their limits (root, `chmod`, cleanup); pnpm described as a native binary |
