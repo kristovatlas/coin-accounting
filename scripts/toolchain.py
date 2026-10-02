@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -88,13 +89,18 @@ def download(url: str, dest: Path) -> None:
         raise ToolchainError(f"refusing non-HTTPS URL: {url}")
     req = urllib.request.Request(url, headers={"User-Agent": "coinacct-toolchain"})
     # Default SSL context: certificate and hostname verification are on.
-    with urllib.request.urlopen(req, timeout=60) as resp, dest.open("wb") as out:
-        total = 0
-        while chunk := resp.read(1 << 20):
-            total += len(chunk)
-            if total > MAX_DOWNLOAD:
-                raise ToolchainError(f"download too large: {url}")
-            out.write(chunk)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp, dest.open("wb") as out:
+            total = 0
+            while chunk := resp.read(1 << 20):
+                total += len(chunk)
+                if total > MAX_DOWNLOAD:
+                    raise ToolchainError(f"download too large: {url}")
+                out.write(chunk)
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        # Reported as what it is, with its cause: a certificate failure here can mean the
+        # connection is being intercepted (T-603), which must not look like a local problem.
+        raise ToolchainError(f"download failed: {url}: {getattr(e, 'reason', None) or e}") from e
 
 
 def safe_extract(archive: Path, target: Path) -> None:
@@ -139,11 +145,42 @@ def artifact_matches(entry: dict, path: Path) -> tuple[bool, str]:
     return actual == expected, f"sha512-{actual}"
 
 
+def check_tool_path(tool_dir: Path) -> None:
+    """Refuse a tool path with a symlink (or non-directory) anywhere from .toolchain down.
+
+    os.walk, chmod and rmtree follow a symlinked `.toolchain`, `.toolchain/<name>` or
+    `.toolchain/<name>/<version>`, so hardening, removing or digesting such a tree would act on
+    files outside .toolchain (#69, PR #83 review). Components that don't exist yet are fine.
+    """
+    try:
+        parts = tool_dir.relative_to(TOOLCHAIN).parts
+        chain = [TOOLCHAIN] + [TOOLCHAIN.joinpath(*parts[:i + 1]) for i in range(len(parts))]
+    except ValueError:
+        chain = [tool_dir]
+    for path in chain:
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return
+        except PermissionError as e:
+            raise ToolchainError(f"can't read {path} ({e.strerror}); was .toolchain created by another user, e.g. with sudo? Fix its ownership, then run 'make toolchain'") from e
+        if not stat.S_ISDIR(mode):
+            raise ToolchainError(f"{path} is not a real directory (a symlink?); refusing to use it. "
+                                 "Remove it, then run 'make toolchain'")
+
+
+def walk_error(error: OSError) -> None:
+    """os.walk's default skips directories it can't list, which would hide files from the
+    digest and the write-bit check: fail instead (PR #83 review)."""
+    raise ToolchainError(f"can't read {error.filename} ({error.strerror}); was .toolchain created by another user, e.g. with sudo? Fix its ownership, then run 'make toolchain'") from error
+
+
 def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
     entry = spec.get(key)
     if entry is None:
         raise ToolchainError(f"{name}: no artifact pinned for {key}")
     tool_dir = TOOLCHAIN / name / spec["version"]
+    check_tool_path(tool_dir)
     cached = read_marker(tool_dir)
     if cached and marker_current(cached, entry) and not force:
         binary = tool_dir / cached["bin"]
@@ -203,8 +240,14 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
             make_read_only(tool_dir)
         except ToolchainError:
             # Don't leave a valid marker on a half-hardened tree: the next run reinstalls (#69).
-            tool_dir.chmod(tool_dir.stat().st_mode | 0o700)
-            (tool_dir / MARKER).unlink(missing_ok=True)
+            # If even that fails, the original error is still the one reported, and the tree is
+            # still writable, which verification rejects (PR #83 review).
+            try:
+                if not tool_dir.stat().st_mode & 0o200:
+                    tool_dir.chmod(tool_dir.stat().st_mode | 0o700)
+                (tool_dir / MARKER).unlink(missing_ok=True)
+            except OSError:
+                pass
             raise
         return tool_dir / rel_bin
 
@@ -217,8 +260,10 @@ def make_read_only(tool_dir: Path) -> None:
     read-only it skips them. Leaving `.pyc` files out of the digest instead would let a
     tampered one run unnoticed.
     """
+    check_tool_path(tool_dir)
     paths = [Path(dirpath) / name
-             for dirpath, dirnames, filenames in os.walk(tool_dir, topdown=False, followlinks=False)
+             for dirpath, dirnames, filenames in os.walk(tool_dir, topdown=False, onerror=walk_error,
+                                                         followlinks=False)
              for name in filenames + dirnames]
     for path in [*paths, tool_dir]:
         try:
@@ -234,8 +279,9 @@ def make_read_only(tool_dir: Path) -> None:
 
 def writable_paths(tool_dir: Path) -> list[Path]:
     """Files and directories in an installed tree that still have a write bit (symlinks excluded)."""
+    check_tool_path(tool_dir)
     found = [tool_dir] if tool_dir.lstat().st_mode & 0o222 else []
-    for dirpath, dirnames, filenames in os.walk(tool_dir, followlinks=False):
+    for dirpath, dirnames, filenames in os.walk(tool_dir, onerror=walk_error, followlinks=False):
         for name in dirnames + filenames:
             mode = (Path(dirpath) / name).lstat().st_mode
             if not stat.S_ISLNK(mode) and mode & 0o222:
@@ -245,8 +291,9 @@ def writable_paths(tool_dir: Path) -> list[Path]:
 
 def remove_tree(tool_dir: Path) -> None:
     """Delete an installed tree, which `make_read_only` left without write bits."""
-    # A symlinked or non-directory tool_dir is refused before any chmod: os.walk would follow
-    # the top-level link and add write bits outside .toolchain (#69).
+    # A symlink anywhere from .toolchain down, or a non-directory tool_dir, is refused before any
+    # chmod: os.walk, chmod and rmtree would follow it and act outside .toolchain (#69, PR #83).
+    check_tool_path(tool_dir)
     if not stat.S_ISDIR(tool_dir.lstat().st_mode):
         raise ToolchainError(f"{tool_dir} is not a real directory (a symlink?); refusing to remove it")
     try:
@@ -288,7 +335,8 @@ def tree_digest(tool_dir: Path) -> str:
     """
     h = hashlib.sha256()
     entries = []
-    for dirpath, dirnames, filenames in os.walk(tool_dir, followlinks=False):
+    check_tool_path(tool_dir)
+    for dirpath, dirnames, filenames in os.walk(tool_dir, onerror=walk_error, followlinks=False):
         for name in dirnames + filenames:
             entries.append(Path(dirpath) / name)
     for path in sorted(entries, key=lambda p: p.relative_to(tool_dir).as_posix()):
@@ -321,6 +369,8 @@ def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> 
     if entry is None:
         raise ToolchainError(f"{name}: no artifact pinned for {key}")
     tool_dir = TOOLCHAIN / name / spec["version"]
+    check_tool_path(tool_dir)
+    check_tool_path(BIN)
     cached = read_marker(tool_dir)
     if not cached or not marker_current(cached, entry):
         raise ToolchainError(f"{name} {spec['version']} is not installed from the pinned artifact; run 'make toolchain'")
@@ -330,11 +380,12 @@ def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> 
         raise ToolchainError(f"{link_path} does not point at the pinned {name} {spec['version']}; run 'make toolchain'")
     if tree_digest(tool_dir) != cached["tree_sha256"]:
         raise ToolchainError(f"{name} was modified after install; check why, then run 'make toolchain'")
-    if writable_paths(tool_dir):
-        # Read-only is what keeps running a tool from changing it (#69); `make toolchain`
+    writable = writable_paths(tool_dir)
+    if writable:
+        # Read-only is what keeps running a tool from changing it (#69); the install target
         # re-applies it without reinstalling.
-        raise ToolchainError(f"{name} {spec['version']} is writable (e.g. {writable_paths(tool_dir)[0]}); "
-                             "run 'make toolchain' to make it read-only again")
+        raise ToolchainError(f"{name} {spec['version']} is writable (e.g. {writable[0]}); "
+                             "rerun the make target that installs it to make it read-only again")
     if entry.get("kind") == "binary" and sha256_file(expected) != entry.get("sha256"):
         raise ToolchainError(f"{name} binary hash differs from the pinned artifact")
     if entry.get("kind") == "npm-tgz":
@@ -343,7 +394,11 @@ def verify_tool(name: str, lock: dict | None = None, key: str | None = None) -> 
 
 
 def link(bin_path: Path, name: str) -> None:
+    # .toolchain/bin must be a real directory: unlink and symlink_to would otherwise follow a
+    # symlinked bin and replace files outside .toolchain (PR #83 review, round 2).
+    check_tool_path(BIN)
     BIN.mkdir(parents=True, exist_ok=True)
+    check_tool_path(BIN)
     link_path = BIN / name
     if link_path.is_symlink() or link_path.exists():
         link_path.unlink()
@@ -379,15 +434,23 @@ def cmd_install(args: argparse.Namespace) -> int:
     key = platform_key()
     lock = load_lock()
     tools = list(args.only or DEFAULT_TOOLS) + list(args.include or [])
-    TOOLCHAIN.mkdir(exist_ok=True)
-    for name in tools:
-        if name not in lock:
-            raise ToolchainError(f"unknown tool {name!r}")
-        path = install_tool(name, lock[name], key, force=args.force)
-        # Only the tool itself is linked. npm/npx ship inside the Node tarball
-        # and are deliberately not put on PATH (ENGINEERING §2.3).
-        link(path, {"python": "python3"}.get(name, name))
-        print(f"ok  {name} {lock[name]['version']}", file=sys.stderr)
+    try:
+        check_tool_path(TOOLCHAIN)
+        TOOLCHAIN.mkdir(exist_ok=True)
+        check_tool_path(BIN)
+        for name in tools:
+            if name not in lock:
+                raise ToolchainError(f"unknown tool {name!r}")
+            path = install_tool(name, lock[name], key, force=args.force)
+            # Only the tool itself is linked. npm/npx ship inside the Node tarball
+            # and are deliberately not put on PATH (ENGINEERING §2.3).
+            link(path, {"python": "python3"}.get(name, name))
+            print(f"ok  {name} {lock[name]['version']}", file=sys.stderr)
+    except PermissionError as e:
+        # Only a permission failure (the temporary directory, the links in .toolchain/bin on a
+        # .toolchain owned by another user) gets the ownership message; any other error keeps
+        # its own text (PR #83 review, round 2).
+        raise ToolchainError(f"can't write {e.filename or '.toolchain'} ({e.strerror}); was .toolchain created by another user, e.g. with sudo? Fix its ownership, then run 'make toolchain'") from e
     return 0
 
 

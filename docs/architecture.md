@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.1 (status: see ADR 0014) |
-| Last updated | 2026-09-27 |
+| Version | 0.2.2 (status: see ADR 0014, ADR 0026) |
+| Last updated | 2026-10-01 |
 | Scope | v1: Bitcoin (Bitcoin Core), single user, Linux + macOS |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) (IDs such as TB1, T-203, F2 refer to it) · [`ENGINEERING.md`](ENGINEERING.md) |
 
@@ -375,13 +375,16 @@ flowchart LR
   MK --> SFW["Socket Firewall (sfw)<br/>pinned, TOFU hash"]
   SFW --> REG(("npm / PyPI registries"))
   SFW -. "package names/versions" .-> SOCK(("Socket"))
-  MK --> TOOLS(("Toolchain + test downloads<br/>pnpm · uv · Node · Python ·<br/>bitcoind · Playwright browsers"))
+  MK --> TOOLS(("Toolchain + test downloads<br/>pnpm · uv · Node · Python ·<br/>bitcoind · Playwright browsers ·<br/>actionlint · zizmor"))
+  MK --> LINT["make lint-workflows<br/>actionlint · zizmor"]
+  LINT -. "action names/refs used by our workflows<br/>(no-permission token, ADR 0026)" .-> GHAPI(("GitHub API"))
   MK --> CHK["Lockfile policy · audit ·<br/>install-command · architecture checks"]
   GH(("GitHub: PRs, Socket App,<br/>Dependabot")) --> CI
 ```
 
 - Dependencies are resolved lockfile-only, vetted, and approved by the human before anything is installed (ENGINEERING §2.4).
 - Every non-package download is verified per ENGINEERING §2.3.
+- zizmor's online audits (impostor-commit and others) query the GitHub API during `make lint-workflows`, with a dedicated no-permission token and an otherwise empty environment (ADR 0026). This is a development-time flow only.
 
 ## 10. Changelog
 
@@ -391,3 +394,4 @@ flowchart LR
 | 2026-09-27 | 0.1.1 | v1 opens the user's default browser; there is no managed browser profile (user decision, R-5) |
 | 2026-09-27 | 0.2 | Opus 5.5 + Codex review fixes: bootstrap-file launch and bearer session without cookies (§4); in-process runtime model with job worker, tip poller, watchdog, offline mode and shutdown (§3); `domain/` and a pure `doxx/`; `api/` → `services/` only; capability rules and a dependency-free architecture check (§2); data directory never saved, unencrypted storage only off mainnet, exports and downloads specified (§6); price CSV upload; scan sequence checks `completed`, retries, budget, errors and the in-flight marker (§8.2); local Tor hop in F3 |
 | 2026-09-27 | 0.2.1 | A late lot identification warns and doesn't block reports (user decision) |
+| 2026-10-01 | 0.2.2 | §9: the pinned workflow linters, and zizmor's online audits as a development-time flow to the GitHub API (ADR 0026) |
