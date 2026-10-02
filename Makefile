@@ -62,6 +62,24 @@ help: ## List targets
 toolchain: ## Install the pinned sfw, pnpm, uv, Node and Python into .toolchain/ (hash-verified; pins must be on origin/main)
 	"$(SYS_PYTHON)" scripts/toolchain.py install $(if $(DEPS_OK),--approved)
 
+.PHONY: lint-tools
+lint-tools: ## Install the pinned actionlint and zizmor (hash-verified; pins must be on origin/main)
+	"$(SYS_PYTHON)" scripts/toolchain.py install --only actionlint zizmor $(if $(DEPS_OK),--approved)
+
+.PHONY: lint-workflows
+lint-workflows: ## Check the GitHub workflows with the pinned actionlint and zizmor (zizmor's online audits need ZIZMOR_GITHUB_TOKEN; ADR 0026)
+	@"$(SYS_PYTHON)" scripts/toolchain.py verify actionlint zizmor >/dev/null || { echo "Run 'make lint-tools' first (the pinned, unmodified actionlint and zizmor are required)." >&2; exit 1; }
+	"$(SYS_PYTHON)" scripts/check_repo_files.py
+	@[ -n "$${ZIZMOR_GITHUB_TOKEN:-}" ] || { echo "Set ZIZMOR_GITHUB_TOKEN to a GitHub token with no permissions (a fine-grained token with public-repository read access only): zizmor's online audits, e.g. impostor-commit, use it for rate limits (ADR 0026)." >&2; exit 1; }
+	@# Both run with an empty environment plus HOME and a fixed PATH: no inherited tokens or other
+	@# secrets, and no ZIZMOR_* variable can switch zizmor's online audits off or point it at another
+	@# config (ADR 0026). actionlint finds .yml and .yaml workflows itself and runs no shellcheck/pyflakes.
+	cd "$(ROOT)" && env -i HOME="$$HOME" PATH=/usr/bin:/bin "$(TOOLBIN)/actionlint" -no-color -shellcheck= -pyflakes=
+	@# zizmor gets only its own no-permission token, loads no config file (--no-config), and audits
+	@# the whole repository (workflows, dependabot.yml and any local actions). check_repo_files
+	@# rejects linter config files and zizmor ignore comments (ADR 0026).
+	cd "$(ROOT)" && env -i HOME="$$HOME" PATH=/usr/bin:/bin ZIZMOR_GITHUB_TOKEN="$$ZIZMOR_GITHUB_TOKEN" "$(TOOLBIN)/zizmor" --no-config .
+
 .PHONY: test-tools
 test-tools: ## Install the pinned bitcoind for regtest tests (hash-verified; pins must be on origin/main)
 	"$(SYS_PYTHON)" scripts/toolchain.py install --only bitcoind $(if $(DEPS_OK),--approved)
