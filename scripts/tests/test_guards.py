@@ -91,7 +91,8 @@ class AgentGuardTests(unittest.TestCase):
 
     def test_allows_repository_make_targets_and_normal_commands(self):
         for cmd in ("make bootstrap", "make propose-js PKG=react@19.0.0 WORKSPACE=frontend DEV=1",
-                    "make check BASE=origin/main", "make propose-py PKG='a==1'", "git log --oneline", "make"):
+                    "make check BASE=origin/main", "make propose-py PKG='a==1'", "git log --oneline", "make",
+                    "make test", "make lint"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.bash(cmd), 0)
 

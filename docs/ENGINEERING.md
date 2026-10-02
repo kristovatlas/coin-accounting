@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.23 |
+| Version | 0.2.24 |
 | Last updated | 2026-10-01 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -72,6 +72,8 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | `make test-tools` | Pinned, verified test tooling downloads (see "Non-package downloads") |
   | `make lint-tools` / `make lint-workflows` | Install the pinned actionlint and zizmor; check the workflows with them (§2.7, ADR 0026) |
   | `make audit` | The pinned `osv-scanner` binary (§2.3, `make audit-tools`) against `uv.lock` and `pnpm-lock.yaml`. It sends package names and versions to `api.osv.dev` (THREAT_MODEL §6), with an empty config from outside the repository, `--no-resolve` and an empty environment (ADR 0027). One tool for both ecosystems, so no `pip-audit` dependency tree |
+  | `make test` | The backend tests (`pytest`, with only the named plugins and the socket guard, §3.2) under `coverage`, then the §3.3 floors: 85 % overall, 95 % for each of `chain/`, `tax/`, `doxx/` that exists |
+  | `make lint` | `ruff check`, `ruff format --check` and `mypy --strict` on `backend/` (§5.1). The older `scripts/` aren't covered yet |
 
   Contributors, AI agents and CI all use these targets. CI jobs call `make toolchain` and `make bootstrap`, never raw installers.
 - **No silent fallback:** if `sfw` is missing, not the pinned version, or fails to start, the scripts **stop with an error**. They never drop through to an unwrapped install. Whether `sfw` fails open when the Socket API is unreachable must be tested at setup. If it does, the wrapper detects that and stops **(verify at setup)**.
@@ -407,3 +409,4 @@ A change is done only when:
 | 2026-10-01 | 0.2.21 | §2.3 (#69, #67): read-only trees are verified on use and re-applied by `make toolchain`; their limits (root, `chmod`, cleanup); pnpm described as a native binary; after PR #83 review: a symlinked `.toolchain`, `.toolchain/bin`, tool or version directory is refused before any walk, chmod, removal or link, an unreadable directory fails verification instead of being skipped, permission errors anywhere in `make toolchain` get the same message, and download failures keep their own |
 | 2026-10-01 | 0.2.22 | §2.6: Dependabot configured (`.github/dependabot.yml`) |
 | 2026-10-01 | 0.2.23 | `make audit` uses a pinned `osv-scanner` binary (pending approval; ADR 0027) instead of `pip-audit` + `pnpm audit`: trust-on-first-use against GitHub, run with an empty config, `--no-resolve` and an empty environment; `check_repo_files` rejects a committed `osv-scanner.toml` |
+| 2026-10-02 | 0.2.24 | M0.3: `make test` (pytest with the socket guard, coverage floors) and `make lint` (ruff, mypy --strict) for `backend/`; agents may run both |

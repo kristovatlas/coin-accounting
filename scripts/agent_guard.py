@@ -42,7 +42,8 @@ def veracrypt_mounted() -> bool:
 
 # Only these repository targets, with only these variables, count as "via make".
 # No -f/-C/--eval, no other options, no SFW=/TOOLBIN=/PATH= overrides (PR #7 review).
-MAKE_TARGETS = {"help", "toolchain", "test-tools", "propose-js", "propose-py", "bootstrap", "audit", "check"}
+MAKE_TARGETS = {"help", "toolchain", "test-tools", "propose-js", "propose-py", "bootstrap", "audit", "check",
+                "test", "lint"}
 MAKE_VARS = {"PKG", "DEV", "BASE", "WORKSPACE"}
 _SAFE_VALUE = re.compile(r"^[A-Za-z0-9@._/+=:-]*$")
 # Variables that change what make runs or which interpreter verifies the toolchain.
