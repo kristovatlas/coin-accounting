@@ -156,8 +156,24 @@ bootstrap: require-approved-deps require-toolchain ## Install exactly what the l
 	@if [ -f pnpm-lock.yaml ]; then "$(SFW)" "$(PNPM)" install --frozen-lockfile; else echo "no pnpm-lock.yaml yet (no JS dependencies approved)"; fi
 
 .PHONY: audit
-audit: ## Vulnerability audit of both lockfiles (enabled once the audit tools are approved; M0.2)
-	@echo "audit: pip-audit and pnpm audit are enabled in M0.2, after their dependency approval." >&2; exit 1
+audit: ## Vulnerability audit of the lockfiles with the pinned osv-scanner (queries api.osv.dev; dev-time flow, ADR 0027)
+	@"$(SYS_PYTHON)" scripts/toolchain.py verify osv-scanner >/dev/null || { echo "Run 'make audit-tools' first (the pinned, unmodified osv-scanner is required)." >&2; exit 1; }
+	"$(SYS_PYTHON)" scripts/check_repo_files.py
+	@# osv-scanner loads an osv-scanner.toml from each scanned file's directory, and that file can
+	@# ignore vulnerabilities or packages. --config points it at an empty file outside the repository
+	@# instead, so the repository being audited can't switch findings off (check_repo_files also
+	@# rejects a tracked one). --no-resolve: the lockfiles are complete, so no transitive resolution
+	@# (deps.dev, registries); the only flow is api.osv.dev. Empty environment plus HOME and a fixed
+	@# PATH: no inherited tokens or proxy settings (ADR 0027).
+	@cd "$(ROOT)" && locks=""; for f in uv.lock pnpm-lock.yaml; do if [ -f "$$f" ]; then locks="$$locks --lockfile=$$f"; fi; done; \
+	  if [ -z "$$locks" ]; then echo "audit: no lockfiles yet"; exit 0; fi; \
+	  cfgdir="$$(mktemp -d)"; trap 'rm -rf "$$cfgdir"' EXIT; : > "$$cfgdir/osv-scanner.toml"; \
+	  echo "osv-scanner scan source --config=<empty> --no-resolve$$locks"; \
+	  env -i HOME="$$HOME" PATH=/usr/bin:/bin "$(TOOLBIN)/osv-scanner" scan source --config="$$cfgdir/osv-scanner.toml" --no-resolve $$locks
+
+.PHONY: audit-tools
+audit-tools: ## Install the pinned osv-scanner (hash-verified; pins must be on origin/main)
+	"$(SYS_PYTHON)" scripts/toolchain.py install --only osv-scanner $(if $(DEPS_OK),--approved)
 
 # --- checks (standard library only, so they run before any dependency exists) ---
 

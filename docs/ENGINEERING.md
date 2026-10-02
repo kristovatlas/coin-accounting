@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.22 |
+| Version | 0.2.23 |
 | Last updated | 2026-10-01 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -71,7 +71,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | `make update-sfw` | Reviewed update of the pinned `sfw` version and checksum |
   | `make test-tools` | Pinned, verified test tooling downloads (see "Non-package downloads") |
   | `make lint-tools` / `make lint-workflows` | Install the pinned actionlint and zizmor; check the workflows with them (§2.7, ADR 0026) |
-  | `make audit` | `pip-audit` and `pnpm audit` against the lockfiles (tools locked as dev dependencies; network through `sfw`) |
+  | `make audit` | The pinned `osv-scanner` binary (§2.3, `make audit-tools`) against `uv.lock` and `pnpm-lock.yaml`. It sends package names and versions to `api.osv.dev` (THREAT_MODEL §6), with an empty config from outside the repository, `--no-resolve` and an empty environment (ADR 0027). One tool for both ecosystems, so no `pip-audit` dependency tree |
 
   Contributors, AI agents and CI all use these targets. CI jobs call `make toolchain` and `make bootstrap`, never raw installers.
 - **No silent fallback:** if `sfw` is missing, not the pinned version, or fails to start, the scripts **stop with an error**. They never drop through to an unwrapped install. Whether `sfw` fails open when the Socket API is unreachable must be tested at setup. If it does, the wrapper detects that and stops **(verify at setup)**.
@@ -96,6 +96,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | Python | Pinned interpreter build checked against a committed SHA-256 |
   | `bitcoind` (regtest) | `SHA256SUMS` plus a threshold of builder signatures (pinned `guix.sigs` builder keys), minimum and latest supported versions |
   | actionlint, zizmor | Committed per-platform SHA-256 of the GitHub release asset: trust-on-first-use against GitHub, like `sfw`. At pin time it was cross-checked against actionlint's `checksums.txt` and GitHub's SLSA provenance listing; the provenance signatures aren't verified yet (ADR 0026) |
+  | osv-scanner | Committed per-platform SHA-256 of the GitHub release binary: trust-on-first-use against GitHub. It matches the publisher's `osv-scanner_SHA256SUMS`, which is in the same release, and its SLSA provenance isn't verified yet (ADR 0027) |
   | Playwright browsers | Pinned `@playwright/test` version; each downloaded browser archive checked against a committed per-platform SHA-256; fails closed if no hash is recorded |
 
 - **Enforcement:** a CI check (`scripts/check-install-commands`) scans the `Makefile`, `scripts/`, `.github/workflows/` and config files for install or fetch-and-run commands without the `sfw` wrapper. It can be bypassed by obfuscation, so it is **hygiene, not a security boundary** (ADR 0022: the Claude Code guard and this check catch accidental or habitual installs; deliberate evasion is accepted risk R-8), and it allowlists documentation files that quote the banned commands. `AGENTS.md` repeats the rule for agents.
@@ -168,7 +169,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **Secrets:** CI needs none. The Socket GitHub App is used rather than the Socket CLI, which would need an API token.
 - **Caches:** no dependency caches in CI (`sfw` can't inspect cached artifacts). On developer machines, pnpm `storeDir` and uv `cache-dir` are project-local, so packages vetted for other projects are never reused unchecked.
 - **Checks on every PR:**
-  - `make audit` (`pip-audit` + `pnpm audit`)
+  - `make audit` (`osv-scanner`; the CI step comes once the pin is on `main`, #94)
   - the lockfile policy check
   - the install-command check
   - the Socket App report
@@ -405,3 +406,4 @@ A change is done only when:
 | 2026-10-01 | 0.2.20 | M0.2: actionlint 1.7.12 and zizmor 1.30.1 pinned (pending approval; ADR 0026); `make lint-tools` / `make lint-workflows`; actionlint without its shellcheck/pyflakes integrations; zizmor with its online audits and a dedicated no-permission token (§2.3, §2.7) |
 | 2026-10-01 | 0.2.21 | §2.3 (#69, #67): read-only trees are verified on use and re-applied by `make toolchain`; their limits (root, `chmod`, cleanup); pnpm described as a native binary; after PR #83 review: a symlinked `.toolchain`, `.toolchain/bin`, tool or version directory is refused before any walk, chmod, removal or link, an unreadable directory fails verification instead of being skipped, permission errors anywhere in `make toolchain` get the same message, and download failures keep their own |
 | 2026-10-01 | 0.2.22 | §2.6: Dependabot configured (`.github/dependabot.yml`) |
+| 2026-10-01 | 0.2.23 | `make audit` uses a pinned `osv-scanner` binary (pending approval; ADR 0027) instead of `pip-audit` + `pnpm audit`: trust-on-first-use against GitHub, run with an empty config, `--no-resolve` and an empty environment; `check_repo_files` rejects a committed `osv-scanner.toml` |

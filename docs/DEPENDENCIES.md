@@ -36,7 +36,6 @@ Deliberately **not** proposed, because the stdlib or our own code covers it:
 | Package | Purpose | Notes |
 |---|---|---|
 | `mutmut` | Mutation testing (§3.4) | |
-| `pip-audit` | CVE audit of `uv.lock` (`make audit`) | Heavy dependency tree (`requests`, `cyclonedx`…). The alternative, `osv-scanner` (a Go binary pinned like the toolchain), is to be evaluated in M0.2 |
 
 **JavaScript, runtime (bundled into the SPA)**
 
@@ -72,6 +71,7 @@ Verified as described in [`ENGINEERING.md` §2.3](ENGINEERING.md#23-all-installs
 | `bitcoind` (regtest only) | 31.1 | same | in `scripts/toolchain.lock` | bitcoincore.org `SHA256SUMS` (builder-signature threshold: M0.2); 31.0 is added for minimum-version tests in M0.2 | 2026-09-28, M0.1 |
 | `actionlint` (workflow checker) | 1.7.12 | linux-x86_64, linux-arm64, darwin-arm64, darwin-x86_64 | in `scripts/toolchain.lock` | GitHub release asset digest, **trust-on-first-use against GitHub** (ADR 0026): at pin time it matched the release's `checksums.txt` (same release) and GitHub's SLSA provenance listing (`release.yaml` @ `v1.7.12`; signatures not verified). Published 2026-03-30. Run with `-shellcheck= -pyflakes=` (ADR 0026). Installed by `make lint-tools`, run by `make lint-workflows` | 2026-10-01, M0.2, **pending human approval** |
 | `zizmor` (workflow security checker) | 1.30.1 | same | in `scripts/toolchain.lock` | GitHub release asset digest, **trust-on-first-use against GitHub** (ADR 0026): no checksum file is published, and GitHub's SLSA provenance listing (`release-binaries.yml` @ `v1.30.1`) was read but its signatures not verified. Published 2026-09-09. **Network:** its online audits call the GitHub API with a no-permission `ZIZMOR_GITHUB_TOKEN`, in an otherwise empty environment, with `--no-config` (ADR 0026). Installed by `make lint-tools` | 2026-10-01, M0.2, **pending human approval** |
+| `osv-scanner` (vulnerability audit) | 2.6.0 | linux-x86_64, linux-arm64, darwin-arm64, darwin-x86_64 | in `scripts/toolchain.lock` | GitHub release asset digest: **trust-on-first-use against GitHub** (ADR 0027). It matches the publisher's `osv-scanner_SHA256SUMS`, which is in the same release, and the release's SLSA provenance (`multiple.intoto.jsonl`) isn't verified yet. Published 2026-09-14. Run with an empty config, `--no-resolve` and an empty environment. Replaces the proposed `pip-audit` (a heavy dependency tree) and `pnpm audit`. Installed by `make audit-tools` | 2026-10-01, M0.2, **pending human approval** |
 | Playwright browsers | — | — | — | Pinned with `@playwright/test` (M0.2) | — |
 
 **Approved by the human** on 2026-09-28 in PR #7: the pins above, exactly as committed in `scripts/toolchain.lock`. A change to any pin needs a new approval (ENGINEERING §2.4).

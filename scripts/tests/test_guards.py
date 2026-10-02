@@ -176,11 +176,20 @@ class MakefileOverrideTests(unittest.TestCase):
                                                    "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin \"",
                                                    "actionlint\" -no-color -shellcheck= -pyflakes=",
                                                    "PATH=/usr/bin:/bin ZIZMOR_GITHUB_TOKEN=\"$ZIZMOR_GITHUB_TOKEN\" \"",
-                                                   "zizmor\" --no-config ."))):
+                                                   "zizmor\" --no-config .")),
+                            (("audit-tools",), ("scripts/toolchain.py install --only osv-scanner \n",)),
+                            (("audit",), ("toolchain.py verify osv-scanner", "scripts/check_repo_files.py",
+                                          "--lockfile=$f", ": > \"$cfgdir/osv-scanner.toml\"",
+                                          "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin \"",
+                                          "osv-scanner\" scan source --config=\"$cfgdir/osv-scanner.toml\" --no-resolve $locks"))):
             out = self.dry_run(*args)
             if args[0] == "lint-workflows":  # online audits on; no inherited environment (ADR 0026)
                 self.assertNotIn("--offline", out)
                 self.assertEqual(out.count("env -i "), 2, out)
+            if args[0] == "audit":  # the scan's exit status is the target's; nothing swallows it (ADR 0027)
+                scan = out[out.index("scan source"):]
+                self.assertNotIn("|| true", scan)
+                self.assertNotIn("; exit 0", scan)
             for text in needs:
                 with self.subTest(target=args[0], needs=text):
                     self.assertIn(text, out)
