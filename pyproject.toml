@@ -41,7 +41,7 @@ ignore = ["PLR2004"]
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/tests/**" = ["S101", "S603", "PLC0415"]
-"backend/tests/**" = ["S101", "S104", "S105", "S106"]  # asserts; test addresses and fake credentials
+"backend/tests/**" = ["S101", "S104", "S105", "S106", "S108"]  # asserts; test addresses, credentials and paths
 "e2e/harness/**" = ["S101"]
 
 [tool.pytest.ini_options]
