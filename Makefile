@@ -69,6 +69,7 @@ lint-tools: ## Install the pinned actionlint and zizmor (hash-verified; pins mus
 .PHONY: lint-workflows
 lint-workflows: ## Check the GitHub workflows with the pinned actionlint and zizmor (zizmor's online audits need ZIZMOR_GITHUB_TOKEN; ADR 0026)
 	@"$(SYS_PYTHON)" scripts/toolchain.py verify actionlint zizmor >/dev/null || { echo "Run 'make lint-tools' first (the pinned, unmodified actionlint and zizmor are required)." >&2; exit 1; }
+	"$(SYS_PYTHON)" scripts/check_repo_files.py
 	@[ -n "$${ZIZMOR_GITHUB_TOKEN:-}" ] || { echo "Set ZIZMOR_GITHUB_TOKEN to a GitHub token with no permissions (a fine-grained token with public-repository read access only): zizmor's online audits, e.g. impostor-commit, use it for rate limits (ADR 0026)." >&2; exit 1; }
 	@# Both run with an empty environment plus HOME and a fixed PATH: no inherited tokens or other
 	@# secrets, and no ZIZMOR_* variable can switch zizmor's online audits off or point it at another

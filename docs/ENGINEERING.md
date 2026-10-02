@@ -156,7 +156,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **GitHub Actions:**
   - pinned to full commit SHAs with a version comment
   - only `actions/*` or vetted publishers
-  - `zizmor` and `actionlint` run on workflow files (they catch impostor-commit pins and unsafe patterns). They're pinned binaries (§2.3), installed by `make lint-tools` and run by `make lint-workflows`. actionlint runs without its shellcheck/pyflakes integrations; both run with an otherwise empty environment, and zizmor runs its online audits (impostor-commit among them) over the whole repository against the GitHub API, with a dedicated no-permission `ZIZMOR_GITHUB_TOKEN` and no config file. `scripts/check_repo_files.py` rejects linter config files and `zizmor: ignore` comments, so a PR can't switch a check off (ADR 0026). CI runs them once the pins are on `main` (#94)
+  - `zizmor` and `actionlint` run on workflow files (they catch impostor-commit pins and unsafe patterns). They're pinned binaries (§2.3), installed by `make lint-tools` and run by `make lint-workflows`. actionlint runs without its shellcheck/pyflakes integrations; both run with an otherwise empty environment, and zizmor runs its online audits (impostor-commit among them) over the whole repository against the GitHub API, with a dedicated no-permission `ZIZMOR_GITHUB_TOKEN` and no config file. `scripts/check_repo_files.py` rejects linter config files and `zizmor: ignore` comments in any tracked YAML file, so a PR can't switch a check off (ADR 0026). CI runs them once the pins are on `main` (#94)
   - `permissions: contents: read` by default, and the repository default token is read-only
   - `persist-credentials: false` on checkout
   - no `pull_request_target`

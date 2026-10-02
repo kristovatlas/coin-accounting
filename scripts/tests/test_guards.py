@@ -172,7 +172,7 @@ class MakefileOverrideTests(unittest.TestCase):
                             (("propose-js", "PKG=a@1", "WORKSPACE=frontend"), (config, verify)),
                             (("propose-py", "PKG=a==1"), (config, verify, "add --no-sync --no-build")),
                             (("lint-tools",), ("scripts/toolchain.py install --only actionlint zizmor \n",)),
-                            (("lint-workflows",), ("toolchain.py verify actionlint zizmor", "ZIZMOR_GITHUB_TOKEN",
+                            (("lint-workflows",), ("toolchain.py verify actionlint zizmor", "scripts/check_repo_files.py", "ZIZMOR_GITHUB_TOKEN",
                                                    "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin \"",
                                                    "actionlint\" -no-color -shellcheck= -pyflakes=",
                                                    "PATH=/usr/bin:/bin ZIZMOR_GITHUB_TOKEN=\"$ZIZMOR_GITHUB_TOKEN\" \"",

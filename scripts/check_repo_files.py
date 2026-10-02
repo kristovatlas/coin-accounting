@@ -8,9 +8,11 @@ submodule pulls in code from another repository that no review of this one cover
 project needs neither, so both are banned; lifting the ban needs a new ADR.
 
 zizmor and actionlint read their own config files from the repository they check, and zizmor
-honours inline `zizmor: ignore[...]` comments, so a single PR could add an impostor-commit pin
-and quietly switch that audit off. Linter config files and ignore comments under `.github/` are
-therefore rejected; adding a reviewed config means changing this check (ADR 0026).
+honours inline `zizmor: ignore[...]` comments in any file it audits (workflows, dependabot.yml,
+and local actions anywhere in the tree), so a single PR could add an impostor-commit pin and
+quietly switch that audit off. Linter config files, and ignore comments in any tracked YAML file,
+are therefore rejected; adding a reviewed config means changing this check (ADR 0026). The YAML
+contents are read from the index (what will be committed), not the working tree.
 
 Usage:
     check_repo_files.py [REPO]    # exit 0 = ok, 1 = banned entries found
@@ -49,6 +51,7 @@ def check(repo: Path) -> list[str]:
     out = subprocess.run(["git", "-C", top, "ls-files", "--stage", "-z"], check=True,
                          capture_output=True, env=env).stdout
     errors = []
+    yaml_blobs = []
     for entry in out.split(b"\0"):
         if not entry:
             continue
@@ -61,11 +64,18 @@ def check(repo: Path) -> list[str]:
             errors.append("'.gitmodules': submodule configuration (banned, ADR 0023)")
         elif name.rsplit("/", 1)[-1].lower() in LINTER_CONFIG_NAMES:
             errors.append(f"{name!r}: workflow-linter config could switch checks off (ADR 0026)")
-        elif name.lower().startswith(".github/"):
-            try:
-                data = (Path(top) / name).read_bytes()
-            except OSError:
-                data = b""
+        elif name.lower().endswith((".yml", ".yaml")):
+            yaml_blobs.append((meta.split(b" ")[1].decode(), name))
+    # zizmor audits workflows, dependabot.yml and local actions anywhere in the tree (ADR 0026).
+    if yaml_blobs:
+        batch = subprocess.run(["git", "-C", top, "cat-file", "--batch"], check=True, capture_output=True,
+                               env=env, input="".join(f"{sha}\n" for sha, _ in yaml_blobs).encode()).stdout
+        pos = 0
+        for _, name in yaml_blobs:
+            header_end = batch.index(b"\n", pos)
+            size = int(batch[pos:header_end].split(b" ")[2])
+            data = batch[header_end + 1:header_end + 1 + size]
+            pos = header_end + 1 + size + 1
             if ZIZMOR_IGNORE.search(data):
                 errors.append(f"{name!r}: a zizmor ignore comment could hide a finding (ADR 0026)")
     return errors
