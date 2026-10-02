@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import io
 import os
@@ -9,6 +10,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -251,6 +253,200 @@ class ToolchainTests(unittest.TestCase):
             for path in [tool_dir, *tool_dir.rglob("*")]:
                 with self.subTest(path=path.relative_to(d).as_posix()):
                     self.assertEqual(path.stat().st_mode & 0o222, 0)
+
+    def tool_spec(self):
+        blob = self.wrapped_tar("python/bin/python3", b"#!/bin/sh\n")
+        return blob, {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x",
+                                                       "sha256": hashlib.sha256(blob).hexdigest(), "kind": "tar",
+                                                       "bin": "python/bin/python3"}}
+
+    def test_verify_rejects_a_writable_tree_and_install_rehardens_it(self):
+        # #69: read-only is what stops a tool changing itself, so verification checks it.
+        blob, spec = self.tool_spec()
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "BIN", Path(d) / "bin"), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
+            toolchain.link(toolchain.install_tool("python", spec, "linux-x86_64"), "python3")
+            lock = {"python": spec}
+            toolchain.verify_tool("python", lock, "linux-x86_64")
+            lib = Path(d) / "python" / "1" / "python" / "bin"
+            lib.chmod(0o755)
+            with self.assertRaisesRegex(toolchain.ToolchainError, "is writable"):
+                toolchain.verify_tool("python", lock, "linux-x86_64")
+            toolchain.install_tool("python", spec, "linux-x86_64")  # cached path re-hardens
+            toolchain.verify_tool("python", lock, "linux-x86_64")
+
+    def test_a_read_only_tree_needs_no_chmod(self):
+        # #69: chmod fails on files another user owns, even when the mode wouldn't change.
+        blob, spec = self.tool_spec()
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
+            toolchain.install_tool("python", spec, "linux-x86_64")
+            with mock.patch.object(Path, "chmod", side_effect=PermissionError(1, "Operation not permitted")):
+                toolchain.make_read_only(Path(d) / "python" / "1")  # nothing writable: no chmod, no error
+                again = toolchain.install_tool("python", spec, "linux-x86_64")
+            self.assertTrue(again.is_file())
+
+    def test_a_failed_hardening_is_an_error_and_leaves_no_valid_marker(self):
+        blob, spec = self.tool_spec()
+        real_chmod = Path.chmod
+
+        def refuse_removing_write_bits(path, mode, *a, **k):
+            if not mode & 0o200:
+                raise PermissionError(1, "Operation not permitted")
+            return real_chmod(path, mode, *a, **k)
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)), \
+                mock.patch.object(Path, "chmod", refuse_removing_write_bits):
+            with self.assertRaisesRegex(toolchain.ToolchainError, "another user"):
+                toolchain.install_tool("python", spec, "linux-x86_64")
+            self.assertIsNone(toolchain.read_marker(Path(d) / "python" / "1"))
+
+    def test_a_symlink_above_the_tool_dir_is_refused_everywhere(self):
+        # PR #83 review: a symlinked .toolchain/<name> (or .toolchain) was followed by
+        # chmod/rmtree/os.walk, which then acted on files outside .toolchain.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            outside = root / "outside"
+            (outside / "1" / "sub").mkdir(parents=True)
+            (outside / "1" / "sub" / "f").write_text("x")
+            for path in (outside / "1" / "sub" / "f", outside / "1" / "sub", outside / "1"):
+                path.chmod(0o555 if path.is_dir() else 0o444)
+            tc = root / ".toolchain"
+            tc.mkdir()
+            (tc / "python").symlink_to(outside)
+            blob, spec = self.tool_spec()
+            try:
+                with mock.patch.object(toolchain, "TOOLCHAIN", tc):
+                    for call in (lambda: toolchain.remove_tree(tc / "python" / "1"),
+                                 lambda: toolchain.make_read_only(tc / "python" / "1"),
+                                 lambda: toolchain.writable_paths(tc / "python" / "1"),
+                                 lambda: toolchain.tree_digest(tc / "python" / "1"),
+                                 lambda: toolchain.install_tool("python", spec, "linux-x86_64")):
+                        with self.subTest(call=call):
+                            with self.assertRaisesRegex(toolchain.ToolchainError, "not a real directory"):
+                                call()
+                self.assertEqual((outside / "1").stat().st_mode & 0o777, 0o555)
+                self.assertTrue((outside / "1" / "sub" / "f").exists())
+                linked = root / "linked"
+                linked.symlink_to(tc)
+                with mock.patch.object(toolchain, "TOOLCHAIN", linked):
+                    with self.assertRaisesRegex(toolchain.ToolchainError, "not a real directory"):
+                        toolchain.check_tool_path(linked / "python" / "1")
+            finally:
+                for path in (outside / "1", outside / "1" / "sub"):
+                    path.chmod(0o755)
+
+    @unittest.skipIf(os.geteuid() == 0, "root can list any directory")
+    def test_an_unreadable_directory_fails_closed(self):
+        # PR #83 review: os.walk skipped directories it couldn't list, so a writable file under
+        # one was missed by the write-bit check and the digest.
+        with tempfile.TemporaryDirectory() as d:
+            tool_dir = Path(d) / "python" / "1"
+            hidden = tool_dir / "hidden"
+            hidden.mkdir(parents=True)
+            (hidden / "f").write_text("x")
+            for path in (tool_dir, tool_dir.parent):
+                path.chmod(0o555)
+            hidden.chmod(0o111)
+            try:
+                with mock.patch.object(toolchain, "TOOLCHAIN", Path(d)):
+                    for call in (toolchain.writable_paths, toolchain.tree_digest):
+                        with self.subTest(call=call.__name__):
+                            with self.assertRaisesRegex(toolchain.ToolchainError, "can't read"):
+                                call(tool_dir)
+            finally:
+                for path in (tool_dir.parent, tool_dir, hidden):
+                    path.chmod(0o755)
+
+    def test_ownership_errors_in_the_install_command_are_reported_not_raised(self):
+        # PR #83 review: after a past `sudo make toolchain`, relinking in a root-owned
+        # .toolchain/bin raised a bare PermissionError.
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "load_lock", lambda: {"python": {"version": "1"}}), \
+                mock.patch.object(toolchain, "platform_key", lambda: "linux-x86_64"), \
+                mock.patch.object(toolchain, "install_tool", lambda *a, **k: Path(d) / "python" / "1" / "bin"), \
+                mock.patch.object(toolchain, "link", side_effect=PermissionError(13, "Permission denied", "bin/python3")):
+            args = argparse.Namespace(approved=True, only=["python"], include=None, force=False)
+            with self.assertRaisesRegex(toolchain.ToolchainError, "another user"):
+                toolchain.cmd_install(args)
+
+    def test_a_symlinked_bin_directory_is_refused_before_any_link_change(self):
+        # PR #83 round 2: link() followed a symlinked .toolchain/bin and replaced files outside it.
+        with tempfile.TemporaryDirectory() as d:
+            tc, outside = Path(d) / ".toolchain", Path(d) / "outside"
+            tc.mkdir()
+            outside.mkdir()
+            (outside / "python3").write_text("not ours")
+            (tc / "bin").symlink_to(outside)
+            with mock.patch.object(toolchain, "TOOLCHAIN", tc), mock.patch.object(toolchain, "BIN", tc / "bin"):
+                with self.assertRaisesRegex(toolchain.ToolchainError, "not a real directory"):
+                    toolchain.link(tc / "python" / "1" / "bin" / "python3", "python3")
+                blob, spec = self.tool_spec()
+                with self.assertRaisesRegex(toolchain.ToolchainError, "not a real directory"):
+                    toolchain.verify_tool("python", {"python": spec}, "linux-x86_64")
+            self.assertEqual((outside / "python3").read_text(), "not ours")
+
+    def test_download_failures_keep_their_cause_and_are_not_called_ownership(self):
+        # PR #83 round 2: a TLS or network failure was reported as "created by another user".
+        import ssl
+        import urllib.error
+        for err in (urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed")),
+                    urllib.error.URLError("Name or service not known"), TimeoutError("timed out")):
+            with self.subTest(err=repr(err)), tempfile.TemporaryDirectory() as d, \
+                    mock.patch.object(urllib.request, "urlopen", side_effect=err):
+                with self.assertRaises(toolchain.ToolchainError) as cm:
+                    toolchain.download("https://example.invalid/x", Path(d) / "x")
+                self.assertIn("download failed: https://example.invalid/x", str(cm.exception))
+                self.assertNotIn("another user", str(cm.exception))
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d) / ".toolchain"), \
+                mock.patch.object(toolchain, "BIN", Path(d) / ".toolchain" / "bin"), \
+                mock.patch.object(toolchain, "load_lock", lambda: {"python": {"version": "1"}}), \
+                mock.patch.object(toolchain, "platform_key", lambda: "linux-x86_64"), \
+                mock.patch.object(toolchain, "install_tool", side_effect=OSError(28, "No space left on device")):
+            args = argparse.Namespace(approved=True, only=["python"], include=None, force=False)
+            with self.assertRaises(OSError) as cm:  # not rewritten as an ownership problem
+                toolchain.cmd_install(args)
+            self.assertNotIsInstance(cm.exception, toolchain.ToolchainError)
+
+    def test_a_failed_hardening_that_cannot_be_undone_still_reports_the_original_error(self):
+        # PR #83 review: the cleanup after a failed hardening could itself raise a bare OSError
+        # and hide the real error.
+        blob, spec = self.tool_spec()
+        real_chmod = Path.chmod
+
+        def refuse_removing_write_bits(path, mode, *a, **k):
+            if not mode & 0o200:
+                raise PermissionError(1, "Operation not permitted")
+            return real_chmod(path, mode, *a, **k)
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)), \
+                mock.patch.object(Path, "chmod", refuse_removing_write_bits), \
+                mock.patch.object(Path, "unlink", side_effect=PermissionError(1, "Operation not permitted")):
+            with self.assertRaisesRegex(toolchain.ToolchainError, "can't make .* read-only"):
+                toolchain.install_tool("python", spec, "linux-x86_64")
+
+    def test_remove_tree_refuses_a_symlinked_tool_dir_before_any_chmod(self):
+        with tempfile.TemporaryDirectory() as d:
+            outside = Path(d) / "outside"
+            outside.mkdir()
+            outside.chmod(0o555)
+            link = Path(d) / "tool"
+            link.symlink_to(outside)
+            try:
+                with self.assertRaisesRegex(toolchain.ToolchainError, "not a real directory"):
+                    toolchain.remove_tree(link)
+                self.assertEqual(outside.stat().st_mode & 0o777, 0o555)
+            finally:
+                outside.chmod(0o755)
 
     def test_tar_with_path_traversal_is_refused(self):
         buf = io.BytesIO()
