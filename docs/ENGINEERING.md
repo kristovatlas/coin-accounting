@@ -223,7 +223,7 @@ Price-fetch tests use a local stub server. The guard catches accidental phoning 
   - coverage.py ≥ 7.10 with `[run] parallel = true`, `patch = ["subprocess"]` and `sigterm = true`
   - the server is shut down gracefully so its data is written
   - `coverage combine` merges the results
-- Floors are minimums, not targets. They compare unrounded totals (`precision = 2`): coverage.py rounds before comparing, so at its default 94.6 % would pass a 95 % floor.
+- Floors are minimums, not targets. Totals are compared at two decimal places (`precision = 2`): coverage.py rounds before comparing, so at its default of 0, 94.6 % would pass a 95 % floor.
 - A merge-base comparison fails a PR that lowers coverage in a floored module by more than 0.5 percentage points. The ratchet uses the deterministic unit + integration numbers only.
 
 ### 3.4 Mutation testing
