@@ -82,10 +82,16 @@ class RpcMethodNotAllowedError(RpcError):
 
 
 class RpcCallError(RpcError):
-    """The node returned a JSON-RPC error object."""
+    """The node returned a JSON-RPC error object.
+
+    `str()` and `repr()` carry only the method and the error code. Core often quotes the offending
+    parameter in its message (e.g. "key '<xpub>' is not valid", "... for '<txid>'"), so the node's
+    text is kept apart in `node_message` for code that must branch on it, and must never be
+    logged, shown or put in another exception (T-201, T-403).
+    """
 
     def __init__(self, method: str, code: int, message: str) -> None:
-        super().__init__(f"{method}: node error {code}: {message}")
+        super().__init__(f"{method}: node error {code}")
         self.method = method
         self.code = code
         self.node_message = message

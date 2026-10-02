@@ -24,6 +24,25 @@ class OutboundConnectionBlockedError(AssertionError):
     """A test tried to reach something other than loopback."""
 
 
+# Every blocked attempt, recorded before the error is raised. Code that phones home often wraps
+# the call in `except Exception`, which would swallow the error; the record still fails the test
+# (or the session, for attempts outside a test). See `raise_if_blocked` and conftest.py.
+BLOCKED: list[str] = []
+
+
+def _blocked(message: str) -> OutboundConnectionBlockedError:
+    BLOCKED.append(message)
+    return OutboundConnectionBlockedError(message)
+
+
+def raise_if_blocked() -> None:
+    """Fail if anything was blocked since the last check, and reset the record."""
+    if BLOCKED:
+        attempts = "; ".join(BLOCKED)
+        BLOCKED.clear()
+        raise OutboundConnectionBlockedError(f"socket guard blocked {attempts}")
+
+
 def is_loopback(host: object) -> bool:
     if isinstance(host, bytes):
         host = host.decode("ascii", "replace")
@@ -43,7 +62,7 @@ def _check(family: int, address: Any, what: str) -> None:
         return  # a local socket file: no network
     host = address[0] if isinstance(address, tuple) and address else address
     if not is_loopback(host):
-        raise OutboundConnectionBlockedError(f"socket guard: {what} to {host!r} is not loopback (T-305)")
+        raise _blocked(f"socket guard: {what} to {host!r} is not loopback (T-305)")
 
 
 @contextmanager
@@ -52,6 +71,7 @@ def installed() -> Iterator[None]:
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
     real_sendto = socket.socket.sendto
+    real_sendmsg = socket.socket.sendmsg
     real_getaddrinfo = socket.getaddrinfo
 
     def connect(self: socket.socket, address: Any) -> None:
@@ -63,12 +83,21 @@ def installed() -> Iterator[None]:
         return real_connect_ex(self, address)
 
     def sendto(self: socket.socket, data: Any, *args: Any) -> int:
-        _check(self.family, args[-1], "sendto")
+        if args:  # sendto(data, address) or sendto(data, flags, address)
+            _check(self.family, args[-1], "sendto")
         return real_sendto(self, data, *args)
+
+    def sendmsg(self: socket.socket, buffers: Any, *args: Any, **kwargs: Any) -> int:
+        # sendmsg(buffers[, ancdata[, flags[, address]]]): an unconnected datagram socket can send
+        # to `address` without connect() or sendto().
+        address = args[2] if len(args) >= 3 else kwargs.get("address")
+        if address is not None:
+            _check(self.family, address, "sendmsg")
+        return real_sendmsg(self, buffers, *args, **kwargs)
 
     def getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
         if host is not None and not is_loopback(host):
-            raise OutboundConnectionBlockedError(f"socket guard: name lookup of {host!r} (T-305)")
+            raise _blocked(f"socket guard: name lookup of {host!r} (T-305)")
         return real_getaddrinfo(host, *args, **kwargs)
 
     def guarded_lookup(name: str) -> Callable[..., Any]:
@@ -78,7 +107,7 @@ def installed() -> Iterator[None]:
             # getnameinfo takes a socket address tuple; the others take a host.
             target = host[0] if isinstance(host, tuple) and host else host
             if not is_loopback(target):
-                raise OutboundConnectionBlockedError(f"socket guard: {name}({target!r}) (T-305)")
+                raise _blocked(f"socket guard: {name}({target!r}) (T-305)")
             return real(host, *args, **kwargs)
 
         return lookup
@@ -87,6 +116,7 @@ def installed() -> Iterator[None]:
         mp.setattr(socket.socket, "connect", connect)
         mp.setattr(socket.socket, "connect_ex", connect_ex)
         mp.setattr(socket.socket, "sendto", sendto)
+        mp.setattr(socket.socket, "sendmsg", sendmsg)
         mp.setattr(socket, "getaddrinfo", getaddrinfo)
         # Older resolver entry points that bypass getaddrinfo. Loopback stays allowed: the stdlib
         # HTTP server asks getfqdn("127.0.0.1") when it binds.
