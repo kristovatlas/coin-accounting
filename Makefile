@@ -74,9 +74,10 @@ lint-workflows: ## Check the GitHub workflows with the pinned actionlint and ziz
 	@# secrets, and no ZIZMOR_* variable can switch zizmor's online audits off or point it at another
 	@# config (ADR 0026). actionlint finds .yml and .yaml workflows itself and runs no shellcheck/pyflakes.
 	cd "$(ROOT)" && env -i HOME="$$HOME" PATH=/usr/bin:/bin "$(TOOLBIN)/actionlint" -no-color -shellcheck= -pyflakes=
-	@# zizmor gets only its own no-permission token, and audits the whole repository (workflows,
-	@# dependabot.yml and any local actions).
-	cd "$(ROOT)" && env -i HOME="$$HOME" PATH=/usr/bin:/bin ZIZMOR_GITHUB_TOKEN="$$ZIZMOR_GITHUB_TOKEN" "$(TOOLBIN)/zizmor" .
+	@# zizmor gets only its own no-permission token, loads no config file (--no-config), and audits
+	@# the whole repository (workflows, dependabot.yml and any local actions). check_repo_files
+	@# rejects linter config files and zizmor ignore comments (ADR 0026).
+	cd "$(ROOT)" && env -i HOME="$$HOME" PATH=/usr/bin:/bin ZIZMOR_GITHUB_TOKEN="$$ZIZMOR_GITHUB_TOKEN" "$(TOOLBIN)/zizmor" --no-config .
 
 .PHONY: test-tools
 test-tools: ## Install the pinned bitcoind for regtest tests (hash-verified; pins must be on origin/main)

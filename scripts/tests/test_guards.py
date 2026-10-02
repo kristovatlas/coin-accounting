@@ -175,7 +175,8 @@ class MakefileOverrideTests(unittest.TestCase):
                             (("lint-workflows",), ("toolchain.py verify actionlint zizmor", "ZIZMOR_GITHUB_TOKEN",
                                                    "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin \"",
                                                    "actionlint\" -no-color -shellcheck= -pyflakes=",
-                                                   "PATH=/usr/bin:/bin ZIZMOR_GITHUB_TOKEN=\"$ZIZMOR_GITHUB_TOKEN\" \""))):
+                                                   "PATH=/usr/bin:/bin ZIZMOR_GITHUB_TOKEN=\"$ZIZMOR_GITHUB_TOKEN\" \"",
+                                                   "zizmor\" --no-config ."))):
             out = self.dry_run(*args)
             if args[0] == "lint-workflows":  # online audits on; no inherited environment (ADR 0026)
                 self.assertNotIn("--offline", out)

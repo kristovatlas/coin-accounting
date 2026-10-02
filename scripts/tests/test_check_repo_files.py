@@ -60,6 +60,30 @@ class CheckRepoFilesTests(unittest.TestCase):
         self.assertIn(".gitmodules", " ".join(check_repo_files.check(self.repo)))
         self.assertEqual(self.run_check(), 1)
 
+    def test_workflow_linter_config_files_fail(self):
+        # ADR 0026: config in the checked repository could switch an audit off (e.g. impostor-commit).
+        for path in ("zizmor.yml", ".github/zizmor.yaml", ".github/actionlint.yaml", ".github/ActionLint.yml"):
+            with self.subTest(path=path):
+                (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+                (self.repo / path).write_text("rules: {}\n")
+                self.git("add", path)
+                self.assertIn("workflow-linter config", " ".join(check_repo_files.check(self.repo)))
+                self.git("rm", "-q", "--cached", path)
+                (self.repo / path).unlink()
+        self.assertEqual(check_repo_files.check(self.repo), [])
+
+    def test_zizmor_ignore_comments_under_github_fail(self):
+        wf = self.repo / ".github" / "workflows" / "ci.yml"
+        wf.parent.mkdir(parents=True)
+        for text in ("- uses: a/b@0123 # zizmor: ignore[impostor-commit]\n", "x: 1 # Zizmor:Ignore[foo]\n"):
+            with self.subTest(text=text):
+                wf.write_text(text)
+                self.git("add", ".github/workflows/ci.yml")
+                self.assertIn("zizmor ignore comment", " ".join(check_repo_files.check(self.repo)))
+        wf.write_text("- uses: a/b@0123 # v1\n")
+        self.git("add", ".github/workflows/ci.yml")
+        self.assertEqual(check_repo_files.check(self.repo), [])
+
     def test_an_untracked_gitmodules_file_is_ignored(self):
         (self.repo / ".gitmodules").write_text("[submodule \"x\"]\n")
         self.assertEqual(check_repo_files.check(self.repo), [])

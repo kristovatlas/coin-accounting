@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Repository file-type check: no symbolic links and no git submodules (ADR 0023).
+"""Repository file check: no symbolic links and no git submodules (ADR 0023), and nothing that
+switches the workflow linters' checks off (ADR 0026).
 
 Standard library only. A symlink in the tree can point anywhere on the machine that checks it
 out: tests, tools and AI reviewers would then read or write outside the repository. A
 submodule pulls in code from another repository that no review of this one covers. The
 project needs neither, so both are banned; lifting the ban needs a new ADR.
+
+zizmor and actionlint read their own config files from the repository they check, and zizmor
+honours inline `zizmor: ignore[...]` comments, so a single PR could add an impostor-commit pin
+and quietly switch that audit off. Linter config files and ignore comments under `.github/` are
+therefore rejected; adding a reviewed config means changing this check (ADR 0026).
 
 Usage:
     check_repo_files.py [REPO]    # exit 0 = ok, 1 = banned entries found
@@ -13,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +28,9 @@ if sys.version_info < (3, 9):  # noqa: UP036 - runs on the host Python
     sys.exit("check_repo_files.py needs Python 3.9 or newer")
 
 BANNED_MODES = {"120000": "symbolic link", "160000": "git submodule"}
+# zizmor reads zizmor.yml / .github/zizmor.yml; actionlint reads .github/actionlint.yml (ADR 0026).
+LINTER_CONFIG_NAMES = {"zizmor.yml", "zizmor.yaml", "actionlint.yml", "actionlint.yaml"}
+ZIZMOR_IGNORE = re.compile(rb"zizmor\s*:\s*ignore", re.IGNORECASE)
 
 
 def git_env() -> dict:
@@ -49,6 +59,15 @@ def check(repo: Path) -> list[str]:
             errors.append(f"{name!r}: {BANNED_MODES[mode]} (banned, ADR 0023)")
         elif name == ".gitmodules":
             errors.append("'.gitmodules': submodule configuration (banned, ADR 0023)")
+        elif name.rsplit("/", 1)[-1].lower() in LINTER_CONFIG_NAMES:
+            errors.append(f"{name!r}: workflow-linter config could switch checks off (ADR 0026)")
+        elif name.lower().startswith(".github/"):
+            try:
+                data = (Path(top) / name).read_bytes()
+            except OSError:
+                data = b""
+            if ZIZMOR_IGNORE.search(data):
+                errors.append(f"{name!r}: a zizmor ignore comment could hide a finding (ADR 0026)")
     return errors
 
 
@@ -63,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     for e in errors:
         print(f"check_repo_files: {e}")
     if not errors:
-        print("check_repo_files: ok (no symlinks or submodules)")
+        print("check_repo_files: ok (no symlinks, submodules or workflow-linter overrides)")
     return 1 if errors else 0
 
 

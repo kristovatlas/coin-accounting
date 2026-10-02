@@ -93,7 +93,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | Node.js | `SHASUMS256.txt` verified against the Node release keys |
   | Python | Pinned interpreter build checked against a committed SHA-256 |
   | `bitcoind` (regtest) | `SHA256SUMS` plus a threshold of builder signatures (pinned `guix.sigs` builder keys), minimum and latest supported versions |
-  | actionlint, zizmor | Committed per-platform SHA-256 of the GitHub release asset; cross-checked at pin time against actionlint's `checksums.txt` and both projects' SLSA provenance (ADR 0026) |
+  | actionlint, zizmor | Committed per-platform SHA-256 of the GitHub release asset: trust-on-first-use against GitHub, like `sfw`. At pin time it was cross-checked against actionlint's `checksums.txt` and GitHub's SLSA provenance listing; the provenance signatures aren't verified yet (ADR 0026) |
   | Playwright browsers | Pinned `@playwright/test` version; each downloaded browser archive checked against a committed per-platform SHA-256; fails closed if no hash is recorded |
 
 - **Enforcement:** a CI check (`scripts/check-install-commands`) scans the `Makefile`, `scripts/`, `.github/workflows/` and config files for install or fetch-and-run commands without the `sfw` wrapper. It can be bypassed by obfuscation, so it is **hygiene, not a security boundary** (ADR 0022: the Claude Code guard and this check catch accidental or habitual installs; deliberate evasion is accepted risk R-8), and it allowlists documentation files that quote the banned commands. `AGENTS.md` repeats the rule for agents.
@@ -156,7 +156,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **GitHub Actions:**
   - pinned to full commit SHAs with a version comment
   - only `actions/*` or vetted publishers
-  - `zizmor` and `actionlint` run on workflow files (they catch impostor-commit pins and unsafe patterns). They're pinned binaries (§2.3), installed by `make lint-tools` and run by `make lint-workflows`. actionlint runs without its shellcheck/pyflakes integrations; both run with an otherwise empty environment, and zizmor runs its online audits (impostor-commit among them) over the whole repository against the GitHub API, with a dedicated no-permission `ZIZMOR_GITHUB_TOKEN` (ADR 0026). CI runs them once the pins are on `main` (#94)
+  - `zizmor` and `actionlint` run on workflow files (they catch impostor-commit pins and unsafe patterns). They're pinned binaries (§2.3), installed by `make lint-tools` and run by `make lint-workflows`. actionlint runs without its shellcheck/pyflakes integrations; both run with an otherwise empty environment, and zizmor runs its online audits (impostor-commit among them) over the whole repository against the GitHub API, with a dedicated no-permission `ZIZMOR_GITHUB_TOKEN` and no config file. `scripts/check_repo_files.py` rejects linter config files and `zizmor: ignore` comments, so a PR can't switch a check off (ADR 0026). CI runs them once the pins are on `main` (#94)
   - `permissions: contents: read` by default, and the repository default token is read-only
   - `persist-credentials: false` on checkout
   - no `pull_request_target`
