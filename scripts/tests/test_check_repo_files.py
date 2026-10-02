@@ -62,12 +62,14 @@ class CheckRepoFilesTests(unittest.TestCase):
 
     def test_workflow_linter_config_files_fail(self):
         # ADR 0026: config in the checked repository could switch an audit off (e.g. impostor-commit).
-        for path in ("zizmor.yml", ".github/zizmor.yaml", ".github/actionlint.yaml", ".github/ActionLint.yml"):
+        # ADR 0027: osv-scanner.toml next to a lockfile can ignore vulnerabilities or packages.
+        for path in ("zizmor.yml", ".github/zizmor.yaml", ".github/actionlint.yaml", ".github/ActionLint.yml",
+                     "osv-scanner.toml", "frontend/OSV-Scanner.TOML"):
             with self.subTest(path=path):
                 (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
                 (self.repo / path).write_text("rules: {}\n")
                 self.git("add", path)
-                self.assertIn("workflow-linter config", " ".join(check_repo_files.check(self.repo)))
+                self.assertIn("could switch checks off", " ".join(check_repo_files.check(self.repo)))
                 self.git("rm", "-q", "--cached", path)
                 (self.repo / path).unlink()
         self.assertEqual(check_repo_files.check(self.repo), [])
