@@ -4,7 +4,10 @@ version = "0.0.0"
 description = "Local, privacy-first Bitcoin cost basis and doxx tracking (see PLAN.md)"
 requires-python = "==3.13.*"
 # Dependencies are added only after human approval (ENGINEERING §2.4, docs/DEPENDENCIES.md).
-dependencies = []
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn==0.53.0",
+]
 
 [dependency-groups]
 dev = [

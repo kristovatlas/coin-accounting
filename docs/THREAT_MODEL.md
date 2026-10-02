@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.7.23 (M0 in progress) |
+| Version | 0.7.24 (M0 in progress) |
 | Last updated | 2026-10-01 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -379,3 +379,4 @@ This applies to almost any project that vets its dependencies.
 | 2026-10-01 | 0.7.21 | T-603 (#69): verification now also fails on a writable toolchain tree (`make toolchain` re-hardens it). `remove_tree` refuses a symlinked tool directory before any chmod. A failed hardening leaves no valid marker. Limits (root, owner `chmod`) are recorded in ENGINEERING §2.3; PR #83 review: tool paths with a symlinked component (`.toolchain`, `.toolchain/bin`, `.toolchain/<name>`, the version directory) are refused, and an unreadable directory fails the digest and write-bit checks instead of being skipped |
 | 2026-10-01 | 0.7.22 | §6, T-601 and T-603 (ADR 0027): `make audit` uses a pinned `osv-scanner`, trust-on-first-use against GitHub. It adds a dev-time flow to `api.osv.dev` carrying the local lockfiles' package names and versions (for merged lockfiles, what the public repository already shows) and the requester's IP address. It runs with an empty config from outside the repository (a committed `osv-scanner.toml` is also rejected), `--no-resolve` (no deps.dev or registry lookups) and an empty environment. Statuses stay Planned |
 | 2026-10-01 | 0.7.23 | T-603 (#67): the pinned pnpm 12 is a Rust binary with no embedded Node runtime (no V8 or Node symbols), so it doesn't depend on the pinned Node. The unused `npm-tgz` install path and its Node chaining are removed, and the shipped pin type (`tar` plus sha512 integrity) is now tested. The pnpm packages carry an npm registry signature and a SLSA provenance attestation, not yet verified at install (#15) |
+| 2026-10-02 | 0.7.24 | T-601, T-602, T-604 (ADR 0028, proposed): FastAPI 0.141.1 and uvicorn 0.53.0 proposed as the first runtime dependencies, with `pydantic-core` as allowed native code. FastAPI 0.142.x is avoided for now because it requires `opentelemetry-api` (T-604). Every new wheel was checked against its hash for `.pth` files and install scripts. Statuses unchanged |
