@@ -40,6 +40,10 @@ def read_config_text(data_dir: DataDir) -> str:
             raise ConfigFileError(f"{path} isn't a regular file")
         if st.st_uid != os.getuid():
             raise ConfigFileError(f"{path} is owned by another user")
+        if st.st_dev != data_dir.device:
+            raise ConfigFileError(
+                f"{path} is on a different filesystem from the data directory (a mount?) (T-401)"
+            )
         if st.st_mode & 0o077:
             raise ConfigFileError(f"{path} holds the RPC password: run chmod 600 on it (T-201)")
         with os.fdopen(fd, "rb", closefd=False) as f:
