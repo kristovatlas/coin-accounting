@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.7.25 (M0 in progress) |
+| Version | 0.7.26 (M0 in progress) |
 | Last updated | 2026-10-01 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -330,13 +330,14 @@ This applies to almost any project that vets its dependencies.
 | R-7 | **Browser extensions can read the app's pages** (T-111) | This follows from the decision to use the user's default browser (R-5): a managed profile or desktop shell would have had no extensions. It is mitigated by docs advice (private window or clean profile). To be revisited together with R-5 |
 | R-8 | **Deliberate evasion of the install-command guard** by an agent or a compromised dev tool (exported variables, `eval`, commands in script files, planted makefiles, unlisted launchers; list in #29) | User decision, 2026-09-28 (ADR 0022): the guard is hygiene against accidental installs. A command-text matcher can't stop a determined agent. Covered by human PR review, the no-real-data rule (T-607) and Socket Firewall on the actual installs (T-601) |
 | R-9 | **AI review panel** (ADR 0020, ADR 0023): reviewers can read local files, and their reports are posted publicly; the panel runs the owner's PR code locally (tests, `make check`), as in normal development (R-6); a PR could be written to steer the AI reviewers and the Opus tripwire; the tripwire is a heuristic a deliberate author can evade, and its commit status is advisory; the orchestrator holds the owner's credentials, so "never merges" is procedural | User decisions, 2026-09-28 (ADR 0020) and 2026-09-29 (ADR 0023): AI agents are not sandboxed, because that is a very hard engineering programme; findings that an agent could be steered, or that a rule is only an instruction, are accepted here rather than fixed. **Assumptions:** the owner is the only one who can push (the owner-only commit check uses email-derived logins); the owner never keeps real data, or mounts VeraCrypt, on the machine where agents and reviewers run, so the panel has no data-volume checks (R-6, T-607 still apply to other agents). Limited by: the human still merges every PR, pointed at the tripwire flags (the mechanical scan runs from `main`'s copy with a fixed git configuration, and flags deletions as well as additions); reviewers can't write (read-only tools, Codex read-only sandbox); the mechanical secret scan (`scripts/secret_scan.py`) on everything posted; owner-only PRs and commits; symlinks and submodules are banned from the tree (`scripts/check_repo_files.py`, CI). Merge only the SHA named in the hand-off |
+| R-10 | **Another local OS user impersonates the node** (AD2): while `bitcoind` isn't running, another account on the same machine can listen on the configured loopback RPC port. The app would then send it the read-only RPC user's credentials and, later, the descriptors and outpoints it looks up. The listener can answer the startup checks convincingly (T-202, T-203, #107) | User decision, 2026-10-02: the app is meant for a single-user machine, like the one holding the encrypted volume; other local accounts are outside the supported setup. The docs say so, and suggest an RPC port below 1024 on Linux, which only root can bind. A Linux socket-owner check was considered and not taken (#107) |
 
 ## 10. Open questions
 
 1. ~~Non-Linux VeraCrypt detection (macOS/Windows) for T-401: do we support these platforms in v1?~~ **Resolved (2026-09-27):** v1 supports Linux and macOS; Windows is not planned. The macOS detection method is designed in M0 (T-401).
 2. ~~**In-app "lock"** so the volume can be dismounted cleanly without killing the app.~~ **Resolved (2026-09-27): deferred to a future version.** For v1 the documented workflow is to quit the app and close its browser window, then dismount (T-405). The backend should still treat "no DB open" as a clean state where cheap, so a lock is easy to add later.
 3. ~~Should a second price source be added for cross-checking (T-303)?~~ **Resolved (2026-09-27): deferred to a future version.** v1 relies on TLS, sanity checks, content hashes and user overrides (T-303). A second source would add one more outbound flow (§6), so it needs an ADR.
-4. ~~**Minimum Bitcoin Core version**~~ **Resolved (2026-09-27): ≥ 31.0**, for `txospenderindex` (raised from 29.0 after the PR #4 reviews). The user accepts any minimum.
+4. ~~**Minimum Bitcoin Core version**~~ **Resolved (2026-09-27): ≥ 31.0**, for `txospenderindex` (raised from 29.0 after the PR #4 reviews). **Raised to ≥ 31.1 on 2026-10-02** (ADR 0029), the pinned and tested version.
 
 ## 11. Changelog
 
@@ -381,3 +382,4 @@ This applies to almost any project that vets its dependencies.
 | 2026-10-01 | 0.7.23 | T-603 (#67): the pinned pnpm 12 is a Rust binary with no embedded Node runtime (no V8 or Node symbols), so it doesn't depend on the pinned Node. The unused `npm-tgz` install path and its Node chaining are removed, and the shipped pin type (`tar` plus sha512 integrity) is now tested. The pnpm packages carry an npm registry signature and a SLSA provenance attestation, not yet verified at install (#15) |
 | 2026-10-02 | 0.7.24 | M0.3 RPC client: T-201, T-202, T-203, T-206, T-209, T-210 move to Implemented (partly) with evidence (config parsing, `rpc.py`, startup node checks, unit tests); T-305 Implemented (partly): the socket guard, on before collection, not yet in CI |
 | 2026-10-02 | 0.7.25 | T-203, T-209, T-210: regtest integration tests (harness `e2e/harness/regtest.py`); T-209's M0 datadir check is done, descriptor scans included, with and without `debug=rpc,http` |
+| 2026-10-02 | 0.7.26 | R-10: another local user impersonating the node on the loopback RPC port is an accepted risk (single-user machine; #107). The minimum Core version is 31.1 (ADR 0029) |
