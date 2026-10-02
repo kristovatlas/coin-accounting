@@ -172,7 +172,9 @@ class MakefileOverrideTests(unittest.TestCase):
                             (("propose-js", "PKG=a@1", "WORKSPACE=frontend"), (config, verify)),
                             (("propose-py", "PKG=a==1"), (config, verify, "add --no-sync --no-build")),
                             (("lint-tools",), ("scripts/toolchain.py install --only actionlint zizmor \n",)),
-                            (("lint-workflows",), ("toolchain.py verify actionlint zizmor", "zizmor\" --offline"))):
+                            (("lint-workflows",), ("toolchain.py verify actionlint zizmor", "ZIZMOR_GITHUB_TOKEN",
+                                                   "actionlint\" -no-color -shellcheck= -pyflakes=",
+                                                   "env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u ZIZMOR_OFFLINE"))):
             out = self.dry_run(*args)
             for text in needs:
                 with self.subTest(target=args[0], needs=text):

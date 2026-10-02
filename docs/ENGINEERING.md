@@ -70,6 +70,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | `make update-deps` | Batch update (§2.6), lockfile-only, then the same review |
   | `make update-sfw` | Reviewed update of the pinned `sfw` version and checksum |
   | `make test-tools` | Pinned, verified test tooling downloads (see "Non-package downloads") |
+  | `make lint-tools` / `make lint-workflows` | Install the pinned actionlint and zizmor; check the workflows with them (§2.7, ADR 0026) |
   | `make audit` | `pip-audit` and `pnpm audit` against the lockfiles (tools locked as dev dependencies; network through `sfw`) |
 
   Contributors, AI agents and CI all use these targets. CI jobs call `make toolchain` and `make bootstrap`, never raw installers.
@@ -92,6 +93,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | Node.js | `SHASUMS256.txt` verified against the Node release keys |
   | Python | Pinned interpreter build checked against a committed SHA-256 |
   | `bitcoind` (regtest) | `SHA256SUMS` plus a threshold of builder signatures (pinned `guix.sigs` builder keys), minimum and latest supported versions |
+  | actionlint, zizmor | Committed per-platform SHA-256 of the GitHub release asset; cross-checked at pin time against actionlint's `checksums.txt` and both projects' SLSA provenance (ADR 0026) |
   | Playwright browsers | Pinned `@playwright/test` version; each downloaded browser archive checked against a committed per-platform SHA-256; fails closed if no hash is recorded |
 
 - **Enforcement:** a CI check (`scripts/check-install-commands`) scans the `Makefile`, `scripts/`, `.github/workflows/` and config files for install or fetch-and-run commands without the `sfw` wrapper. It can be bypassed by obfuscation, so it is **hygiene, not a security boundary** (ADR 0022: the Claude Code guard and this check catch accidental or habitual installs; deliberate evasion is accepted risk R-8), and it allowlists documentation files that quote the banned commands. `AGENTS.md` repeats the rule for agents.
@@ -154,7 +156,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **GitHub Actions:**
   - pinned to full commit SHAs with a version comment
   - only `actions/*` or vetted publishers
-  - `zizmor` and `actionlint` run on workflow files (they catch impostor-commit pins and unsafe patterns). They're pinned binaries (§2.3), installed by `make lint-tools` and run by `make lint-workflows`; zizmor runs with `--offline`. CI runs them once the pins are on `main`
+  - `zizmor` and `actionlint` run on workflow files (they catch impostor-commit pins and unsafe patterns). They're pinned binaries (§2.3), installed by `make lint-tools` and run by `make lint-workflows`. actionlint runs without its shellcheck/pyflakes integrations; zizmor runs its online audits (impostor-commit among them) against the GitHub API with a dedicated no-permission `ZIZMOR_GITHUB_TOKEN` (ADR 0026). CI runs them once the pins are on `main` (#94)
   - `permissions: contents: read` by default, and the repository default token is read-only
   - `persist-credentials: false` on checkout
   - no `pull_request_target`
@@ -398,4 +400,4 @@ A change is done only when:
 | 2026-10-01 | 0.2.17 | M0.2 verify at setup: no `packageManager` field (pnpm 12 resolves it from the registry on every command, #51); the lockfile check rejects it |
 | 2026-10-01 | 0.2.18 | M0.2: the `.pth` allowlist also admits coverage.py's own `a1_coverage.pth`, pinned by content (ADR 0025, PR #78) |
 | 2026-10-01 | 0.2.19 | §2.5: the lockfile check is hardened (#71, #72): file-name binding, declared dependencies without `uv.lock`, escaped keys, hook and lockfile settings, `ignorePnpmfile` required, any-case `.pnpmfile`, nested and branch pnpm lockfiles; after PR #81 review: `lockfile`/`lockfileDir` and indirect YAML key syntax rejected, exact PyPI URL shape only, any-case lockfile names; the pinned Python is verified before `make check` or the wrapper uses it; the accepted upload-time limit is recorded |
-| 2026-10-01 | 0.2.20 | M0.2: actionlint 1.7.12 and zizmor 1.30.1 pinned (pending approval); `make lint-tools` / `make lint-workflows` |
+| 2026-10-01 | 0.2.20 | M0.2: actionlint 1.7.12 and zizmor 1.30.1 pinned (pending approval; ADR 0026); `make lint-tools` / `make lint-workflows`; actionlint without its shellcheck/pyflakes integrations; zizmor with its online audits and a dedicated no-permission token (§2.3, §2.7) |

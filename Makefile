@@ -67,10 +67,13 @@ lint-tools: ## Install the pinned actionlint and zizmor (hash-verified; pins mus
 	"$(SYS_PYTHON)" scripts/toolchain.py install --only actionlint zizmor $(if $(DEPS_OK),--approved)
 
 .PHONY: lint-workflows
-lint-workflows: ## Check the GitHub workflows with the pinned actionlint and zizmor (offline)
+lint-workflows: ## Check the GitHub workflows with the pinned actionlint and zizmor (zizmor's online audits need ZIZMOR_GITHUB_TOKEN; ADR 0026)
 	@"$(SYS_PYTHON)" scripts/toolchain.py verify actionlint zizmor >/dev/null || { echo "Run 'make lint-tools' first (the pinned, unmodified actionlint and zizmor are required)." >&2; exit 1; }
-	"$(TOOLBIN)/actionlint" -no-color .github/workflows/*.yml
-	"$(TOOLBIN)/zizmor" --offline .github/workflows
+	@[ -n "$${ZIZMOR_GITHUB_TOKEN:-}" ] || { echo "Set ZIZMOR_GITHUB_TOKEN to a GitHub token with no permissions (a fine-grained token with public-repository read access only): zizmor's online audits, e.g. impostor-commit, use it for rate limits (ADR 0026)." >&2; exit 1; }
+	@# actionlint finds .yml and .yaml workflows itself; its shellcheck/pyflakes integrations are off, so no unpinned tool runs.
+	cd "$(ROOT)" && "$(TOOLBIN)/actionlint" -no-color -shellcheck= -pyflakes=
+	@# zizmor gets only its own no-permission token: never the caller's GH_TOKEN/GITHUB_TOKEN, and online mode can't be switched off from the environment.
+	cd "$(ROOT)" && env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u ZIZMOR_OFFLINE -u ZIZMOR_NO_ONLINE_AUDITS "$(TOOLBIN)/zizmor" .github/workflows
 
 .PHONY: test-tools
 test-tools: ## Install the pinned bitcoind for regtest tests (hash-verified; pins must be on origin/main)
