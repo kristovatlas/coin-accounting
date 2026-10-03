@@ -14,6 +14,7 @@ import logging
 import os
 import stat
 import sys
+import time
 from typing import Final
 
 from coinacct.domain.redact import redact
@@ -25,7 +26,11 @@ FORMAT: Final = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 class RedactingFormatter(logging.Formatter):
     """Redacts the message, the traceback and the stack, but not the time, level or logger name:
-    redacting the whole line would mask the timestamp's `56,789` too."""
+    redacting the whole line would mask the timestamp's `56,789` too. Times are UTC, in ISO 8601
+    with a `Z` (ENGINEERING §5.2: timestamps are timezone-aware UTC)."""
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created)) + f".{int(record.msecs):03d}Z"
 
     def format(self, record: logging.LogRecord) -> str:
         clean = logging.makeLogRecord(record.__dict__)

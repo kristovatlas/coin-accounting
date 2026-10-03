@@ -21,7 +21,10 @@ _CURRENCY_CODES: Final = r"(?:BTC|USD|EUR|GBP|JPY|CHF|CAD|AUD)"
 _INTEGER: Final = r"(?:\d{1,3}(?:,\d{3})+|\d+)"
 _NUMBER: Final = rf"{_INTEGER}(?:\.\d+)?(?:[eE][-+]?\d+)?"
 # Ends a number: no word character and no further digits (a sentence's full stop is fine).
-_END: Final = r"(?!\w)(?!\.\d)(?!,\d)"
+_END: Final = r"(?!\w)(?!\.\d)"
+# A digit-grouped integer also can't stop before another `,ddd` group. Only for those: a comma after
+# a fraction or after four or more digits separates values (`0.12345678,144`), it never groups them.
+_END_GROUPED: Final = rf"{_END}(?!,\d)"
 
 # Order matters: credentials and keys first, then addresses, hex, and the amount forms from the
 # most specific to the most general.
@@ -52,7 +55,7 @@ _RULES: Final = (
     (re.compile(rf"(?<![\w.,]){_INTEGER}\.\d{{2,}}(?:[eE][-+]?\d+)?{_END}"), "<amount>"),
     (re.compile(rf"(?<![\w.,])\d+(?:\.\d+)?[eE][-+]?\d+{_END}"), "<amount>"),
     # Long and digit-grouped integers: satoshi amounts, heights, timestamps.
-    (re.compile(rf"(?<![\w.,])(?:\d{{5,}}|\d{{1,3}}(?:,\d{{3}})+){_END}"), "<number>"),
+    (re.compile(rf"(?<![\w.,])(?:\d{{5,}}{_END}|\d{{1,3}}(?:,\d{{3}})+{_END_GROUPED})"), "<number>"),
 )
 
 

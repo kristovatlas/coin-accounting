@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 import pytest
 
 from coinacct.storage.datadir import DataDir, DataDirError, open_data_dir
-from coinacct.storage.logfile import LOG_NAME, open_log_handler
+from coinacct.storage.logfile import FORMAT, LOG_NAME, RedactingFormatter, open_log_handler
 
 TXID = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
 
@@ -41,11 +42,22 @@ def test_records_and_tracebacks_are_redacted_into_a_private_file_t403(dd: DataDi
     assert TXID not in text and "0.50000000" not in text
     assert "spent <hex> for <amount> BTC" in text
     assert "KeyError: '<hex>'" in text
-    # The timestamp is left alone: its `12:34:56,789` must not be masked as a grouped number.
+    # The timestamp is left alone (ISO 8601 UTC), not masked as a number.
     stamped = [line for line in text.splitlines() if " WARNING " in line or " ERROR " in line]
     assert len(stamped) == 2
-    assert all(re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} ", line) for line in stamped)
+    assert all(re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z ", line) for line in stamped)
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_log_times_are_utc_whatever_the_local_time_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        record = logging.makeLogRecord({"msg": "hello", "created": 0.0, "msecs": 0.0})
+        assert RedactingFormatter(FORMAT).format(record).startswith("1970-01-01T00:00:00.000Z ")
+    finally:
+        monkeypatch.undo()
+        time.tzset()
 
 
 def test_an_existing_log_others_can_read_is_refused_t403(dd: DataDir) -> None:

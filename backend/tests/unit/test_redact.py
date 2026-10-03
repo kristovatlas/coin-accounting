@@ -56,6 +56,11 @@ WIF = "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
         ("scan 840000,840100", "scan <number>,<number>"),
         ("[0.1,0.12345678]", "[0.1,<amount>]"),
         ("2024-01-01,0.12345678,BTC", "2024-01-01,<amount>,BTC"),
+        # …and when the next value has exactly three digits, which looks like a thousands group.
+        ("2024-01-01,0.12345678,144", "2024-01-01,<amount>,144"),
+        ("[150000000,250]", "[<number>,250]"),
+        ("BTC 0.12345678,144", "BTC <amount>,144"),
+        ("1,234,567.89 and 12,345,678", "<amount> and <number>"),
     ],
 )
 def test_chain_identifiers_and_amounts_are_masked_t403(text: str, expected: str) -> None:
