@@ -1,8 +1,8 @@
 """The log file handler (architecture §1, §6; THREAT_MODEL T-403).
 
 Logs go only to `<data>/logs/coinacct.log`: a regular file of mode 0600 on the verified device,
-never opened through a link. Every record is redacted after formatting, so the message, its
-arguments and any traceback are all covered. A record that fails to format or write is reported
+never opened through a link. Every record's message (with its arguments), traceback and stack
+are redacted; the time, level and logger name are not. A record that fails to format or write is reported
 to stderr with a fixed line only: logging's default error path would print it unredacted. The
 launcher installs this once; no module imports it (architecture §2, "Logging").
 """
@@ -24,8 +24,21 @@ FORMAT: Final = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
 class RedactingFormatter(logging.Formatter):
+    """Redacts the message, the traceback and the stack, but not the time, level or logger name:
+    redacting the whole line would mask the timestamp's `56,789` too."""
+
     def format(self, record: logging.LogRecord) -> str:
-        return redact(super().format(record))
+        clean = logging.makeLogRecord(record.__dict__)
+        clean.msg = redact(record.getMessage())
+        clean.args = None
+        clean.exc_text = redact(record.exc_text) if record.exc_text else None
+        return super().format(clean)
+
+    def formatException(self, ei: logging._SysExcInfoType) -> str:
+        return redact(super().formatException(ei))
+
+    def formatStack(self, stack_info: str) -> str:
+        return redact(super().formatStack(stack_info))
 
 
 class RedactingFileHandler(logging.StreamHandler):  # type: ignore[type-arg]

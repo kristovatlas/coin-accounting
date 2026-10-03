@@ -113,6 +113,9 @@ def install_logging(handler: logging.Handler) -> None:
     for existing in list(root.handlers):
         root.removeHandler(existing)
     root.addHandler(handler)
+    # A record no handler takes (a logger with propagate=False, as libraries set up) would otherwise
+    # go to logging.lastResort: stderr, unredacted.
+    logging.lastResort = handler
     root.setLevel(logging.INFO)
     logging.captureWarnings(True)
 

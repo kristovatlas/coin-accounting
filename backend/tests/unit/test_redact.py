@@ -3,8 +3,6 @@ OP_TRUE address, the genesis block's address and hash, and a BIP32 test-vector k
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from coinacct.domain.redact import redact
@@ -53,6 +51,11 @@ WIF = "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
         ("Proxy-Authorization: token123", "Proxy-Authorization: <credential>"),
         ("open http://127.0.0.1:5/#bootstrap=AbC_d-9xyz", "open http://127.0.0.1:5/#bootstrap=<credential>"),
         ("rpc.port must be from 1 to 65535", "rpc.port must be from 1 to <number>"),
+        # Values joined by commas, as in compact JSON or a CSV row.
+        ("0.12345678,0.98765432", "<amount>,<amount>"),
+        ("scan 840000,840100", "scan <number>,<number>"),
+        ("[0.1,0.12345678]", "[0.1,<amount>]"),
+        ("2024-01-01,0.12345678,BTC", "2024-01-01,<amount>,BTC"),
     ],
 )
 def test_chain_identifiers_and_amounts_are_masked_t403(text: str, expected: str) -> None:
@@ -75,10 +78,17 @@ def test_ordinary_operational_text_is_left_readable(text: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "text", ["1," * 50_000, "1,234," * 30_000, "$1," * 30_000, "USD 1," * 20_000, "9" * 200_000]
+    ("text", "expected"),
+    [
+        ("1," * 50_000, "1," * 50_000),
+        ("1,234," * 30_000, "<number>," * 30_000),
+        ("$1," * 30_000, "<amount>," * 30_000),
+        ("USD 1," * 20_000, "USD <amount>," * 20_000),
+        ("9" * 200_000, "<hex>"),  # 40+ digits are hex too
+    ],
+    ids=["commas", "grouped", "signs", "codes", "digits"],
 )
-def test_long_inputs_are_redacted_in_linear_time_t403(text: str) -> None:
-    # A quadratic pattern takes minutes on these; the linear rules take milliseconds.
-    start = time.monotonic()
-    redact(text)
-    assert time.monotonic() - start < 2.0
+def test_long_adversarial_inputs_are_redacted_t403(text: str, expected: str) -> None:
+    # No time limit (ENGINEERING §3.5): the linear rules finish in milliseconds, while a quadratic
+    # pattern (such as `[\d,]*`) would not finish at all on these, failing the job.
+    assert redact(text) == expected

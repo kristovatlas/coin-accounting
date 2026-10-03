@@ -31,6 +31,7 @@ def process_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(threading, "excepthook", threading.excepthook)
     monkeypatch.setattr(tempfile, "tempdir", tempfile.tempdir)
     monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.setattr(logging, "lastResort", logging.lastResort)
     root = logging.getLogger()
     handlers, level = list(root.handlers), root.level
     yield
@@ -156,12 +157,18 @@ def test_logs_and_crashes_are_written_redacted_to_the_volume_t403(
     worker = threading.Thread(target=fail)
     worker.start()
     worker.join()
+    # A logger that doesn't propagate and has no handler, as libraries set up: logging's
+    # lastResort would print it to stderr unredacted.
+    isolated = logging.getLogger("test.isolated")
+    monkeypatch.setattr(isolated, "propagate", False)
+    isolated.warning("isolated %s", TXID)
     for handler in logging.getLogger().handlers:
         handler.flush()
     log_file = data / "logs" / "coinacct.log"
     text = log_file.read_text()
     assert TXID not in text
-    assert text.count("<hex>") >= 3
+    assert text.count("<hex>") >= 4
+    assert "isolated <hex>" in text
     assert "unhandled exception in thread" in text
     assert log_file.stat().st_mode & 0o777 == 0o600
     assert TXID not in capsys.readouterr().err

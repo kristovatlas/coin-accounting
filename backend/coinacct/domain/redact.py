@@ -56,7 +56,16 @@ _RULES: Final = (
 )
 
 
+# A comma that isn't a thousands separator (one not followed by exactly three digits): values
+# joined by one, as in compact JSON or a CSV row, are redacted as separate pieces.
+_LIST_COMMA: Final = re.compile(r"(,(?!\d{3}(?!\d)))")
+
+
 def redact(text: str) -> str:
+    return "".join(_redact_piece(piece) for piece in _LIST_COMMA.split(text))
+
+
+def _redact_piece(text: str) -> str:
     for pattern, replacement in _RULES:
         text = pattern.sub(replacement, text)
     return text

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,10 @@ def test_records_and_tracebacks_are_redacted_into_a_private_file_t403(dd: DataDi
     assert TXID not in text and "0.50000000" not in text
     assert "spent <hex> for <amount> BTC" in text
     assert "KeyError: '<hex>'" in text
+    # The timestamp is left alone: its `12:34:56,789` must not be masked as a grouped number.
+    stamped = [line for line in text.splitlines() if " WARNING " in line or " ERROR " in line]
+    assert len(stamped) == 2
+    assert all(re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} ", line) for line in stamped)
     assert path.stat().st_mode & 0o777 == 0o600
 
 
