@@ -23,6 +23,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -58,6 +59,7 @@ INDEXES: Final = ("txindex", "blockfilterindex", "txospenderindex")
 # mined to it are spendable by anyone, so it is fine as a public test fixture.
 OP_TRUE_ADDRESS: Final = "bcrt1qft5p2uhsdcdc3l2ua4ap5qqfg4pjaqlp250x7us7a8qqhrxrxfsqseac85"
 STARTUP_TIMEOUT: Final = 60.0
+INDEX_SYNC_TIMEOUT: Final = 30.0
 READY_LINE: Final = "init message: Done loading"
 
 
@@ -77,10 +79,26 @@ class RegtestNode:
         """Call any method as the harness user (test setup only; never the app's path)."""
         return _admin_call(self.port, self._harness_password, method, list(params))
 
-    def mine(self, blocks: int) -> list[str]:
-        result = self.admin("generatetoaddress", [blocks, OP_TRUE_ADDRESS])
+    def mine(self, blocks: int, address: str = OP_TRUE_ADDRESS) -> list[str]:
+        """Mine `blocks` to `address`, then wait until every enabled index has reached the new tip:
+        Core updates the indexes in the background, so a scan straight after mining can miss the
+        newest blocks."""
+        result = self.admin("generatetoaddress", [blocks, address])
         assert isinstance(result, list)
+        self.wait_for_indexes()
         return result
+
+    def wait_for_indexes(self, timeout: float = INDEX_SYNC_TIMEOUT) -> None:
+        tick = threading.Event()  # never set: only used for its bounded wait
+        deadline = time.monotonic() + timeout
+        while True:
+            height = self.admin("getblockcount")
+            indexes = self.admin("getindexinfo")
+            if all(i["synced"] and i["best_block_height"] == height for i in indexes.values()):
+                return
+            if time.monotonic() > deadline:
+                raise HarnessError(f"indexes didn't reach height {height} within {timeout}s: {indexes}")
+            tick.wait(0.02)
 
     @property
     def _harness_password(self) -> str:

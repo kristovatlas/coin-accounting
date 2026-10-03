@@ -116,7 +116,7 @@ def test_lookups_and_scans_leave_no_trace_in_the_node_datadir_except_the_canary_
         client = app_client(n)
         descriptor = client.call("getdescriptorinfo", [TEST_DESCRIPTOR])["descriptor"]
         addresses = client.call("deriveaddresses", [descriptor, [0, 2]])
-        hit_block = n.admin("generatetoaddress", [1, addresses[1]])[0]
+        hit_block = n.mine(1, addresses[1])[0]
         n.mine(100)  # so the scan's stop height (tip - 100 in the app) would reach the hit
         scan = client.call("scanblocks", ["start", [{"desc": descriptor, "range": [0, 2]}]])
         assert scan["completed"] is True
