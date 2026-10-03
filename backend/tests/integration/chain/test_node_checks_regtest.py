@@ -102,23 +102,42 @@ def test_a_whitelist_without_a_needed_method_is_reported(tmp_path: Path) -> None
         assert problems_of(n) == [Problem.METHOD_REFUSED]
 
 
-def test_lookups_leave_no_trace_in_the_node_datadir_except_the_canary_line_t209(tmp_path: Path) -> None:
-    # THREAT_MODEL T-209's M0 check: after a run, search the node's datadir for what was looked up.
-    with regtest_node(tmp_path / "node") as n:
-        n.mine(3)
+@pytest.mark.parametrize(
+    "debug", [(), ("-debug=rpc", "-debug=http")], ids=["default-logging", "debug-rpc-http"]
+)
+def test_lookups_and_scans_leave_no_trace_in_the_node_datadir_except_the_canary_line_t209(
+    tmp_path: Path, debug: tuple[str, ...]
+) -> None:
+    # THREAT_MODEL T-209's M0 check: after a run that looks up a txid and **scans a descriptor**
+    # (scanblocks, getdescriptoractivity), search every file in the node's datadir for the
+    # descriptor's key, its addresses and the txids. The only expected trace is the canary's
+    # warning. Run with default logging and with debug=rpc,http, which T-209 and T-204 name.
+    with regtest_node(tmp_path / "node", extra_args=debug) as n:
         client = app_client(n)
-        txid = client.call("getblock", [client.call("getblockhash", [1]), 1])["tx"][0]
-        client.call("getrawtransaction", [txid, 2])
-        client.call(
-            "deriveaddresses", [client.call("getdescriptorinfo", [TEST_DESCRIPTOR])["descriptor"], [0, 2]]
+        descriptor = client.call("getdescriptorinfo", [TEST_DESCRIPTOR])["descriptor"]
+        addresses = client.call("deriveaddresses", [descriptor, [0, 2]])
+        hit_block = n.admin("generatetoaddress", [1, addresses[1]])[0]
+        n.mine(100)  # so the scan's stop height (tip - 100 in the app) would reach the hit
+        scan = client.call("scanblocks", ["start", [{"desc": descriptor, "range": [0, 2]}]])
+        assert scan["completed"] is True
+        assert hit_block in scan["relevant_blocks"]
+        activity = client.call(
+            "getdescriptoractivity", [[hit_block], [{"desc": descriptor, "range": [0, 2]}], False]
         )
+        found_txid = activity["activity"][0]["txid"]
+        coinbase_txid = client.call("getblock", [client.call("getblockhash", [1]), 1])["tx"][0]
+        client.call("getrawtransaction", [coinbase_txid, 2])
         assert check_node(client, "regtest").ok
         debug_log = n.debug_log
-    needles = {"txid": txid.encode(), "descriptor key": b"tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7"}
+    needles = {
+        "descriptor key": b"tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7",
+        "scanned txid": found_txid.encode(),
+        "looked-up txid": coinbase_txid.encode(),
+        **{f"address {i}": address.encode() for i, address in enumerate(addresses)},
+    }
     hits = [
         (name, path.name)
         for path in datadir_files(tmp_path / "node")
-        if path.name != "harness.password"
         for name, needle in needles.items()
         if needle in path.read_bytes()
     ]

@@ -3,6 +3,7 @@ THREAT_MODEL T-401, T-406)."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -145,3 +146,84 @@ def test_unencrypted_storage_is_allowed_only_off_mainnet_with_the_flag_t401(
 def test_the_mainnet_refusal_explains_the_flag_t401() -> None:
     message = storage_refusal(PLAIN, "main", True)
     assert message is not None and "never accepted on mainnet" in message
+
+
+def on_another_device(monkeypatch: pytest.MonkeyPatch, *paths: Path) -> None:
+    """Make stat/lstat report a different device for `paths`, as for a mount or bind mount there
+    (creating a real mount needs root). Path.lstat() calls os.stat(follow_symlinks=False)."""
+    targets = {os.fspath(p) for p in paths}
+    real_stat = os.stat
+
+    def shifted(st: os.stat_result) -> os.stat_result:
+        fields = list(st[:10])
+        fields[2] = st.st_dev + 1  # st_dev
+        return os.stat_result(fields)
+
+    def fake_stat(
+        path: str | os.PathLike[str], *, dir_fd: int | None = None, follow_symlinks: bool = True
+    ) -> os.stat_result:
+        st = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        return shifted(st) if os.fspath(path) in targets else st
+
+    def fake_lstat(path: str | os.PathLike[str], *, dir_fd: int | None = None) -> os.stat_result:
+        return fake_stat(path, dir_fd=dir_fd, follow_symlinks=False)
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+
+
+def test_a_subdirectory_mounted_from_another_filesystem_is_refused_t401(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (data / "exports").mkdir(mode=0o700)
+    on_another_device(monkeypatch, data.resolve() / "exports")
+    with pytest.raises(DataDirError, match="different filesystem"):
+        open_data_dir(str(data))
+
+
+def test_paths_on_another_filesystem_inside_the_data_directory_are_refused_t401(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dd = open_data_dir(str(data))
+    (data / "exports" / "usb").mkdir()
+    assert dd.path("exports", "usb", "8949.csv")  # same device: fine
+    on_another_device(monkeypatch, dd.root / "exports" / "usb")
+    with pytest.raises(DataDirError, match="different filesystem"):
+        dd.path("exports", "usb", "8949.csv")  # not created yet: its nearest existing parent decides
+    with pytest.raises(DataDirError, match="different filesystem"):
+        dd.path("exports", "usb")
+
+
+def test_clearing_tmp_never_crosses_into_another_filesystem_t401(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dd = open_data_dir(str(data))
+    (dd.tmp / "mnt").mkdir()
+    (dd.tmp / "mnt" / "not-ours").write_text("x")
+    on_another_device(monkeypatch, dd.tmp / "mnt")
+    with pytest.raises(DataDirError, match="different filesystem"):
+        clear_tmp(dd)
+    assert (dd.tmp / "mnt" / "not-ours").read_text() == "x"
+
+
+def test_clearing_a_tmp_that_became_a_link_is_refused(data: Path, tmp_path: Path) -> None:
+    dd = open_data_dir(str(data))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "precious").write_text("x")
+    dd.tmp.rmdir()
+    dd.tmp.symlink_to(elsewhere)
+    with pytest.raises(DataDirError, match="not a link"):
+        clear_tmp(dd)
+    assert (elsewhere / "precious").read_text() == "x"
+
+
+def test_clearing_tmp_that_became_a_mount_is_refused_t401(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dd = open_data_dir(str(data))
+    (dd.tmp / "file").write_text("x")
+    on_another_device(monkeypatch, dd.tmp)  # mounted over after start-up
+    with pytest.raises(DataDirError, match="different filesystem"):
+        clear_tmp(dd)
+    assert (dd.tmp / "file").read_text() == "x"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -65,4 +66,18 @@ def test_an_oversized_config_is_refused(dd: DataDir) -> None:
 def test_a_config_that_isnt_utf8_is_refused(dd: DataDir) -> None:
     write(dd, b"\xff\xfe[rpc]")
     with pytest.raises(ConfigFileError, match="UTF-8"):
+        read_config_text(dd)
+
+
+def test_a_config_on_another_filesystem_is_refused_t401(dd: DataDir, monkeypatch: pytest.MonkeyPatch) -> None:
+    write(dd, b"[rpc]\n")
+    real_fstat = os.fstat
+
+    def fstat(fd: int) -> os.stat_result:
+        fields = list(real_fstat(fd)[:10])
+        fields[2] += 1  # st_dev: as for a bind-mounted config.toml
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", fstat)
+    with pytest.raises(ConfigFileError, match="different filesystem"):
         read_config_text(dd)

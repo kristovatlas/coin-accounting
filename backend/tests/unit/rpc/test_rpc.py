@@ -124,6 +124,16 @@ def test_bad_replies_raise_typed_errors(reply: Reply, error: type[Exception], me
             client(stub.port).call("getblockhash", [PARAM])
 
 
+def test_a_node_errors_text_is_kept_apart_from_its_string_form_t403() -> None:
+    body = {"error": {"code": -5, "message": "wpkh(): key 'tpubSECRETPARAM' is not valid"}, "id": 1}
+    with serve(lambda b: (200, json.dumps(body).encode())) as stub:
+        with pytest.raises(RpcCallError) as e:
+            client(stub.port).call("getdescriptorinfo", [PARAM])
+    assert str(e.value) == "getdescriptorinfo: node error -5"
+    assert "SECRETPARAM" not in repr(e.value)
+    assert e.value.node_message == "wpkh(): key 'tpubSECRETPARAM' is not valid"  # for branching only
+
+
 def test_a_node_error_carries_its_code_and_message() -> None:
     body = {"jsonrpc": "2.0", "error": {"code": -8, "message": "Block height out of range"}, "id": 1}
     with serve(lambda b: (200, json.dumps(body).encode())) as stub:
@@ -142,6 +152,13 @@ def test_errors_never_contain_the_password_or_the_parameters_t201_t403() -> None
         (403, b""),
         (500, b"x"),
         (200, b'{"error": {"code": -5, "message": "No such tx"}, "id": 1}'),
+        # Core quotes the offending parameter in many errors; these are its real formats (31.1):
+        (200, b'{"error": {"code": -5, "message": "wpkh(): key \'tpubSECRETPARAM\' is not valid"}, "id": 1}'),
+        (
+            200,
+            b'{"error": {"code": -8, '
+            b'"message": "parameter 1 must be of length 64 (not 11, for \'SECRETPARAM\')"}}',
+        ),
     ]
     for reply in replies:
         with serve(fixed(reply)) as stub:
