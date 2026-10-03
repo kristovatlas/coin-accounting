@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
 
-from coinacct.storage.datadir import DataDir, open_data_dir
+from coinacct.storage.datadir import DataDir, DataDirError, open_data_dir
 from coinacct.storage.logfile import LOG_NAME, open_log_handler
 
 TXID = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
@@ -55,3 +56,47 @@ def test_a_symlinked_log_file_is_refused(dd: DataDir, tmp_path: Path) -> None:
     with pytest.raises(OSError):
         open_log_handler(dd)
     assert not (tmp_path / "elsewhere.log").exists()
+
+
+def test_a_record_that_fails_never_reaches_stderr_unredacted_t403(
+    dd: DataDir, capsys: pytest.CaptureFixture[str]
+) -> None:
+    handler = open_log_handler(dd)
+    logger = logging.getLogger("test.logfile.error")
+    logger.addHandler(handler)
+    logger.propagate = False
+    try:
+        logger.warning("tx %d", TXID)  # wrong format: logging's default error path prints msg and args
+        handler.stream.close()
+        logger.warning("spent %s", TXID)  # write fails: the same path
+    finally:
+        logger.removeHandler(handler)
+    err = capsys.readouterr().err
+    assert TXID not in err
+    assert err.count("coinacct: a log record could not be written") == 2
+
+
+def test_a_fifo_log_is_refused_without_blocking_t403(dd: DataDir) -> None:
+    fifo = dd.root / "logs" / LOG_NAME
+    os.mkfifo(fifo, 0o600)
+    with pytest.raises(PermissionError, match="regular file"):
+        open_log_handler(dd)  # no reader: the open itself fails
+    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        with pytest.raises(PermissionError, match="regular file"):
+            open_log_handler(dd)  # with a reader the open succeeds, and the type check refuses it
+    finally:
+        os.close(reader)
+
+
+def test_a_log_on_another_filesystem_is_refused_t401(dd: DataDir, monkeypatch: pytest.MonkeyPatch) -> None:
+    real_fstat = os.fstat
+
+    def fstat(fd: int) -> os.stat_result:
+        fields = list(real_fstat(fd)[:10])
+        fields[2] += 1  # st_dev: as for a bind-mounted log file
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", fstat)
+    with pytest.raises(DataDirError, match="different filesystem"):
+        open_log_handler(dd)

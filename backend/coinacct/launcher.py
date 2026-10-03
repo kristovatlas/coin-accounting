@@ -181,9 +181,10 @@ def prepare(
     return Prepared(data_dir=data, config=parsed, needs_test_chain=needs_test_chain)
 
 
-def bootstrap_dir(env: Mapping[str, str], data: datadir.DataDir) -> Path:
-    """Architecture §4: `$XDG_RUNTIME_DIR` (per-user, RAM-backed) when it's safe, else `<data>`."""
-    runtime = env.get("XDG_RUNTIME_DIR")
+def bootstrap_dir(env: Mapping[str, str], data: datadir.DataDir, platform: str = sys.platform) -> Path:
+    """Architecture §4: on Linux, `$XDG_RUNTIME_DIR` (per-user, RAM-backed) when it's safe; macOS,
+    and Linux without it, use `<data>` on the volume."""
+    runtime = env.get("XDG_RUNTIME_DIR") if platform.startswith("linux") else None
     if runtime:
         path = Path(runtime)
         try:

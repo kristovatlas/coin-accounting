@@ -62,6 +62,14 @@ def encrypted(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture
+def unencrypted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Not the real detection: the tests must not depend on whether the host's disk is encrypted.
+    monkeypatch.setattr(
+        datadir, "detect", lambda root: VolumeStatus(Encryption.NONE, "plain test disk", "ext4")
+    )
+
+
 def test_hardening_disables_core_dumps_and_dumpability_and_sets_a_private_umask_t404() -> None:
     # In a child process, so this test process keeps its own limits.
     probe = (
@@ -96,13 +104,13 @@ def test_option_abbreviations_are_refused() -> None:
         parse_options(["--allow-unencrypted"], {})
 
 
-@pytest.mark.usefixtures("process_state")
+@pytest.mark.usefixtures("process_state", "unencrypted")
 def test_an_unencrypted_data_directory_is_refused_without_the_flag_t401(data: Path) -> None:
     with pytest.raises(LaunchError, match="--allow-unencrypted-storage exists only for regtest"):
         prepare(["--data-dir", str(data)], {}, hardening=no_hardening)
 
 
-@pytest.mark.usefixtures("process_state")
+@pytest.mark.usefixtures("process_state", "unencrypted")
 def test_with_the_flag_unencrypted_storage_waits_for_the_chain_t401(data: Path) -> None:
     prepared = prepare(["--data-dir", str(data), "--allow-unencrypted-storage"], {}, hardening=no_hardening)
     assert prepared.needs_test_chain is True
@@ -194,14 +202,27 @@ def test_the_bootstrap_file_prefers_a_private_runtime_dir(data: Path, tmp_path: 
     dd = datadir.open_data_dir(str(data))
     runtime = tmp_path / "run"
     runtime.mkdir(mode=0o700)
-    assert launcher.bootstrap_dir({"XDG_RUNTIME_DIR": str(runtime)}, dd) == runtime
-    assert launcher.bootstrap_dir({}, dd) == dd.root
+    assert launcher.bootstrap_dir({"XDG_RUNTIME_DIR": str(runtime)}, dd, platform="linux") == runtime
+    assert launcher.bootstrap_dir({}, dd, platform="linux") == dd.root
     runtime.chmod(0o755)
-    assert launcher.bootstrap_dir({"XDG_RUNTIME_DIR": str(runtime)}, dd) == dd.root
+    assert launcher.bootstrap_dir({"XDG_RUNTIME_DIR": str(runtime)}, dd, platform="linux") == dd.root
     (tmp_path / "link").symlink_to(runtime)
     runtime.chmod(0o700)
-    assert launcher.bootstrap_dir({"XDG_RUNTIME_DIR": str(tmp_path / "link")}, dd) == dd.root
-    assert launcher.bootstrap_dir({"XDG_RUNTIME_DIR": str(tmp_path / "missing")}, dd) == dd.root
+    assert (
+        launcher.bootstrap_dir({"XDG_RUNTIME_DIR": str(tmp_path / "link")}, dd, platform="linux") == dd.root
+    )
+    assert (
+        launcher.bootstrap_dir({"XDG_RUNTIME_DIR": str(tmp_path / "missing")}, dd, platform="linux")
+        == dd.root
+    )
+
+
+def test_the_bootstrap_file_never_uses_a_runtime_dir_on_macos_t110(data: Path, tmp_path: Path) -> None:
+    dd = datadir.open_data_dir(str(data))
+    runtime = tmp_path / "run"
+    runtime.mkdir(mode=0o700)
+    assert launcher.bootstrap_dir({"XDG_RUNTIME_DIR": str(runtime)}, dd, platform="darwin") == dd.root
+    assert launcher.bootstrap_dir({"XDG_RUNTIME_DIR": str(runtime)}, dd, platform="linux") == runtime
 
 
 def test_the_bootstrap_file_is_private_and_puts_the_token_only_in_the_fragment_t110(tmp_path: Path) -> None:
