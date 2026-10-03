@@ -26,7 +26,7 @@ Browser UI (Vite + TypeScript + React + Cytoscape.js; all assets bundled, no CDN
         │  HTTP on 127.0.0.1 only (Host check, one-time token via a bootstrap file → bearer session, no cookies)
 FastAPI backend (Python 3.13, uv-managed)
    ├── rpc.py ── Bitcoin Core JSON-RPC (dedicated rpcauth user, server-side rpcwhitelist, loopback only)
-   │              node provides txindex + blockfilterindex + txospenderindex (Core ≥ 31.0)
+   │              node provides txindex + blockfilterindex + txospenderindex (Core ≥ 31.1)
    └── user DB (SQLite, sensitive, on VeraCrypt volume; file mode 0600), including the chain-data cache
        (nothing the app writes lives on plain disk)
 ```
@@ -35,7 +35,7 @@ FastAPI backend (Python 3.13, uv-managed)
 The app keeps **no chain index of its own**. Bitcoin Core's built-in indexes answer every chain question on demand, and the app caches the answers it needs in the user DB. Maintaining the node (initial sync, pruning, restores, resyncs) is the user's responsibility; the app only checks its settings. Details were verified against BIP158 and Core's source (`rpc/blockchain.cpp`, `rpc/mempool.cpp`, `index/*`) on 2026-09-27, and reviewed by Opus 5.5 and Codex.
 
 - **Node requirements, checked at startup.** If any check fails, including a canary call that succeeds, the app disables all chain RPC and starts in **offline mode** with a clear message (architecture §3):
-  - **Bitcoin Core ≥ 31.0**, the first release with `-txospenderindex`. The user accepts any minimum version (2026-09-27).
+  - **Bitcoin Core ≥ 31.1.** 31.0 was the first release with `-txospenderindex`; the minimum is the tested, pinned version (user decision, 2026-10-02; ADR 0029).
   - `txindex=1`, `blockfilterindex=1` and `txospenderindex=1`. Each must be reported by `getindexinfo` with `synced: true` **and** `best_block_height == getblockcount()` (retried briefly, since indexes follow the tip asynchronously).
   - An **unpruned** node (`getblockchaininfo.pruned == false`).
   - A matching chain.

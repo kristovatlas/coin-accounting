@@ -18,9 +18,9 @@ from typing import Any, Final, Protocol
 
 from coinacct.rpc import RpcAuthError, RpcError, RpcForbiddenError
 
-# Bitcoin Core 31.0, the first release with txospenderindex (ADR 0004). getnetworkinfo reports
-# the version as MMmmpp: 31.1.0 is 310100.
-MIN_VERSION: Final = 310000
+# Bitcoin Core 31.1 (ADR 0029; 31.0 was the first release with txospenderindex, ADR 0004).
+# getnetworkinfo reports the version as MMmmpp: 31.1.0 is 310100.
+MIN_VERSION: Final = 310100
 # Names as getindexinfo reports them (checked against Core 31.1 on regtest).
 REQUIRED_INDEXES: Final = ("txindex", "basic block filter index", "txospenderindex")
 KNOWN_CHAINS: Final = frozenset({"main", "test", "testnet4", "signet", "regtest"})
@@ -34,7 +34,7 @@ class Problem(enum.Enum):
     AUTH_FAILED = "the node refused the RPC credentials"
     METHOD_REFUSED = "the node's rpcwhitelist refuses a method the app needs"
     MALFORMED_REPLY = "the node sent a reply the app can't read"
-    VERSION_TOO_OLD = "Bitcoin Core 31.0 or newer is required"
+    VERSION_TOO_OLD = "Bitcoin Core 31.1 or newer is required"
     UNKNOWN_CHAIN = "the node reports an unknown chain"
     CHAIN_MISMATCH = "the node is on a different chain than this data directory (T-206)"
     PRUNED = "the node is pruned; an unpruned node is required"

@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.3 (status: see ADR 0014, ADR 0027) |
+| Version | 0.2.4 (status: see ADR 0014, ADR 0029) |
 | Last updated | 2026-10-01 |
 | Scope | v1: Bitcoin (Bitcoin Core), single user, Linux + macOS |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) (IDs such as TB1, T-203, F2 refer to it) · [`ENGINEERING.md`](ENGINEERING.md) |
@@ -49,7 +49,7 @@ flowchart LR
     end
     IMPORTS[/"TB6 · Uploads: address lists,<br/>public descriptors, price CSV"/]
     TOR["Local Tor SOCKS5<br/>(optional, 127.0.0.1)"]
-    NODE["Bitcoin Core ≥ 31.0<br/>unpruned · txindex · blockfilterindex ·<br/>txospenderindex · rpcwhitelist"]
+    NODE["Bitcoin Core ≥ 31.1<br/>unpruned · txindex · blockfilterindex ·<br/>txospenderindex · rpcwhitelist"]
   end
   PRICE(("Price / FX sources<br/>HTTPS"))
 
@@ -267,7 +267,7 @@ sequenceDiagram
   L->>L: hardening, TMPDIR, log handler, exception hooks
   L->>S: verify data dir (device check, modes), read config.toml
   S->>S: open DB, integrity_check, run migrations, start watchdog
-  C->>N: getnetworkinfo, getblockchaininfo (version ≥ 31.0, chain, pruned=false)
+  C->>N: getnetworkinfo, getblockchaininfo (version ≥ 31.1, chain, pruned=false)
   C->>S: check chain matches the DB (T-206)
   C->>N: uptime (canary, must be refused)
   C->>N: getindexinfo + getblockcount (three indexes synced, retry briefly)
@@ -399,3 +399,4 @@ flowchart LR
 | 2026-09-27 | 0.2.1 | A late lot identification warns and doesn't block reports (user decision) |
 | 2026-10-01 | 0.2.2 | §9: the pinned workflow linters, and zizmor's online audits as a development-time flow to the GitHub API (ADR 0026) |
 | 2026-10-01 | 0.2.3 | §9: the pinned osv-scanner, and `make audit` as a development-time flow to the OSV API (ADR 0027) |
+| 2026-10-02 | 0.2.4 | §1, §8.1: the minimum Bitcoin Core version is 31.1 (ADR 0029) |
