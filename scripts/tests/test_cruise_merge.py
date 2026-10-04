@@ -122,6 +122,16 @@ class DecideTests(unittest.TestCase):
             "rpc package shadowing rpc.py": lambda f: f["changed_files"].append("backend/coinacct/rpc/__init__.py"),
             "secret wrapper": lambda f: f["changed_files"].append("backend/coinacct/domain/secret.py"),
             "socket guard": lambda f: f["changed_files"].append("backend/tests/socket_guard.py"),
+            "package shadowing the socket guard": lambda f: f["changed_files"].append(
+                "backend/tests/socket_guard/__init__.py"),
+            "package shadowing secret.py": lambda f: f["changed_files"].append(
+                "backend/coinacct/domain/secret/__init__.py"),
+            "package shadowing stub_http.py": lambda f: f["changed_files"].append("backend/tests/stub_http/x.py"),
+            "multi-dot tax golden file": lambda f: f["changed_files"].append("backend/tests/golden/report.tax.csv"),
+            "multi-dot doxx file": lambda f: f["changed_files"].append("backend/tests/golden/v2.doxx.json"),
+            "multi-dot chain file": lambda f: f["changed_files"].append("backend/coinacct/services/scan.chain.py"),
+            "e2e tax golden file": lambda f: f["changed_files"].append("e2e/golden/form8949-2024.tax.csv"),
+            "e2e tax spec": lambda f: f["changed_files"].append("e2e/specs/tax/export.spec.ts"),
             "tax golden file": lambda f: f["changed_files"].append("backend/tests/integration/tax/golden/8949.csv"),
             "tax in upper case": lambda f: f["changed_files"].append("backend/coinacct/Tax/engine.py"),
             "tax with a non-ASCII name": lambda f: f["changed_files"].append("backend/coinacct/tax/règles.py"),

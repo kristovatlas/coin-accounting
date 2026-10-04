@@ -83,7 +83,7 @@ It runs from a 10-minute check-in job in that Claude Code session. The job expir
 ## Rolling back
 
 1. **Return to the standard process.**
-   - Change `PROCESS_MODE` to `standard` in a one-line PR and merge it yourself. Branch protection rules out committing to `main` directly, even for you. If CI is broken, lift the protection temporarily to merge it.
+   - Change `PROCESS_MODE` to `standard` in a one-line PR and merge it yourself. Branch protection rules out committing to `main` directly, even for you. If CI is broken and you must lift the protection to merge it, **revoke the merge token first** (protection is what stops the token pushing to `main`), restore the protection right after, and only then issue a new token.
    - For an immediate stop, use the stop file or revoke the token first (see **Stopping**).
    - No ADR is needed: ADR 0030 defines both values.
    - From then on, the review panel runs its standard profile, nothing merges automatically, and `/cruise` refuses to start.

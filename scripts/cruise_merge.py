@@ -16,7 +16,7 @@ Conditions, all required:
   - the gate is byte-for-byte `main`'s copy of this script
   - `main`'s branch protection requires a pull request (with no required approvals), every
     REQUIRED_CHECKS name and branches up to date (`strict`), applies to administrators too (so the
-    owner's token can't bypass it), and forbids deleting `main`
+    owner's token can't bypass it), and forbids deleting and force-pushing `main`
   - the PR is open, not a draft, on a `cruise/` branch of this repository, based on `main`, authored by the owner,
     every commit authored or committed by the owner, mergeable, and its head is exactly SHA
   - SHA contains the current `main`, so CI tested the result of the merge
@@ -64,8 +64,12 @@ DEFAULT_TOKEN_FILE = "~/.config/coin-accounting/cruise-merge-token"
 BLOCKED_COMPONENTS = ("tax", "doxx", "chain")
 BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md", "backend/coinacct/domain/secret.py",
                  "backend/tests/socket_guard.py", "backend/tests/stub_http.py")
-# Security-critical modules that are single files today: a package of the same name would take over.
-SHADOWABLE_MODULES = ("launcher", "config", "rpc")
+# Single-file modules the gate or the tripwire protects: a package of the same name would take over
+# (Python finds `name/__init__.py` before `name.py` in the same directory).
+SHADOWABLE_MODULES = tuple(
+    [f"backend/coinacct/{m}" for m in ("launcher", "config", "rpc")]
+    + [f[: -len(".py")] for f in BLOCKED_FILES if f.endswith(".py")]
+)
 # Tool configuration that, in any directory, can override or weaken the project's test, lint, type or
 # build settings (pytest reads `pytest.toml` before `pyproject.toml`; ruff reads `ruff.toml` first).
 BLOCKED_NAMES = ("pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "ruff.toml",
@@ -108,16 +112,16 @@ def blocked_path(path: str) -> bool:
     low = path.lower()
     parts = low.split("/")
     name = parts[-1]
-    stem_words = re.split(r"[._-]", name.split(".", 1)[0]) if "." in name else re.split(r"[._-]", name)
-    in_backend = parts[0] == "backend"
+    name_words = re.split(r"[._-]", name)  # every word of the name, so `report.tax.csv` counts too
+    in_scope = parts[0] in ("backend", "e2e")
     return (
         low in BLOCKED_FILES
         or name in BLOCKED_NAMES
         or name.startswith(BLOCKED_NAME_PREFIXES)
         # tax, doxx and chain: as a directory, or as a word in the file name (`services/tax.py`, `test_tax_lots.py`)
-        or (in_backend and any(c in parts[1:-1] or c in stem_words for c in BLOCKED_COMPONENTS))
-        # the security-critical single-file modules, also as a package that would shadow them (`rpc/__init__.py`)
-        or (len(parts) > 3 and parts[:2] == ["backend", "coinacct"] and parts[2] in SHADOWABLE_MODULES)
+        or (in_scope and any(c in parts[1:-1] or c in name_words for c in BLOCKED_COMPONENTS))
+        # a package next to a blocked single-file module would shadow it (`rpc/__init__.py`, `socket_guard/…`)
+        or any(low.startswith(m + "/") for m in SHADOWABLE_MODULES)
     )
 
 # Every tripwire flag blocks except these content labels, which fire on every `re.compile` and
