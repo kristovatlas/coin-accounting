@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.25 |
-| Last updated | 2026-10-01 |
+| Version | 0.2.27 |
+| Last updated | 2026-10-03 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -180,7 +180,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **Branch protection on `main`:**
   - PRs only, with all required checks green
   - stacked PRs are merged with merge commits
-  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605
+  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605. The one exception is cruise mode's gate (ADR 0030, R-11)
 - **Commit signing is not required** (user decision, 2026-09-27). Agents would need the owner's key, so signatures couldn't tell agent commits from human ones. GitHub signs the merge commits it creates. If releases are ever published for other users, release tags will be signed (THREAT_MODEL T-606).
 - GitHub secret scanning and push protection are enabled.
 
@@ -276,7 +276,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 
 ### 4.3 Threat model
 
-- Any PR touching a boundary, asset, store, network flow (including build-time flows), dependency or tax rule updates `THREAT_MODEL.md` in the same PR: statuses, evidence links, changelog.
+- Any PR touching a boundary, asset, store, network flow (including build-time flows), dependency or tax rule updates `THREAT_MODEL.md` in the same PR: statuses, evidence links, changelog. **In cruise mode** ([ADR 0030](adr/0030-cruise-mode.md)), a `/cruise` run's feature PRs leave all three to the run's milestone-closing PR, which the human merges.
 - A threat moves to **Verified** only when a linked test would fail if the mitigation were removed.
 
 ## 5. Code standards
@@ -323,27 +323,35 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
   - run any install or fetch-and-run command outside the `make` targets (§2.3); `UV_NO_SYNC=1` is always set
   - weaken a control
   - change `docs/architecture.md` without an ADR
-  - commit to `main` directly or merge PRs unless the human explicitly says so (§2.7)
+  - commit to `main` directly or merge PRs unless the human explicitly says so (§2.7). The one exception is cruise mode, through `main`'s copy of `scripts/cruise_merge.py` only (ADR 0030)
   - add MCP servers or tools that fetch and run packages
 - **Transparency.** Agent-authored commits carry a `Co-Authored-By` trailer. PR descriptions state what was verified (commands run, tests added) and what wasn't.
-- **Review.** Every agent PR gets human review. Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
+- **Review.** Every agent PR gets human review, except a cruise slice that the gate merges (ADR 0030). Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
   - **The review panel** (`/review-panel #N`, [ADR 0020](adr/0020-review-panel.md)) does the AI review:
     - Rounds of four reviews (Opus 5.5 and Codex gpt-5.6-sol, security and functional) find issues, and the panel fixes valid P1s and files issues for the rest.
     - When a round is clean and CI is green, the **tripwire** checks the final commit: a mechanical scan (`scripts/tripwire.py`, from `main`'s copy) plus a separate Opus check for malicious patterns. Examples: process or network use in tests, weakened or deleted guards and tests, new hosts, obfuscated code, dependency or agent-instruction changes. It is a heuristic that points the human's attention, not a guarantee.
     - The flags are posted for the human (after the mechanical secret scan, `scripts/secret_scan.py`), and set as the advisory `tripwire` commit status on that exact commit. The hand-off names the SHA, and a later push has no status until the tripwire runs again.
     - **The human merges**, looking carefully at anything flagged. The panel never merges; afterwards it deletes the branch and cleans up.
     - Severity rules and the round limit ([ADR 0023](adr/0023-review-panel-refinements.md)): fail-safe process edge cases and "an AI could be steered" findings are not P1. After round 5, the human decides each remaining P1 in a plain-language walkthrough: downgrade, keep or accept.
+  - **Cruise mode** ([ADR 0030](adr/0030-cruise-mode.md); operator guide [`docs/cruise-mode.md`](cruise-mode.md)). It applies while `PROCESS_MODE` on `main` is `cruise`; `standard` restores the rules above unchanged.
+    - **Panel profile:**
+      - two reviewers, or all four on risky paths and `chain/`/`tax/`/`doxx/`
+      - later rounds review only the fix, with at most 2 rounds
+      - a P1 is only a confirmed Critical/High, a broken or flaky test, a real leak, or wrong tax figures
+      - one comment per round
+    - **`/cruise <scope>`** works through a PLAN scope. PRs outside the risky paths are merged by the mechanical gate `scripts/cruise_merge.py` (`main`'s copy, with a separate repository-scoped token). Everything else goes to the human as a draft.
+    - **Docs:** each run ends with a milestone-closing PR that the human merges, holding the threat-model and changelog updates.
 
 ## 7. Workflow
 
 - **Branches:** `main` is always releasable. Work happens on short-lived branches (`<type>/<topic>`, e.g. `feat/scan-jobs`, `docs/adr-0003`).
 - **PRs:**
   - small and focused
-  - opened as **drafts** for human review on GitHub
+  - opened as **drafts** for human review on GitHub. The exception is cruise mode: a `/cruise` run opens its slices ready for review, and the gate merges only non-draft PRs (ADR 0030)
   - stacked PRs are allowed and merged with merge commits
   - each PR description lists the affected threat IDs and ADRs
 - **Commits:** imperative subject ≤ 72 chars; the body explains *why*.
-- **Docs travel with code:** PLAN, threat model, ADRs, diagram and `DEPENDENCIES.md` are updated in the same PR as the change that affects them.
+- **Docs travel with code:** PLAN, threat model, ADRs, diagram and `DEPENDENCIES.md` are updated in the same PR as the change that affects them. In cruise mode, a `/cruise` run's slices leave the threat-model and changelog updates, and PLAN progress, to the run's milestone-closing PR (ADR 0030).
 
 ## 8. Definition of Done
 
@@ -352,12 +360,12 @@ A change is done only when:
 - [ ] Behaviour is covered by an **E2E test** (for user-visible features) and by unit/integration tests where logic warrants them
 - [ ] Coverage floors hold; the PR mutation run holds for changed `tax/`/`doxx/` files; CI is green on Linux and macOS
 - [ ] Tests comply with §3.5, with no slop
-- [ ] `THREAT_MODEL.md` statuses and evidence links are updated (or explicitly "no change")
+- [ ] `THREAT_MODEL.md` statuses and evidence links are updated (or explicitly "no change"). In cruise mode, this happens in the run's milestone-closing PR (ADR 0030)
 - [ ] ADR written or updated if §4.1 applies; the architecture diagram still matches
 - [ ] Any new dependency went through §2.4, is recorded in `DEPENDENCIES.md`, and has human approval
 - [ ] No new network flow outside THREAT_MODEL §6; the socket guard stays green
 - [ ] User-facing docs updated where behaviour changed
-- [ ] The human merged the PR
+- [ ] The human merged the PR, or in cruise mode the gate did (ADR 0030)
 
 ## 9. Enforcement summary
 
@@ -377,7 +385,7 @@ A change is done only when:
 | ADR immutability, diagram hash | CI checks |
 | Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review |
 | Test-slop rules | Partly automated (§3.5) + review checklist + periodic test audit |
-| Only the human merges | Procedural (Documented, T-605) |
+| Only the human merges, except through cruise mode's gate (ADR 0030) | Procedural (Documented, T-605); the gate's conditions are mechanical (`scripts/cruise_merge.py`, R-11) |
 | No real data for agents | `AGENTS.md` + SessionStart hook + human discipline (Documented, T-607, R-6) |
 
 ## 10. Changelog
@@ -411,3 +419,4 @@ A change is done only when:
 | 2026-10-01 | 0.2.23 | `make audit` uses a pinned `osv-scanner` binary (pending approval; ADR 0027) instead of `pip-audit` + `pnpm audit`: trust-on-first-use against GitHub, run with an empty config, `--no-resolve` and an empty environment; `check_repo_files` rejects a committed `osv-scanner.toml` |
 | 2026-10-02 | 0.2.24 | M0.3: `make test` (pytest with the socket guard, coverage floors) and `make lint` (ruff, mypy --strict) for `backend/`; agents may run both |
 | 2026-10-02 | 0.2.25 | M0.3: the regtest harness (`e2e/harness/regtest.py`); `make test` runs the integration tests and needs `make test-tools` |
+| 2026-10-03 | 0.2.27 | Cruise mode (ADR 0030): a switchable faster process. It adds a lighter review-panel profile, gated automatic merges (`scripts/cruise_merge.py`), `/cruise` milestone loops, and threat-model and changelog updates in a milestone-closing PR (§4.3, §6, §8); `PROCESS_MODE` = `standard` restores the previous rules |
