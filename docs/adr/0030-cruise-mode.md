@@ -35,7 +35,7 @@ Flipping it needs no new ADR, only a PR that the human merges, or a commit by th
 
 1. **The review panel's cruise profile:**
    - **Round 1** reviews the whole diff. **Later rounds review only the fix** (the previous head → the new head), with the files around it for context.
-   - **At most 2 rounds.** After round 2, a remaining confirmed Critical/High goes to the human's per-item walkthrough (ADR 0023). Anything else becomes an issue.
+   - **At most 2 rounds.** After round 2, **any** validated P1 still open sends the PR to the human as a draft, never to the gate. Only non-P1 findings become issues.
    - **Reviewers by risk:**
      - **All four** when the change touches any tripwire path category, or `chain/`, `tax/` or `doxx/`.
      - **Otherwise two:** one Opus and one Codex, each with a combined security and function focus.
@@ -50,18 +50,24 @@ Flipping it needs no new ADR, only a PR that the human merges, or a commit by th
      - one combined comment per round, with each reviewer's report in a collapsed section and the triage
      - one follow-up issue per PR
      - nits stay in the comment
-   - **The cruise loop may start the panel** on the PRs it opens. In standard mode, only the human starts it.
+   - **The profile applies only to a run's slices.** The cruise loop may start the panel on the PRs it opens. The milestone-closing PR, and any PR the human starts the panel on, get the standard profile.
 2. **Gated automatic merge.**
    - When a round is clean and the Opus tripwire check reports no flags of Medium or above, the orchestrator runs **`main`'s copy of `scripts/cruise_merge.py`**. It merges only if every mechanical condition in its header holds:
-     - the mode is `cruise`, and there is no stop file
-     - an open, non-draft, same-repository PR based on `main`, from the owner, with only the owner's commits, mergeable, at exactly the reviewed SHA
-     - both CI checks succeeded, and no check-run failed
-     - no blocking tripwire flag:
-       - any risky path category: agent instructions, CI, scripts, dependencies, test config, the harness, security-critical modules, binding documents
-       - removed lines, deleted files, symlinks
-       - process, network, download, outside-file or test-weakening content
-       - a non-loopback URL host
+     - the local copy of `main` is current, the mode is `cruise`, and there is no stop file
+     - `main` is a protected branch requiring every gate check
+     - an open, non-draft, same-repository PR based on `main`, from the owner, with every commit authored or committed by the owner, mergeable, at exactly the reviewed SHA, and **containing the current `main`**
+     - the repository checks and the **`tests` jobs** (`make test` and `make lint`) succeeded on both platforms, on a complete list of check-runs with none failed. **CI doesn't have the `tests` jobs yet (#44), so until it does, the gate refuses every PR.**
+     - no binary file, and nothing under `tax/`, `doxx/` or `chain/`, nor `PROCESS_MODE` or `docs/cruise-mode.md`
+     - no tripwire flag except the two noisy content labels (dynamic code, environment use). That covers:
+       - every risky path category: agent instructions, CI, scripts, dependencies, test config, the harness, security-critical modules, binding documents
+       - removed test, assertion and guard lines, deleted files, symlinks
+       - process, network, download, outside-file and test-weakening content
+       - any URL host, loopback included
+       - any label the tripwire adds later
      - a private merge-token file
+
+     Just before merging, the gate re-reads GitHub's `main` and the stop file, and refuses if either changed.
+   - **Other removed code doesn't block.** The tripwire flags only removed test, assertion and guard lines, so a change that deletes ordinary logic outside the blocked paths can merge after review. The owner can make every removed line block later (R-11).
    - Anything else goes to the human, as a **draft** PR, exactly as in standard mode.
    - The merge uses a **separate fine-grained token** with access to this repository only (Contents and Pull requests: read/write), not the owner's everyday credentials. Revoking it stops all automatic merges at once.
 3. **Milestone loops.** The human types `/cruise <scope>` (for example `/cruise M0.3`). The loop:
@@ -76,11 +82,12 @@ Flipping it needs no new ADR, only a PR that the human merges, or a commit by th
    **It stops and notifies the human** when:
    - a dependency is needed
    - an ADR-level decision is needed (ENGINEERING §4.1)
-   - Critical/High findings remain after round 2
+   - a validated P1 remains after round 2
    - the gate refuses and the PR's follow-up work depends on it
    - CI fails for a reason outside the PR
-   - the stop file exists
    - the scope is done
+
+   **The stop file pauses the run**, and removing it resumes the run.
 4. **Less per-PR paperwork.**
    - Feature PRs don't add THREAT_MODEL/ENGINEERING version or changelog rows, and don't update threat-model evidence.
    - One **milestone-closing PR** per scope does all of that, plus PLAN and DEPENDENCIES, and the human merges it. It touches binding documents, so the gate always refuses it.

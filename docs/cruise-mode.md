@@ -32,14 +32,21 @@ The gate and the skills read the value **from `origin/main`**, never from a PR b
    ```
 
    Another path works too: set `CRUISE_MERGE_TOKEN_FILE`. Without the file, the gate refuses every merge and PRs simply come to you.
-3. **Allow the gate in auto mode.** Add this rule to your local, uncommitted `.claude/settings.local.json`, so the auto-mode classifier lets a run call the gate, and only the gate:
+3. **Allow the gate in auto mode.** Add this rule to your local, uncommitted `.claude/settings.local.json`, replacing `<repo>` with the absolute path of your checkout. It lets the auto-mode classifier allow a run's call to that one path:
 
    ```json
-   { "permissions": { "allow": ["Bash(python3 /home/hetzuser/coin-accounting/.git/cruise/gate.py:*)"] } }
+   { "permissions": { "allow": ["Bash(python3 <repo>/.git/cruise/gate.py:*)"] } }
    ```
 
-   The run always writes `main`'s copy of `scripts/cruise_merge.py` to that path before calling it. Remove the rule to make every merge need your approval again.
-4. **Recommended:** a branch-protection rule on `main` that requires the `checks (ubuntu-latest)` and `checks (macos-latest)` status checks. GitHub then also refuses a merge before CI passes.
+   The run always writes `main`'s copy of `scripts/cruise_merge.py` to that path, and calls it with the path written out. Other code could write to that path too; that's within R-9 (agents aren't sandboxed). Don't keep broader rules such as `Bash(python3 *)` or `Bash(gh pr *)`: they would allow merging without the gate. Remove the rule to make every merge need your approval again.
+4. **Required: protect `main`.** GitHub → Settings → Branches, add a rule for `main`:
+   - require a pull request before merging
+   - require status checks to pass: `checks (ubuntu-latest)`, `checks (macos-latest)`, `tests (ubuntu-latest)` and `tests (macos-latest)`
+   - require branches to be up to date before merging
+
+   This stops the token from pushing to `main` directly. The gate refuses while `main` isn't protected with those checks.
+5. **CI must run the tests.** The `tests (…)` jobs, which run `make test` and `make lint` on both platforms, come from a separate CI PR (#44). Until it's merged, the gate refuses every PR, and runs hand every slice to you as a draft: still reviewed, but not merged automatically.
+6. **Optional: notifications.** Put a hard-to-guess ntfy topic in `~/.config/coin-accounting/ntfy-topic` (mode 600). Without it, runs don't notify. The topic is never committed: ntfy topics work like shared secrets.
 
 ## Starting a run
 
@@ -65,7 +72,7 @@ It runs from a 10-minute check-in job in that Claude Code session. The job expir
 
 | How | Effect |
 |---|---|
-| `touch .git/cruise-stop` | **Immediate pause.** The gate refuses every merge, and the loop stops at its next tick. Delete the file to resume. |
+| `touch .git/cruise-stop` | **Immediate pause.** The gate refuses every merge, and the run pauses at its next tick, keeping its state. Delete the file, and the next tick carries on. |
 | `/cruise stop` | The loop stops after its current step and removes its check-in job; open PRs stay open. |
 | Revoke the merge token on GitHub | Automatic merges stop at once, everywhere, even if a session ignores the stop file. |
 | Set `PROCESS_MODE` to `standard` on `main` | Back to the standard process; see below. |

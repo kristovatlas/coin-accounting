@@ -396,7 +396,11 @@ PR #N Review (round R):
 
 ## Cruise profile
 
-Applies only while `PROCESS_MODE` on `origin/main` is `cruise` (ADR 0030). Read it at the start of every round, not from the PR branch. Everything above holds except what this section overrides.
+Applies only when **both** of these hold. Everything above holds except what this section overrides.
+- `PROCESS_MODE` on `origin/main` is `cruise` (ADR 0030). Read it at the start of every round, not from the PR branch.
+- The PR is one of the **slices** listed in `$GIT_DIR_ABS/cruise/run.json`.
+
+Every other PR, including a run's milestone-closing PR and any PR the human runs `/review-panel` on, gets the standard profile.
 
 - **Reviewers by risk.** Run the mechanical tripwire on `merge_base..head_sha` at the start of round 1.
   - **All four reviewers** if it raised any `path` flag, or the diff touches `backend/coinacct/chain/`, `tax/` or `doxx/`.
@@ -404,7 +408,7 @@ Applies only while `PROCESS_MODE` on `origin/main` is `cruise` (ADR 0030). Read 
 - **Rounds.**
   - Round 1 reviews the whole diff.
   - **Later rounds review only the fix.** The diff file is `previous head_sha..head_sha`, plus a note naming the files around it. The prompt says "review only this fix, and whether it fixes the listed P1s without breaking anything", and lists the P1s it addresses.
-  - **The round limit is 2,** not 5. After round 2, remaining validated P1s that are confirmed Critical/High go to the per-item walkthrough (`round-limit`). Any other remaining P1s become issues, and the round counts as clean.
+  - **The round limit is 2,** not 5. After round 2, **any** validated P1 still open ends the cruise path for this PR. The hand-off goes back to the `/cruise` run with the open P1s listed, and the run gives the PR to the human as a draft, never to the gate. Only non-P1 findings become issues.
 - **Severity.** A **P1** is only:
   - a Critical/High finding the orchestrator has confirmed
   - a broken build or test, including a credibly flaky test

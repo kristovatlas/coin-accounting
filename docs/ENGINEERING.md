@@ -180,7 +180,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **Branch protection on `main`:**
   - PRs only, with all required checks green
   - stacked PRs are merged with merge commits
-  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605
+  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605. The one exception is cruise mode's gate (ADR 0030, R-11)
 - **Commit signing is not required** (user decision, 2026-09-27). Agents would need the owner's key, so signatures couldn't tell agent commits from human ones. GitHub signs the merge commits it creates. If releases are ever published for other users, release tags will be signed (THREAT_MODEL T-606).
 - GitHub secret scanning and push protection are enabled.
 
@@ -326,7 +326,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
   - commit to `main` directly or merge PRs unless the human explicitly says so (§2.7). The one exception is cruise mode, through `main`'s copy of `scripts/cruise_merge.py` only (ADR 0030)
   - add MCP servers or tools that fetch and run packages
 - **Transparency.** Agent-authored commits carry a `Co-Authored-By` trailer. PR descriptions state what was verified (commands run, tests added) and what wasn't.
-- **Review.** Every agent PR gets human review. Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
+- **Review.** Every agent PR gets human review, except a cruise slice that the gate merges (ADR 0030). Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
   - **The review panel** (`/review-panel #N`, [ADR 0020](adr/0020-review-panel.md)) does the AI review:
     - Rounds of four reviews (Opus 5.5 and Codex gpt-5.6-sol, security and functional) find issues, and the panel fixes valid P1s and files issues for the rest.
     - When a round is clean and CI is green, the **tripwire** checks the final commit: a mechanical scan (`scripts/tripwire.py`, from `main`'s copy) plus a separate Opus check for malicious patterns. Examples: process or network use in tests, weakened or deleted guards and tests, new hosts, obfuscated code, dependency or agent-instruction changes. It is a heuristic that points the human's attention, not a guarantee.
@@ -385,7 +385,7 @@ A change is done only when:
 | ADR immutability, diagram hash | CI checks |
 | Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review |
 | Test-slop rules | Partly automated (§3.5) + review checklist + periodic test audit |
-| Only the human merges | Procedural (Documented, T-605) |
+| Only the human merges, except through cruise mode's gate (ADR 0030) | Procedural (Documented, T-605); the gate's conditions are mechanical (`scripts/cruise_merge.py`, R-11) |
 | No real data for agents | `AGENTS.md` + SessionStart hook + human discipline (Documented, T-607, R-6) |
 
 ## 10. Changelog

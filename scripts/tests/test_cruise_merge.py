@@ -11,6 +11,7 @@ HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
 import cruise_merge  # noqa: E402
+import tripwire  # noqa: E402
 
 SHA = "a" * 40
 OWNER = "owner"
@@ -19,10 +20,17 @@ REPO = {"full_name": "owner/repo"}
 
 def good_facts() -> dict:
     """A PR that every condition accepts."""
+    runs = [
+        {"name": n, "app": {"slug": "github-actions"}, "status": "completed", "conclusion": "success"}
+        for n in cruise_merge.REQUIRED_CHECKS
+    ] + [{"name": "Socket Security", "app": {"slug": "socket"}, "status": "completed", "conclusion": "success"}]
     return {
+        "github_main": "c" * 40,
         "main_fresh": True,
         "mode": "cruise",
         "stop_file": False,
+        "main_protected": True,
+        "protected_checks": list(cruise_merge.REQUIRED_CHECKS),
         "sha": SHA,
         "owner": OWNER,
         "pr": {
@@ -34,15 +42,17 @@ def good_facts() -> dict:
             "mergeable": True,
             "commits": 1,
         },
+        "head_has_main": True,
         "commits": [{"sha": SHA, "author": {"login": OWNER}, "committer": {"login": "web-flow"}}],
-        "check_runs": [
-            {"name": n, "app": {"slug": "github-actions"}, "status": "completed", "conclusion": "success"}
-            for n in cruise_merge.REQUIRED_CHECKS
-        ]
-        + [{"name": "Socket Security", "app": {"slug": "socket"}, "status": "completed", "conclusion": "success"}],
+        "check_runs": runs,
+        "check_runs_total": len(runs),
+        "binary_files": [],
+        "changed_files": ["backend/coinacct/services/discovery.py", "backend/tests/unit/test_discovery.py"],
         "tripwire": [
-            {"file": "backend/coinacct/tax/engine.py", "kind": "content", "detail": "dynamic code (line 3)"},
-            {"file": "backend/tests/unit/x.py", "kind": "content", "detail": "URL host 127.0.0.1 (line 9)"},
+            {"file": "backend/coinacct/services/discovery.py", "kind": "content",
+             "detail": "dynamic code or deserialisation (line 3)"},
+            {"file": "backend/coinacct/services/discovery.py", "kind": "content",
+             "detail": "environment-dependent behaviour (line 9)"},
         ],
         "token_problem": None,
     }
@@ -54,19 +64,14 @@ class DecideTests(unittest.TestCase):
     def test_a_pr_meeting_every_condition_is_merged(self):
         self.assertEqual(cruise_merge.decide(good_facts()), [])
 
-    def refused(self, change) -> list[str]:
-        facts = copy.deepcopy(good_facts())
-        change(facts)
-        reasons = cruise_merge.decide(facts)
-        self.assertTrue(reasons, "expected the gate to refuse")
-        return reasons
-
     def test_each_condition_alone_refuses(self):
         cases = {
             "stale main": lambda f: f.update(main_fresh=False),
             "standard mode": lambda f: f.update(mode="standard"),
             "missing mode": lambda f: f.update(mode="(missing)"),
             "stop file": lambda f: f.update(stop_file=True),
+            "main unprotected": lambda f: f.update(main_protected=False),
+            "tests not required": lambda f: f.update(protected_checks=["checks (ubuntu-latest)"]),
             "closed": lambda f: f["pr"].update(state="closed"),
             "draft": lambda f: f["pr"].update(draft=True),
             "draft unknown": lambda f: f["pr"].pop("draft"),
@@ -77,34 +82,52 @@ class DecideTests(unittest.TestCase):
             "not the owner's": lambda f: f["pr"].update(user={"login": "someone"}),
             "conflicting": lambda f: f["pr"].update(mergeable=False),
             "mergeable unknown": lambda f: f["pr"].update(mergeable=None),
+            "head lacks main": lambda f: f.update(head_has_main=False),
             "commit list short": lambda f: f["pr"].update(commits=2),
+            "too many commits": lambda f: f.update(commits=f["commits"] * 251) or f["pr"].update(commits=251),
             "foreign commit": lambda f: f["commits"][0].update(author={"login": "x"}, committer={"login": "y"}),
-            "linux CI missing": lambda f: f.update(check_runs=f["check_runs"][1:]),
+            "tests job missing": lambda f: f.update(check_runs=f["check_runs"][:2] + f["check_runs"][4:],
+                                                    check_runs_total=3),
             "CI from another app": lambda f: f["check_runs"][0]["app"].update(slug="impostor"),
             "CI failed": lambda f: f["check_runs"][1].update(conclusion="failure"),
-            "check running": lambda f: f["check_runs"][2].update(status="in_progress", conclusion=None),
-            "Socket failed": lambda f: f["check_runs"][2].update(conclusion="failure"),
+            "check running": lambda f: f["check_runs"][4].update(status="in_progress", conclusion=None),
+            "Socket failed": lambda f: f["check_runs"][4].update(conclusion="failure"),
+            "check-runs incomplete": lambda f: f.update(check_runs_total=101),
+            "binary file": lambda f: f["binary_files"].append("backend/coinacct/fast.cpython-313-x86_64-linux-gnu.so"),
+            "tax engine": lambda f: f["changed_files"].append("backend/coinacct/tax/engine.py"),
+            "doxx engine": lambda f: f["changed_files"].append("backend/coinacct/doxx/rules.py"),
+            "chain module": lambda f: f["changed_files"].append("backend/coinacct/chain/scan.py"),
+            "mode switch": lambda f: f["changed_files"].append("PROCESS_MODE"),
+            "cruise guide": lambda f: f["changed_files"].append("docs/cruise-mode.md"),
             "tripwire didn't run": lambda f: f.update(tripwire=None),
-            "no token": lambda f: f.update(token_problem="no cruise merge token"),
+            "no token": lambda f: f.update(token_problem="no readable cruise merge token"),
         }
         for label, change in cases.items():
             with self.subTest(label):
-                self.refused(change)
+                facts = copy.deepcopy(good_facts())
+                change(facts)
+                self.assertTrue(cruise_merge.decide(facts), "expected the gate to refuse")
 
-    def test_blocking_tripwire_flags_refuse_and_noisy_ones_dont(self):
+    def test_a_similar_path_outside_the_blocked_ones_is_allowed(self):
+        facts = good_facts()
+        facts["changed_files"].append("backend/coinacct/taxonomy.py")
+        facts["changed_files"].append("docs/cruise-mode-notes.md")
+        self.assertEqual(cruise_merge.decide(facts), [])
+
+    def test_every_flag_blocks_except_the_two_noisy_content_labels(self):
         blocked = [
             {"file": "AGENTS.md", "kind": "path", "detail": "agent instructions or tooling"},
             {"file": "backend/coinacct/rpc.py", "kind": "path", "detail": "security-critical module"},
-            {"file": "docs/THREAT_MODEL.md", "kind": "path", "detail": "binding document or ADR"},
-            {"file": "uv.lock", "kind": "path", "detail": "dependency or install config"},
             {"file": "x.py", "kind": "removed", "detail": "removed test or assertion (near line 4)"},
             {"file": "x.py", "kind": "deleted", "detail": "file deleted"},
             {"file": "x", "kind": "symlink", "detail": "symbolic link added, changed or removed"},
-            {"file": "x.py", "kind": "content", "detail": "network use (line 2)"},
-            {"file": "x.py", "kind": "content", "detail": "process execution (line 2)"},
-            {"file": "x.py", "kind": "content", "detail": "test weakening (line 2)"},
+            {"file": "x", "kind": "submodule", "detail": "git submodule (gitlink)"},
+            {"file": "x", "kind": "executable", "detail": "file made executable"},
+            {"file": "x", "kind": "unparsed", "detail": "could not parse this change"},
+            {"file": "x.py", "kind": "content", "detail": "URL host 127.0.0.1 (line 2)"},
             {"file": "x.py", "kind": "content", "detail": "URL host example.com (line 2)"},
             {"file": "x.py", "kind": "content", "detail": "long encoded blob (line 2)"},
+            {"file": "x.py", "kind": "content", "detail": "network access (line 2)"},  # a renamed label
             {"file": "x.py", "kind": "novel", "detail": "a kind added to the tripwire later"},
         ]
         for flag in blocked:
@@ -113,9 +136,17 @@ class DecideTests(unittest.TestCase):
         noisy = [
             {"file": "x.py", "kind": "content", "detail": "dynamic code or deserialisation (line 2)"},
             {"file": "x.py", "kind": "content", "detail": "environment-dependent behaviour (line 2)"},
-            {"file": "x.py", "kind": "content", "detail": "URL host localhost (line 2)"},
         ]
         self.assertEqual(cruise_merge.blocking(noisy), [])
+
+    def test_every_real_tripwire_content_label_is_classified_on_purpose(self):
+        # A label the tripwire adds or renames blocks by default; this lists today's on purpose.
+        labels = {label for label, _ in tripwire.ADDED_RULES}
+        self.assertTrue(set(cruise_merge.NON_BLOCKING_CONTENT) <= labels)
+        for label in labels - set(cruise_merge.NON_BLOCKING_CONTENT):
+            with self.subTest(label):
+                flag = {"file": "x.py", "kind": "content", "detail": f"{label} (line 1)"}
+                self.assertEqual(len(cruise_merge.blocking([flag])), 1)
 
     def test_reasons_never_quote_source_text(self):
         facts = good_facts()
@@ -131,25 +162,59 @@ class TokenFileTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_a_private_token_file_is_accepted(self):
-        self.path.write_text("t\n")
+    def test_a_private_token_file_is_read(self):
+        self.path.write_text("t0ken\n")
         self.path.chmod(0o600)
-        self.assertIsNone(cruise_merge.check_token_file(self.path))
+        self.assertEqual(cruise_merge.read_token(self.path), ("t0ken", None))
 
-    def test_a_missing_readable_or_linked_token_file_is_refused(self):
-        self.assertIsNotNone(cruise_merge.check_token_file(self.path))
-        self.path.write_text("t\n")
+    def test_a_missing_readable_empty_or_linked_token_file_is_refused(self):
+        self.assertIsNone(cruise_merge.read_token(self.path)[0])
+        self.path.write_text("t0ken\n")
         self.path.chmod(0o644)
-        self.assertIsNotNone(cruise_merge.check_token_file(self.path))
+        self.assertIsNone(cruise_merge.read_token(self.path)[0])
         self.path.chmod(0o600)
         link = Path(self._tmp.name) / "link"
         os.symlink(self.path, link)
-        self.assertIsNotNone(cruise_merge.check_token_file(link))
+        self.assertIsNone(cruise_merge.read_token(link)[0])
+        self.path.write_text("")
+        self.assertIsNone(cruise_merge.read_token(self.path)[0])
+
+    def test_problems_never_include_the_token(self):
+        self.path.write_text("t0ken\n")
+        self.path.chmod(0o644)
+        self.assertNotIn("t0ken", cruise_merge.read_token(self.path)[1])
 
 
 class MainTests(unittest.TestCase):
+    def setUp(self):
+        self._saved = (cruise_merge.gather, cruise_merge.recheck, cruise_merge.merge)
+        self.merged = []
+        cruise_merge.merge = lambda name, n, sha: self.merged.append((n, sha))
+        cruise_merge.recheck = lambda facts: []
+
+    def tearDown(self):
+        cruise_merge.gather, cruise_merge.recheck, cruise_merge.merge = self._saved
+
     def test_a_short_sha_is_refused_before_anything_runs(self):
         self.assertEqual(cruise_merge.main(["5", "abc123"]), 2)
+
+    def test_a_good_pr_is_merged_and_a_dry_run_merges_nothing(self):
+        cruise_merge.gather = lambda n, sha: {**good_facts(), "name": "owner/repo"}
+        self.assertEqual(cruise_merge.main(["5", SHA, "--dry-run"]), 0)
+        self.assertEqual(self.merged, [])
+        self.assertEqual(cruise_merge.main(["5", SHA]), 0)
+        self.assertEqual(self.merged, [(5, SHA)])
+
+    def test_a_refused_pr_exits_1_and_merges_nothing(self):
+        cruise_merge.gather = lambda n, sha: {**good_facts(), "name": "owner/repo", "mode": "standard"}
+        self.assertEqual(cruise_merge.main(["5", SHA]), 1)
+        self.assertEqual(self.merged, [])
+
+    def test_a_change_just_before_merging_refuses(self):
+        cruise_merge.gather = lambda n, sha: {**good_facts(), "name": "owner/repo"}
+        cruise_merge.recheck = lambda facts: ["main moved while the gate was checking"]
+        self.assertEqual(cruise_merge.main(["5", SHA]), 1)
+        self.assertEqual(self.merged, [])
 
 
 if __name__ == "__main__":
