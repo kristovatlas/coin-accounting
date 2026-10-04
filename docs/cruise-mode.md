@@ -41,11 +41,13 @@ The gate and the skills read the value **from `origin/main`**, never from a PR b
    The run always writes `main`'s copy of `scripts/cruise_merge.py` to that path, and calls it with the path written out. Other code could write to that path too; that's within R-9 (agents aren't sandboxed). Don't keep broader rules such as `Bash(python3 *)` or `Bash(gh pr *)`: they would allow merging without the gate. Remove the rule to make every merge need your approval again.
 4. **Required: protect `main`.** GitHub → Settings → Branches, add a rule for `main`:
    - require a pull request before merging
-   - require status checks to pass: `checks (ubuntu-latest)`, `checks (macos-latest)`, `tests (ubuntu-latest)` and `tests (macos-latest)`
+   - require status checks to pass: `checks (ubuntu-latest)` and `checks (macos-latest)`. **Add `tests (ubuntu-latest)` and `tests (macos-latest)` only once the CI tests PR (#44) is merged**: before that, they never report, and nothing could merge, your own PRs included
+   - leave "Require approvals" **off** (0 approvals): the token can't approve its own PR
+   - leave "Allow deletions" **off**
    - require branches to be up to date before merging
    - **do not allow bypassing the above settings** (it applies to administrators, so your token can't skip it)
 
-   This stops the token from pushing to `main` directly. The gate refuses while `main` isn't protected with those checks.
+   This stops the token from pushing to `main` directly. The gate refuses until all of this is in place, including the two `tests` checks, so it merges nothing before #44.
 5. **CI must run the tests.** The `tests (…)` jobs, which run `make test` and `make lint` on both platforms, come from a separate CI PR (#44). Until it's merged, the gate refuses every PR, and runs hand every slice to you as a draft: still reviewed, but not merged automatically.
 6. **Optional: notifications.** Put a hard-to-guess ntfy topic in `~/.config/coin-accounting/ntfy-topic` (mode 600). Without it, runs don't notify. The topic is never committed: ntfy topics work like shared secrets.
 
@@ -81,12 +83,13 @@ It runs from a 10-minute check-in job in that Claude Code session. The job expir
 ## Rolling back
 
 1. **Return to the standard process.**
-   - Change `PROCESS_MODE` to `standard` and merge that one-line PR yourself, or commit it to `main`.
+   - Change `PROCESS_MODE` to `standard` in a one-line PR and merge it yourself. Branch protection rules out committing to `main` directly, even for you. If CI is broken, lift the protection temporarily to merge it.
+   - For an immediate stop, use the stop file or revoke the token first (see **Stopping**).
    - No ADR is needed: ADR 0030 defines both values.
    - From then on, the review panel runs its standard profile, nothing merges automatically, and `/cruise` refuses to start.
 2. **Review or undo what cruise mode merged.**
    - Each run's tracking issue lists the starting SHA and every PR it merged. Every automatic merge commit's title ends in "(cruise mode, ADR 0030)", so `git log --merges --fixed-strings --grep "(cruise mode, ADR 0030)"` finds them.
-   - To see everything a run changed: `git diff <start-sha> main`.
+   - To see what each merge changed: `git diff <merge-sha>^1 <merge-sha>`, for the merge SHAs listed in the run's tracking issue. A plain `git diff <start-sha> main` would also include other PRs merged in the meantime.
    - To undo one merge, use a PR containing `git revert -m 1 <merge-sha>`. To undo a run, revert its merges newest first.
 3. **Catch up the paperwork.** If a run stopped before its milestone-closing PR, ask for one, or write it yourself. It brings THREAT_MODEL evidence and the changelog up to date.
 4. **Remove cruise mode entirely** (optional). That needs a new ADR that supersedes ADR 0030, plus deleting:

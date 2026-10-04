@@ -69,14 +69,17 @@ A lock file, `run.lock`, works like the review panel's: one session per run, and
 
 ## Each tick
 
-1. **`/cruise stop`:** go to **Stop**. Otherwise, run the mode and pause checks (Rules).
-2. **Load the state:**
-   - **None, or the stage is `done` or `stopped`:** move any old `run.json` to `run-<run_id>.json`, then run **Start** for the scope given.
-   - **A live run for a different scope:** refuse, and tell the human which run is live (`/cruise stop` ends it).
-3. **Reconcile with GitHub before anything else.** For every slice with a PR that isn't `merged`, read the PR:
+The cron job's prompt is `/cruise <scope> --tick`. A call without `--tick` is the human's own.
+
+1. **Reconcile with GitHub before anything else,** whenever a live state exists, including before **Stop** or a pause. For every slice with a PR that isn't `merged`, read the PR:
    - **Merged** (by the gate in an earlier tick that was cut off, or by the human): mark it `merged`, and add the merge SHA to the tracking issue if it isn't there yet.
    - **Closed without merging:** mark it `blocked`, and say so in the issue.
-4. **Make sure the cron job exists:** prompt `/cruise <scope>`, schedule `"7-57/10 * * * *"`, recurring. Delete it in `done`, `stopped` and `awaiting-human`.
+2. **`/cruise stop`:** go to **Stop**. Otherwise, run the mode and pause checks (Rules).
+3. **Load the state:**
+   - **The stage is `done` or `stopped`, and this is a `--tick`:** delete the cron job, and do nothing else. A finished run never restarts itself.
+   - **None, or `done`/`stopped` on the human's own call:** move any old `run.json` to `run-<run_id>.json`, then run **Start** for the scope given.
+   - **A live run for a different scope:** refuse, and tell the human which run is live (`/cruise stop` ends it).
+4. **Make sure the cron job exists** while the run is live: prompt `/cruise <scope> --tick`, schedule `"7-57/10 * * * *"`, recurring. Delete it in the same step that sets `done`, `stopped` or `awaiting-human`.
 5. **Advance the stage** by one step.
 6. **Print the status** last.
 
@@ -144,7 +147,7 @@ Design questions below the ADR bar may be decided during the run. Record each in
    - the PRs handed to the human
    - the decisions
    - the issues filed
-4. Notify, and go to `done`.
+4. Notify, delete the cron job, and go to `done`.
 
 ## Stage `awaiting-human`
 
@@ -162,7 +165,8 @@ If there's no run state (for example, the mode isn't `cruise` on the very first 
 2. Delete the cron job.
 3. Post the run summary to the tracking issue.
 4. Notify.
-5. Set `stopped`. A stopped run doesn't resume; start a new one with `/cruise <scope>`.
+5. Convert every unmerged slice PR that is still ready to a draft (it now needs the human's review under the standard process), and list them in the tracking issue.
+6. Set `stopped`. A stopped run doesn't resume; start a new one with `/cruise <scope>`.
 
 Open PRs stay open, and the human decides about them.
 

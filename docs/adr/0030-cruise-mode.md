@@ -29,7 +29,7 @@ Option 3 (user decision, 2026-10-02), named **cruise mode**. The switch is the f
 - **`cruise`** turns on everything below.
 - **`standard`** restores ADR 0018, 0020 and 0023 unchanged.
 
-Flipping it needs no new ADR, only a PR that the human merges, or a commit by the human. Operating it, stopping it and rolling it back are described in [`docs/cruise-mode.md`](../cruise-mode.md). The skills that implement it are `.claude/skills/cruise/SKILL.md` and the cruise profile in `.claude/skills/review-panel/SKILL.md`, both governed by this ADR.
+Flipping it needs no new ADR, only a PR that the human merges (with the required branch protection, nobody can commit to `main` directly). The stop file and revoking the merge token are the immediate off-switches. Operating it, stopping it and rolling it back are described in [`docs/cruise-mode.md`](../cruise-mode.md). The skills that implement it are `.claude/skills/cruise/SKILL.md` and the cruise profile in `.claude/skills/review-panel/SKILL.md`, both governed by this ADR.
 
 ### What changes in cruise mode
 
@@ -52,19 +52,20 @@ Flipping it needs no new ADR, only a PR that the human merges, or a commit by th
      - nits stay in the comment
    - **The profile applies only to a run's slices, on a panel the run started** (recorded when the panel state is created). The milestone-closing PR, and any PR the human starts the panel on, get the standard profile.
 2. **Gated automatic merge.**
-   - When a round is clean and the Opus tripwire check reports no flags of Medium or above, the orchestrator runs **`main`'s copy of `scripts/cruise_merge.py`**. It merges only if every mechanical condition in its header holds:
+   - At the cruise profile's hand-off (a clean round, or the post-round-2 fixes), when the Opus tripwire check on the full change reports no flags of Medium or above, the orchestrator runs **`main`'s copy of `scripts/cruise_merge.py`**. It merges only if every mechanical condition in its header holds:
      - the local copy of `main` is current, the mode is `cruise`, and there is no stop file
      - the gate is byte-for-byte `main`'s copy
      - `main`'s protection requires a PR, every gate check and up-to-date branches, and applies to administrators too, so the owner's token can't bypass it
      - an open, non-draft, same-repository PR based on `main`, from the owner, with every commit authored or committed by the owner, mergeable, at exactly the reviewed SHA, and **containing the current `main`**
      - the repository checks and the **`tests` jobs** (`make test` and `make lint`) succeeded on both platforms, on a complete list of check-runs with none failed. **CI doesn't have the `tests` jobs yet (#44), so until it does, the gate refuses every PR.**
      - no binary file, no file type the gate doesn't scan, nothing with a `tax`, `doxx` or `chain` path component under `backend/` (tests and golden files included), nor `PROCESS_MODE` or `docs/cruise-mode.md`. Paths are read NUL-separated, with a fixed git configuration, and compared in lower case.
-     - no added `eval`, `exec`, `__import__`, `importlib`, `pickle`, `marshal`, `ctypes` or `Function` call (the gate checks these itself, because the tripwire's dynamic-code label also fires on harmless `re.compile`)
+     - no tool configuration that could override the test, lint or build settings (`pytest.toml`, `ruff.toml`, `conftest.py`, `pyproject.toml`, `package.json`, eslint/vite/vitest/playwright configs and similar), in any directory
+     - no added dynamic-code call, in any file that can run code, HTML included (`eval`, `exec`, `compile`, `getattr`, `vars`, `globals`, `require`, `import(…)`, `__import__`, `__builtins__`, `importlib`, `runpy`, `pickle`, `marshal`, `ctypes`, `sys.modules`, `Reflect.`, `globalThis[…]`/`window[…]`/`self[…]`, `Function` (the gate checks these itself, because the tripwire's dynamic-code label also fires on harmless `re.compile`)
      - no tripwire flag except the two noisy content labels (dynamic code, environment use). That covers:
        - every risky path category: agent instructions, CI, scripts, dependencies, test config, the harness, security-critical modules, binding documents
        - removed test, assertion and guard lines, deleted files, symlinks
        - process, network, download, outside-file and test-weakening content
-       - any URL host, loopback included
+       - any URL host, loopback included, in code files. `.md` and `.csv` files get only the tripwire's encoded-blob check.
        - any label the tripwire adds later
      - a private merge-token file
 

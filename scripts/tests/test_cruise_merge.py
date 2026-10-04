@@ -35,13 +35,14 @@ def good_facts() -> dict:
             "required_status_checks": {"strict": True, "contexts": list(cruise_merge.REQUIRED_CHECKS)},
             "enforce_admins": {"enabled": True},
             "required_pull_request_reviews": {"required_approving_review_count": 0},
+            "allow_deletions": {"enabled": False},
         },
         "sha": SHA,
         "owner": OWNER,
         "pr": {
             "state": "open",
             "draft": False,
-            "head": {"sha": SHA, "repo": REPO},
+            "head": {"sha": SHA, "ref": "cruise/m0.3-1-discovery", "repo": REPO},
             "base": {"ref": "main", "repo": REPO},
             "user": {"login": OWNER},
             "mergeable": True,
@@ -83,6 +84,12 @@ class DecideTests(unittest.TestCase):
             "not strict": lambda f: f["protection"]["required_status_checks"].update(strict=False),
             "admins bypass": lambda f: f["protection"].update(enforce_admins={"enabled": False}),
             "no PR required": lambda f: f["protection"].pop("required_pull_request_reviews"),
+            "an approval required": lambda f: f["protection"]["required_pull_request_reviews"].update(
+                required_approving_review_count=1),
+            "code owners required": lambda f: f["protection"]["required_pull_request_reviews"].update(
+                require_code_owner_reviews=True),
+            "main deletable": lambda f: f["protection"].update(allow_deletions={"enabled": True}),
+            "not a cruise branch": lambda f: f["pr"]["head"].update(ref="feat/something"),
             "closed": lambda f: f["pr"].update(state="closed"),
             "draft": lambda f: f["pr"].update(draft=True),
             "draft unknown": lambda f: f["pr"].pop("draft"),
@@ -117,6 +124,11 @@ class DecideTests(unittest.TestCase):
             "chain module": lambda f: f["changed_files"].append("backend/coinacct/chain/scan.py"),
             "mode switch": lambda f: f["changed_files"].append("PROCESS_MODE"),
             "mode switch, lower case": lambda f: f["changed_files"].append("process_mode"),
+            "root pytest.toml": lambda f: f["changed_files"].append("pytest.toml"),
+            "nested ruff.toml": lambda f: f["changed_files"].append("backend/ruff.toml"),
+            "a conftest": lambda f: f["changed_files"].append("backend/tests/unit/conftest.py"),
+            "an eslint config": lambda f: f["changed_files"].append("frontend/eslint.config.js"),
+            "pyproject": lambda f: f["changed_files"].append("pyproject.toml"),
             "cruise guide": lambda f: f["changed_files"].append("docs/cruise-mode.md"),
             "tripwire didn't run": lambda f: f.update(tripwire=None),
             "no token": lambda f: f.update(token_problem="no readable cruise merge token"),
@@ -215,11 +227,17 @@ class GitScanTests(unittest.TestCase):
 
     def test_dangerous_dynamic_calls_are_found_and_re_compile_is_not(self):
         head = self.commit({
-            "b.py": "import re\nPAT = re.compile(r'x')\nf = getattr(obj, 'name')\n",
+            "b.py": "import re\nPAT = re.compile(r'x')\nQ = re.compile('abc')\nm = pattern.exec('s')\n",
             "c.py": "z = 1\nexec(open('p.txt').read())\nm = __import__('o' + 's')\n",
+            "d.py": "f = getattr(os, 'sy' + 'stem')\ncode = compile(src, 'f', 'exec')\nb = __builtins__\n",
+            "e.js": "const cp = require('child_' + 'process')\n++n; eval(s)\nconst m = await import(name)\n",
+            "f.html": "<p>hi</p>\n<script>eval(location.hash)</script>\n",
+            "g.ts": "let x: Function\nconst y = new Function('return 1')\nwindow['fe' + 'tch'](u)\n",
         })
-        hits = cruise_merge.added_dynamic_code(self.base, head, ["b.py", "c.py"])
-        self.assertEqual(hits, [("c.py", 2), ("c.py", 3)])
+        names = ["b.py", "c.py", "d.py", "e.js", "f.html", "g.ts"]
+        hits = cruise_merge.added_dynamic_code(self.base, head, names)
+        self.assertEqual(hits, [("c.py", 2), ("c.py", 3), ("d.py", 1), ("d.py", 2), ("d.py", 3),
+                                ("e.js", 1), ("e.js", 2), ("e.js", 3), ("f.html", 2), ("g.ts", 2), ("g.ts", 3)])
 
 
 class TokenFileTests(unittest.TestCase):
@@ -272,6 +290,13 @@ class MainTests(unittest.TestCase):
         self.assertEqual(self.merged, [])
         self.assertEqual(cruise_merge.main(["5", SHA]), 0)
         self.assertEqual(self.merged, [(5, SHA)])
+
+    def test_a_crash_while_checking_exits_2_and_merges_nothing(self):
+        def boom(n, sha):
+            raise ValueError("unexpected")
+        cruise_merge.gather = boom
+        self.assertEqual(cruise_merge.main(["5", SHA]), 2)
+        self.assertEqual(self.merged, [])
 
     def test_a_refused_pr_exits_1_and_merges_nothing(self):
         cruise_merge.gather = lambda n, sha: {**good_facts(), "name": "owner/repo", "mode": "standard"}

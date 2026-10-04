@@ -424,4 +424,8 @@ Every other PR gets the standard profile. That includes a run's milestone-closin
   - **One comment per round** (marker `…:round`). It holds the triage, followed by each reviewer's report in a `<details>` block, with security reports reduced as usual. The post-round-2 fixes are listed in a final `…:fixes` comment.
   - **One follow-up issue per PR** (marker `…:issue`): comment on it in later rounds, don't open new ones. Nits stay in the round comment.
 - **Docs.** Don't ask for THREAT_MODEL/ENGINEERING version, changelog or evidence edits in feature PRs; the `/cruise` closing PR makes them. Ask for manual mutation-checks only in `chain/`, `tax/` and `doxx/`.
-- **Hand-off.** The mechanical tripwire and the Opus tripwire still run on the final SHA. The hand-off then goes back to the `/cruise` run, which decides between the gate and the human (see `.claude/skills/cruise/SKILL.md`).
+- **Hand-off.**
+  - **Before the tripwires, rewrite the diff file as the full `merge_base..final head_sha` diff.** The later rounds' diff files show only the fixes, and the Opus tripwire must see the whole change.
+  - The mechanical tripwire and the Opus tripwire then run on the final SHA.
+  - The hand-off goes back to the `/cruise` run, which decides between the gate and the human (see `.claude/skills/cruise/SKILL.md`).
+- **The profile is fixed when the panel's state is created.** If `PROCESS_MODE` on `main` stops being `cruise` while a cruise-started panel is running, the panel stops reviewing, and hands the PR back to the run, which is stopping, so the PR goes to the human as a draft.

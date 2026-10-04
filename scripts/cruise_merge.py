@@ -14,15 +14,17 @@ Conditions, all required:
   - the local `origin/main` is exactly `main` on GitHub (so the copies below aren't stale)
   - `PROCESS_MODE` on that `main` is `cruise`, and the local stop file `.git/cruise-stop` is absent
   - the gate is byte-for-byte `main`'s copy of this script
-  - `main`'s branch protection requires a pull request, every REQUIRED_CHECKS name, branches up to
-    date (`strict`), and applies to administrators too (so the owner's token can't bypass it)
-  - the PR is open, not a draft, from this repository, based on `main`, authored by the owner,
+  - `main`'s branch protection requires a pull request (with no required approvals), every
+    REQUIRED_CHECKS name and branches up to date (`strict`), applies to administrators too (so the
+    owner's token can't bypass it), and forbids deleting `main`
+  - the PR is open, not a draft, on a `cruise/` branch of this repository, based on `main`, authored by the owner,
     every commit authored or committed by the owner, mergeable, and its head is exactly SHA
   - SHA contains the current `main`, so CI tested the result of the merge
   - on SHA, every REQUIRED_CHECKS check-run from github-actions succeeded, the check-run list is
     complete, and every other check-run completed without failing
-  - no changed file is binary, has a suffix outside TEXT_SUFFIXES, or is blocked (`blocked_path`)
-  - no added code line uses a DYNAMIC_CODE call (the tripwire's "dynamic code" label also fires on
+  - no changed file is binary, has a suffix outside TEXT_SUFFIXES, or is blocked (`blocked_path`: the
+    tax/doxx/chain areas, the cruise-mode files, and tool configuration such as pytest.toml or ruff.toml)
+  - no added line in a file that can run code (CODE_SUFFIXES, HTML included) uses a DYNAMIC_CODE call (the tripwire's "dynamic code" label also fires on
     harmless `re.compile`, so the gate checks the dangerous calls itself)
   - `main`'s tripwire on merge-base(origin/main, SHA)..SHA raised no blocking flag (see `blocking`)
   Paths come from git with a fixed configuration and NUL separators, so quoting can't hide them.
@@ -58,23 +60,42 @@ DEFAULT_TOKEN_FILE = "~/.config/coin-accounting/cruise-merge-token"
 # cruise mode itself. Compared in lower case: macOS checkouts are case-insensitive.
 BLOCKED_COMPONENTS = ("tax", "doxx", "chain")
 BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md")
+# Tool configuration that, in any directory, can override or weaken the project's test, lint, type or
+# build settings (pytest reads `pytest.toml` before `pyproject.toml`; ruff reads `ruff.toml` first).
+BLOCKED_NAMES = ("pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "ruff.toml",
+                 ".ruff.toml", "mypy.ini", ".mypy.ini", ".coveragerc", "conftest.py", "pyproject.toml",
+                 "package.json", "tsconfig.json")
+BLOCKED_NAME_PREFIXES = ("eslint.config.", ".eslintrc", "vite.config.", "vitest.config.", "vitest.workspace.",
+                         "playwright.config.", "postcss.config.", "babel.config.", ".babelrc", "tsconfig.")
 # Every changed file must have one of these suffixes: no binaries, no unscanned file types.
 TEXT_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".json", ".toml", ".yml", ".yaml",
-                 ".css", ".html", ".md", ".csv")
-CODE_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx")
-# Calls that build or run code at run time, and so could hide process, network or file access.
-DYNAMIC_CODE = re.compile(r"\b(eval|exec|__import__|importlib|pickle|marshal|ctypes|Function|compile\s*\(\s*['\"])\b"
-                          r"|globalThis\s*\[|\bnew\s+Function\b")
-GIT_ENV = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1",
-           "LC_ALL": "C"}
-GIT_OPTS = ("-c", "core.quotePath=false", "-c", "diff.external=", "-c", "core.attributesFile=" + os.devnull)
+                 ".css", ".html", ".htm", ".md", ".csv")
+# Files that can run code: scanned for DYNAMIC_CODE line by line.
+CODE_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".html", ".htm")
+# Calls that build, look up or run code at run time, and so could hide process, network or file access.
+# Dotted forms are excluded where the name is also a harmless method (`re.compile`, `regex.exec`).
+DYNAMIC_CODE = re.compile(
+    r"(?<![.\w])(eval|exec|compile|getattr|vars|globals|require|import)\s*\("
+    r"|\b(__import__|__builtins__|builtins|importlib|runpy|pickle|marshal|ctypes)\b"
+    r"|\bsys\.modules\b|\bReflect\.|\b(globalThis|window|self)\s*\[|\bnew\s+Function\b|(?<![.\w])Function\s*\("
+)
+GIT_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_") and k != "GIT_CONFIG_PARAMETERS"}
+GIT_ENV.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1", "LC_ALL": "C"})
+GIT_OPTS = ("-c", "core.quotePath=false", "-c", "diff.external=", "-c", "core.attributesFile=" + os.devnull,
+            "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false")
 DIFF_OPTS = ("--no-color", "--no-ext-diff", "--no-textconv", "--no-renames")
 
 
 def blocked_path(path: str) -> bool:
     low = path.lower()
     parts = low.split("/")
-    return low in BLOCKED_FILES or (parts[0] == "backend" and any(c in parts[1:-1] for c in BLOCKED_COMPONENTS))
+    name = parts[-1]
+    return (
+        low in BLOCKED_FILES
+        or name in BLOCKED_NAMES
+        or name.startswith(BLOCKED_NAME_PREFIXES)
+        or (parts[0] == "backend" and any(c in parts[1:-1] for c in BLOCKED_COMPONENTS))
+    )
 
 # Every tripwire flag blocks except these content labels, which fire on every `re.compile` and
 # `os.environ` and are left to the Opus tripwire check. Any new or renamed label blocks.
@@ -111,10 +132,14 @@ def decide(facts: dict) -> list[str]:
         or checks.get("strict") is not True
         or (prot.get("enforce_admins") or {}).get("enabled") is not True
         or not prot.get("required_pull_request_reviews")
+        or (prot.get("required_pull_request_reviews") or {}).get("required_approving_review_count") != 0
+        or (prot.get("required_pull_request_reviews") or {}).get("require_code_owner_reviews") is True
+        or (prot.get("required_pull_request_reviews") or {}).get("require_last_push_approval") is True
+        or (prot.get("allow_deletions") or {}).get("enabled") is not False
     ):
         reasons.append(
-            "main's protection must require a PR, every gate check and up-to-date branches, for admins too "
-            "(see docs/cruise-mode.md)"
+            "main's protection must require a PR (with no approvals), every gate check and up-to-date branches, "
+            "for admins too, and forbid deleting main (see docs/cruise-mode.md)"
         )
     pr, sha, owner = facts["pr"], facts["sha"], facts["owner"]
     if pr.get("state") != "open":
@@ -123,6 +148,8 @@ def decide(facts: dict) -> list[str]:
         reasons.append("the PR is a draft (drafts are for the human)")
     if (pr.get("head") or {}).get("sha") != sha:
         reasons.append("the PR's head isn't the reviewed commit")
+    if not str((pr.get("head") or {}).get("ref", "")).startswith("cruise/"):
+        reasons.append("the PR isn't a cruise slice (its branch doesn't start with cruise/)")
     if (pr.get("base") or {}).get("ref") != "main":
         reasons.append("the PR isn't based on main")
     head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
@@ -176,6 +203,8 @@ def decide(facts: dict) -> list[str]:
 
 
 def run(*cmd: str, env: dict | None = None) -> str:
+    if cmd[0] == "git":
+        cmd, env = ("git", *GIT_OPTS, *cmd[1:]), GIT_ENV
     return subprocess.run(cmd, check=True, capture_output=True, text=True, env=env).stdout
 
 
@@ -222,13 +251,13 @@ def added_dynamic_code(merge_base: str, sha: str, paths: list[str]) -> list[tupl
             ["git", *GIT_OPTS, "diff", *DIFF_OPTS, "--text", "-U0", merge_base, sha, "--", f":(literal){path}"],
             check=True, capture_output=True, env=GIT_ENV,
         ).stdout.decode("utf-8", "replace")
-        line_no = 0
+        in_hunk, line_no = False, 0
         for line in patch.split("\n"):
             m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
-            if m:
-                line_no = int(m.group(1))
+            if m:  # everything before the first hunk header is metadata, including `+++ b/path`
+                in_hunk, line_no = True, int(m.group(1))
                 continue
-            if line.startswith("+") and not line.startswith("+++"):
+            if in_hunk and line.startswith("+"):
                 if DYNAMIC_CODE.search(line[1:]):
                     hits.append((path, line_no))
                 line_no += 1
@@ -249,8 +278,8 @@ def gather(n: int, sha: str) -> dict:
     except subprocess.CalledProcessError:
         protection = None  # 404 (unprotected) or no access: refused
     own = Path(__file__).read_bytes()
-    mains = subprocess.run(["git", "show", "refs/remotes/origin/main:scripts/cruise_merge.py"],
-                           capture_output=True, check=True).stdout
+    mains = subprocess.run(["git", *GIT_OPTS, "show", "refs/remotes/origin/main:scripts/cruise_merge.py"],
+                           capture_output=True, check=True, env=GIT_ENV).stdout
     pr = gh_api(f"repos/{name}/pulls/{n}")
     commits: list = []
     for page in (1, 2, 3):
@@ -266,7 +295,8 @@ def gather(n: int, sha: str) -> dict:
         runs += data["check_runs"]
         if len(runs) >= (total or 0) or not data["check_runs"]:
             break
-    head_has_main = subprocess.run(["git", "merge-base", "--is-ancestor", github_main, sha]).returncode == 0
+    head_has_main = subprocess.run(["git", *GIT_OPTS, "merge-base", "--is-ancestor", github_main, sha],
+                                   env=GIT_ENV).returncode == 0
     merge_base = run("git", "merge-base", "refs/remotes/origin/main", sha).strip()
     numstat = git_z("diff", *DIFF_OPTS, "--numstat", "-z", merge_base, sha)
     binary = [f.split("\t", 2)[2] for f in numstat if f.startswith("-\t-\t")]
@@ -341,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
         reasons = decide(facts)
         if not reasons and not args.dry_run:
             reasons = recheck(facts)
-    except (subprocess.CalledProcessError, OSError, KeyError, TypeError, AttributeError, json.JSONDecodeError) as e:
+    except Exception as e:  # any failure to check is exit 2, never a refusal (exit 1) or a merge
         print(f"cruise_merge: could not check PR #{args.pr} ({type(e).__name__})", file=sys.stderr)
         return 2
     if reasons:
@@ -354,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         merge(facts["name"], args.pr, args.sha)
-    except (subprocess.CalledProcessError, RuntimeError):
+    except Exception:
         print(f"cruise_merge: GitHub refused to merge PR #{args.pr}", file=sys.stderr)
         return 2
     print(f"cruise_merge: merged PR #{args.pr} at {args.sha[:12]}")
