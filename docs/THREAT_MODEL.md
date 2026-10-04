@@ -6,7 +6,7 @@
 | | |
 |---|---|
 | Version | 0.7.29 (M0 in progress) |
-| Last updated | 2026-10-01 |
+| Last updated | 2026-10-04 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
 
