@@ -347,7 +347,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
 - **Branches:** `main` is always releasable. Work happens on short-lived branches (`<type>/<topic>`, e.g. `feat/scan-jobs`, `docs/adr-0003`).
 - **PRs:**
   - small and focused
-  - opened as **drafts** for human review on GitHub
+  - opened as **drafts** for human review on GitHub. The exception is cruise mode: a `/cruise` run opens its slices ready for review, and the gate merges only non-draft PRs (ADR 0030)
   - stacked PRs are allowed and merged with merge commits
   - each PR description lists the affected threat IDs and ADRs
 - **Commits:** imperative subject ≤ 72 chars; the body explains *why*.

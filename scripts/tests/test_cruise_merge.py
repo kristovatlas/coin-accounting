@@ -36,6 +36,7 @@ def good_facts() -> dict:
             "enforce_admins": {"enabled": True},
             "required_pull_request_reviews": {"required_approving_review_count": 0},
             "allow_deletions": {"enabled": False},
+            "allow_force_pushes": {"enabled": False},
         },
         "sha": SHA,
         "owner": OWNER,
@@ -89,6 +90,7 @@ class DecideTests(unittest.TestCase):
             "code owners required": lambda f: f["protection"]["required_pull_request_reviews"].update(
                 require_code_owner_reviews=True),
             "main deletable": lambda f: f["protection"].update(allow_deletions={"enabled": True}),
+            "main force-pushable": lambda f: f["protection"].update(allow_force_pushes={"enabled": True}),
             "not a cruise branch": lambda f: f["pr"]["head"].update(ref="feat/something"),
             "closed": lambda f: f["pr"].update(state="closed"),
             "draft": lambda f: f["pr"].update(draft=True),
@@ -114,6 +116,12 @@ class DecideTests(unittest.TestCase):
             "binary file": lambda f: f["binary_files"].append("backend/coinacct/fast.cpython-313-x86_64-linux-gnu.so"),
             "tax engine": lambda f: f["changed_files"].append("backend/coinacct/tax/engine.py"),
             "tax tests": lambda f: f["changed_files"].append("backend/tests/unit/tax/test_lots.py"),
+            "tax-named module": lambda f: f["changed_files"].append("backend/coinacct/services/tax.py"),
+            "tax-named test": lambda f: f["changed_files"].append("backend/tests/unit/test_tax_lots.py"),
+            "doxx-named golden file": lambda f: f["changed_files"].append("backend/tests/golden/doxx-2024.csv"),
+            "rpc package shadowing rpc.py": lambda f: f["changed_files"].append("backend/coinacct/rpc/__init__.py"),
+            "secret wrapper": lambda f: f["changed_files"].append("backend/coinacct/domain/secret.py"),
+            "socket guard": lambda f: f["changed_files"].append("backend/tests/socket_guard.py"),
             "tax golden file": lambda f: f["changed_files"].append("backend/tests/integration/tax/golden/8949.csv"),
             "tax in upper case": lambda f: f["changed_files"].append("backend/coinacct/Tax/engine.py"),
             "tax with a non-ASCII name": lambda f: f["changed_files"].append("backend/coinacct/tax/règles.py"),
@@ -142,7 +150,8 @@ class DecideTests(unittest.TestCase):
     def test_a_similar_path_outside_the_blocked_ones_is_allowed(self):
         facts = good_facts()
         facts["changed_files"] += ["backend/coinacct/taxonomy.py", "docs/cruise-mode-notes.md",
-                                   "frontend/src/views/tax/Report.tsx", "backend/coinacct/services/tax.py"]
+                                   "frontend/src/views/tax/Report.tsx", "backend/coinacct/services/syntax.py",
+                                   "backend/coinacct/rpc_types.py", "backend/coinacct/configuration_help.py"]
         self.assertEqual(cruise_merge.decide(facts), [])
 
     def test_every_flag_blocks_except_the_two_noisy_content_labels(self):
@@ -233,11 +242,20 @@ class GitScanTests(unittest.TestCase):
             "e.js": "const cp = require('child_' + 'process')\n++n; eval(s)\nconst m = await import(name)\n",
             "f.html": "<p>hi</p>\n<script>eval(location.hash)</script>\n",
             "g.ts": "let x: Function\nconst y = new Function('return 1')\nwindow['fe' + 'tch'](u)\n",
+            "h.py": "lookup = getattr\nrun = ｅｘｅｃ\nf = op.attrgetter('system')\n",
         })
-        names = ["b.py", "c.py", "d.py", "e.js", "f.html", "g.ts"]
+        names = ["b.py", "c.py", "d.py", "e.js", "f.html", "g.ts", "h.py"]
         hits = cruise_merge.added_dynamic_code(self.base, head, names)
         self.assertEqual(hits, [("c.py", 2), ("c.py", 3), ("d.py", 1), ("d.py", 2), ("d.py", 3),
-                                ("e.js", 1), ("e.js", 2), ("e.js", 3), ("f.html", 2), ("g.ts", 2), ("g.ts", 3)])
+                                ("e.js", 1), ("e.js", 2), ("e.js", 3), ("f.html", 2), ("g.ts", 2), ("g.ts", 3),
+                                ("h.py", 1), ("h.py", 2), ("h.py", 3)])
+
+    def test_ordinary_python_is_not_flagged(self):
+        # Ruff-formatted multi-line imports, mapping access and vars(): not dynamic code in Python.
+        head = self.commit({
+            "i.py": "from a.b import (\n    c,\n)\nv = self[key]\nopts = vars(args)\nm = obj.exec_module\n",
+        })
+        self.assertEqual(cruise_merge.added_dynamic_code(self.base, head, ["i.py"]), [])
 
 
 class TokenFileTests(unittest.TestCase):

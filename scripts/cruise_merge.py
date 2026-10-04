@@ -24,7 +24,9 @@ Conditions, all required:
     complete, and every other check-run completed without failing
   - no changed file is binary, has a suffix outside TEXT_SUFFIXES, or is blocked (`blocked_path`: the
     tax/doxx/chain areas, the cruise-mode files, and tool configuration such as pytest.toml or ruff.toml)
-  - no added line in a file that can run code (CODE_SUFFIXES, HTML included) uses a DYNAMIC_CODE call (the tripwire's "dynamic code" label also fires on
+  - no added line in a file that can run code (CODE_SUFFIXES, HTML included) uses a dynamic-code
+    name (DYNAMIC_CODE_ANY, and DYNAMIC_CODE_JS outside Python): a best-effort tripwire, not a complete
+    control (R-11) (the tripwire's "dynamic code" label also fires on
     harmless `re.compile`, so the gate checks the dangerous calls itself)
   - `main`'s tripwire on merge-base(origin/main, SHA)..SHA raised no blocking flag (see `blocking`)
   Paths come from git with a fixed configuration and NUL separators, so quoting can't hide them.
@@ -45,6 +47,7 @@ import os
 import re
 import stat
 import subprocess
+import unicodedata
 import sys
 import tempfile
 from pathlib import Path
@@ -59,7 +62,10 @@ DEFAULT_TOKEN_FILE = "~/.config/coin-accounting/cruise-merge-token"
 # doxx or chain component (the engines, their tests and golden files), and the files that control
 # cruise mode itself. Compared in lower case: macOS checkouts are case-insensitive.
 BLOCKED_COMPONENTS = ("tax", "doxx", "chain")
-BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md")
+BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md", "backend/coinacct/domain/secret.py",
+                 "backend/tests/socket_guard.py", "backend/tests/stub_http.py")
+# Security-critical modules that are single files today: a package of the same name would take over.
+SHADOWABLE_MODULES = ("launcher", "config", "rpc")
 # Tool configuration that, in any directory, can override or weaken the project's test, lint, type or
 # build settings (pytest reads `pytest.toml` before `pyproject.toml`; ruff reads `ruff.toml` first).
 BLOCKED_NAMES = ("pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "ruff.toml",
@@ -72,13 +78,25 @@ TEXT_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".
                  ".css", ".html", ".htm", ".md", ".csv")
 # Files that can run code: scanned for DYNAMIC_CODE line by line.
 CODE_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".html", ".htm")
-# Calls that build, look up or run code at run time, and so could hide process, network or file access.
-# Dotted forms are excluded where the name is also a harmless method (`re.compile`, `regex.exec`).
-DYNAMIC_CODE = re.compile(
-    r"(?<![.\w])(eval|exec|compile|getattr|vars|globals|require|import)\s*\("
-    r"|\b(__import__|__builtins__|builtins|importlib|runpy|pickle|marshal|ctypes)\b"
-    r"|\bsys\.modules\b|\bReflect\.|\b(globalThis|window|self)\s*\[|\bnew\s+Function\b|(?<![.\w])Function\s*\("
+# Names that build, look up or run code at run time, and so could hide process, network or file access.
+# A BEST-EFFORT TRIPWIRE, not a complete control (owner decision, 2026-10-04; R-11): it catches the
+# common direct forms, and deliberate evasion is an accepted risk. Bare names match too, so a simple
+# alias (`g = getattr`) is caught; dotted forms are excluded where the name is also a harmless method
+# (`re.compile`, `regex.exec`). Lines are NFKC-normalised first, as Python does for identifiers.
+DYNAMIC_CODE_ANY = re.compile(
+    r"(?<![.\w])(eval|exec|getattr|setattr|delattr|globals)\b"
+    r"|(?<![.\w])compile\s*\("
+    r"|\b(__import__|__builtins__|builtins|importlib|runpy|pickle|marshal|ctypes|__globals__|__subclasses__"
+    r"|attrgetter|methodcaller)\b"
+    r"|\bsys\.modules\b"
 )
+# JavaScript, TypeScript and HTML only: in Python these forms are ordinary (`from x import (`, `self[k]`).
+DYNAMIC_CODE_JS = re.compile(
+    r"(?<![.\w])(require|import)\s*\("
+    r"|\bReflect\.|\b(globalThis|window|self|this|top|parent|frames)\s*\[|\bnew\s+Function\b|(?<![.\w])Function\s*\("
+    r"|\.constructor\s*\.\s*constructor\b|\b(setTimeout|setInterval)\s*\(\s*['\"`]"
+)
+PY_SUFFIXES = (".py", ".pyi")
 GIT_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_") and k != "GIT_CONFIG_PARAMETERS"}
 GIT_ENV.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1", "LC_ALL": "C"})
 GIT_OPTS = ("-c", "core.quotePath=false", "-c", "diff.external=", "-c", "core.attributesFile=" + os.devnull,
@@ -90,11 +108,16 @@ def blocked_path(path: str) -> bool:
     low = path.lower()
     parts = low.split("/")
     name = parts[-1]
+    stem_words = re.split(r"[._-]", name.split(".", 1)[0]) if "." in name else re.split(r"[._-]", name)
+    in_backend = parts[0] == "backend"
     return (
         low in BLOCKED_FILES
         or name in BLOCKED_NAMES
         or name.startswith(BLOCKED_NAME_PREFIXES)
-        or (parts[0] == "backend" and any(c in parts[1:-1] for c in BLOCKED_COMPONENTS))
+        # tax, doxx and chain: as a directory, or as a word in the file name (`services/tax.py`, `test_tax_lots.py`)
+        or (in_backend and any(c in parts[1:-1] or c in stem_words for c in BLOCKED_COMPONENTS))
+        # the security-critical single-file modules, also as a package that would shadow them (`rpc/__init__.py`)
+        or (len(parts) > 3 and parts[:2] == ["backend", "coinacct"] and parts[2] in SHADOWABLE_MODULES)
     )
 
 # Every tripwire flag blocks except these content labels, which fire on every `re.compile` and
@@ -136,10 +159,11 @@ def decide(facts: dict) -> list[str]:
         or (prot.get("required_pull_request_reviews") or {}).get("require_code_owner_reviews") is True
         or (prot.get("required_pull_request_reviews") or {}).get("require_last_push_approval") is True
         or (prot.get("allow_deletions") or {}).get("enabled") is not False
+        or (prot.get("allow_force_pushes") or {}).get("enabled") is not False
     ):
         reasons.append(
             "main's protection must require a PR (with no approvals), every gate check and up-to-date branches, "
-            "for admins too, and forbid deleting main (see docs/cruise-mode.md)"
+            "for admins too, and forbid deleting or force-pushing main (see docs/cruise-mode.md)"
         )
     pr, sha, owner = facts["pr"], facts["sha"], facts["owner"]
     if pr.get("state") != "open":
@@ -247,6 +271,7 @@ def added_dynamic_code(merge_base: str, sha: str, paths: list[str]) -> list[tupl
     for path in paths:
         if not path.lower().endswith(CODE_SUFFIXES):
             continue
+        is_py = path.lower().endswith(PY_SUFFIXES)
         patch = subprocess.run(
             ["git", *GIT_OPTS, "diff", *DIFF_OPTS, "--text", "-U0", merge_base, sha, "--", f":(literal){path}"],
             check=True, capture_output=True, env=GIT_ENV,
@@ -258,7 +283,8 @@ def added_dynamic_code(merge_base: str, sha: str, paths: list[str]) -> list[tupl
                 in_hunk, line_no = True, int(m.group(1))
                 continue
             if in_hunk and line.startswith("+"):
-                if DYNAMIC_CODE.search(line[1:]):
+                text = unicodedata.normalize("NFKC", line[1:])
+                if DYNAMIC_CODE_ANY.search(text) or (not is_py and DYNAMIC_CODE_JS.search(text)):
                     hits.append((path, line_no))
                 line_no += 1
     return hits

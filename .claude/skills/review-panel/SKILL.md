@@ -410,7 +410,11 @@ Every other PR gets the standard profile. That includes a run's milestone-closin
   - Round 1 reviews the whole diff.
   - **Later rounds review only the fix.** The diff file is `previous head_sha..head_sha`, plus a note naming the files around it. The prompt says "review only this fix, and whether it fixes the listed P1s without breaking anything", and lists the P1s it addresses.
   - **The round limit is 2,** not 5. After round 2 (user decision, 2026-10-03):
-    - **Fix every remaining validated P1 that is functional, or a High security finding.** Run the tests and checks, push, and run no further review round. The mechanical and Opus tripwires then run on the fixed SHA as usual.
+    - **Fix every remaining validated P1 that is functional, or a High security finding.** Run the tests and checks, then push. No further review round runs. Instead, move straight to the fixed commit:
+      1. Set `head_sha` = the pushed commit, and clear `pushed_sha`.
+      2. Re-read the PR, and refresh `merge_base`.
+      3. Rewrite the diff file as the full `merge_base..head_sha` diff.
+      4. Go to `handing-off`, where CI, the mechanical tripwire and the Opus tripwire run on that commit.
     - **A Critical security finding ends the cruise path,** and so does any committed secret or real user data, whatever its rating: a fix commit can't take it out of history. The hand-off goes back to the `/cruise` run with the finding stated in general terms, and the run gives the PR to the human as a draft and notifies them.
     - Only non-P1 findings become issues.
 - **Severity.** A **P1** is only:
@@ -424,6 +428,7 @@ Every other PR gets the standard profile. That includes a run's milestone-closin
   - **One comment per round** (marker `…:round`). It holds the triage, followed by each reviewer's report in a `<details>` block, with security reports reduced as usual. The post-round-2 fixes are listed in a final `…:fixes` comment.
   - **One follow-up issue per PR** (marker `…:issue`): comment on it in later rounds, don't open new ones. Nits stay in the round comment.
 - **Docs.** Don't ask for THREAT_MODEL/ENGINEERING version, changelog or evidence edits in feature PRs; the `/cruise` closing PR makes them. Ask for manual mutation-checks only in `chain/`, `tax/` and `doxx/`.
+- **The Opus tripwire rates each flag.** Its prompt adds: "Give every flag a severity: Critical, High, Medium or Low." A flag with no severity, or an unknown one, counts as Medium. The orchestrator never lowers a rating.
 - **Hand-off.**
   - **Before the tripwires, rewrite the diff file as the full `merge_base..final head_sha` diff.** The later rounds' diff files show only the fixes, and the Opus tripwire must see the whole change.
   - The mechanical tripwire and the Opus tripwire then run on the final SHA.
