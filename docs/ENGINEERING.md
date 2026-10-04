@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.27 |
-| Last updated | 2026-10-03 |
+| Version | 0.2.29 |
+| Last updated | 2026-10-04 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -175,7 +175,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
   - the lockfile policy check
   - the install-command check
   - the Socket App report
-  - tests and coverage on **Linux and macOS**
+  - tests and coverage on **Linux and macOS**: the `tests` job (`make test`, `make lint`), on the `pull_request` trigger only, as T-608 requires
   - a **reproducible frontend build**: build twice in the same pinned environment and compare the normalized `dist/` output
 - **Branch protection on `main`:**
   - PRs only, with all required checks green
@@ -420,3 +420,4 @@ A change is done only when:
 | 2026-10-02 | 0.2.24 | M0.3: `make test` (pytest with the socket guard, coverage floors) and `make lint` (ruff, mypy --strict) for `backend/`; agents may run both |
 | 2026-10-02 | 0.2.25 | M0.3: the regtest harness (`e2e/harness/regtest.py`); `make test` runs the integration tests and needs `make test-tools` |
 | 2026-10-03 | 0.2.27 | Cruise mode (ADR 0030): a switchable faster process. It adds a lighter review-panel profile, gated automatic merges (`scripts/cruise_merge.py`), `/cruise` milestone loops, and threat-model and changelog updates in a milestone-closing PR (§4.3, §6, §8); `PROCESS_MODE` = `standard` restores the previous rules |
+| 2026-10-04 | 0.2.29 | §2.7: CI's `tests` job runs `make test` and `make lint` on every PR, on Linux and macOS, passing `DEPS_APPROVED=1` as decided in #44 (T-608) |
