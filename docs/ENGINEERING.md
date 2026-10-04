@@ -351,7 +351,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
   - stacked PRs are allowed and merged with merge commits
   - each PR description lists the affected threat IDs and ADRs
 - **Commits:** imperative subject ≤ 72 chars; the body explains *why*.
-- **Docs travel with code:** PLAN, threat model, ADRs, diagram and `DEPENDENCIES.md` are updated in the same PR as the change that affects them.
+- **Docs travel with code:** PLAN, threat model, ADRs, diagram and `DEPENDENCIES.md` are updated in the same PR as the change that affects them. In cruise mode, a `/cruise` run's slices leave the threat-model and changelog updates, and PLAN progress, to the run's milestone-closing PR (ADR 0030).
 
 ## 8. Definition of Done
 

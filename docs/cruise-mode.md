@@ -43,6 +43,7 @@ The gate and the skills read the value **from `origin/main`**, never from a PR b
    - require a pull request before merging
    - require status checks to pass: `checks (ubuntu-latest)`, `checks (macos-latest)`, `tests (ubuntu-latest)` and `tests (macos-latest)`
    - require branches to be up to date before merging
+   - **do not allow bypassing the above settings** (it applies to administrators, so your token can't skip it)
 
    This stops the token from pushing to `main` directly. The gate refuses while `main` isn't protected with those checks.
 5. **CI must run the tests.** The `tests (…)` jobs, which run `make test` and `make lint` on both platforms, come from a separate CI PR (#44). Until it's merged, the gate refuses every PR, and runs hand every slice to you as a draft: still reviewed, but not merged automatically.
@@ -72,7 +73,7 @@ It runs from a 10-minute check-in job in that Claude Code session. The job expir
 
 | How | Effect |
 |---|---|
-| `touch .git/cruise-stop` | **Immediate pause.** The gate refuses every merge, and the run pauses at its next tick, keeping its state. Delete the file, and the next tick carries on. |
+| `touch "$(git rev-parse --path-format=absolute --git-common-dir)/cruise-stop"` | **Immediate pause.** The gate refuses every merge, and the run pauses at its next tick, keeping its state. Delete that file, and the next tick carries on. (In the main checkout, that's `.git/cruise-stop`.) |
 | `/cruise stop` | The loop stops after its current step and removes its check-in job; open PRs stay open. |
 | Revoke the merge token on GitHub | Automatic merges stop at once, everywhere, even if a session ignores the stop file. |
 | Set `PROCESS_MODE` to `standard` on `main` | Back to the standard process; see below. |
@@ -84,7 +85,7 @@ It runs from a 10-minute check-in job in that Claude Code session. The job expir
    - No ADR is needed: ADR 0030 defines both values.
    - From then on, the review panel runs its standard profile, nothing merges automatically, and `/cruise` refuses to start.
 2. **Review or undo what cruise mode merged.**
-   - Each run's tracking issue lists the starting SHA and every PR it merged. Every automatic merge commit's title ends in "(cruise mode, ADR 0030)", so `git log --merges --grep "cruise mode"` finds them.
+   - Each run's tracking issue lists the starting SHA and every PR it merged. Every automatic merge commit's title ends in "(cruise mode, ADR 0030)", so `git log --merges --fixed-strings --grep "(cruise mode, ADR 0030)"` finds them.
    - To see everything a run changed: `git diff <start-sha> main`.
    - To undo one merge, use a PR containing `git revert -m 1 <merge-sha>`. To undo a run, revert its merges newest first.
 3. **Catch up the paperwork.** If a run stopped before its milestone-closing PR, ask for one, or write it yourself. It brings THREAT_MODEL evidence and the changelog up to date.
@@ -102,5 +103,6 @@ Whatever the mode:
 - ADR-level decisions
 - changes to agent instructions, CI, scripts, dependency files, security-critical modules (the tripwire's list) or binding documents
 - any PR the gate refuses
-- remaining Critical/High findings after round 2
+- a Critical security finding, or a committed secret or real user data, after round 2 (functional and High security P1s are fixed during the run)
+- any Opus tripwire flag of Medium or above, and anything else the gate refuses (ADR 0030 lists the conditions)
 - the milestone-closing PR

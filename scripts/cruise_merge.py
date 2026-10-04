@@ -13,14 +13,19 @@ never downloads anything.
 Conditions, all required:
   - the local `origin/main` is exactly `main` on GitHub (so the copies below aren't stale)
   - `PROCESS_MODE` on that `main` is `cruise`, and the local stop file `.git/cruise-stop` is absent
-  - `main` is a protected branch whose required status checks include every REQUIRED_CHECKS name
+  - the gate is byte-for-byte `main`'s copy of this script
+  - `main`'s branch protection requires a pull request, every REQUIRED_CHECKS name, branches up to
+    date (`strict`), and applies to administrators too (so the owner's token can't bypass it)
   - the PR is open, not a draft, from this repository, based on `main`, authored by the owner,
     every commit authored or committed by the owner, mergeable, and its head is exactly SHA
   - SHA contains the current `main`, so CI tested the result of the merge
   - on SHA, every REQUIRED_CHECKS check-run from github-actions succeeded, the check-run list is
     complete, and every other check-run completed without failing
-  - no changed file is binary, or under BLOCKED_PATHS
+  - no changed file is binary, has a suffix outside TEXT_SUFFIXES, or is blocked (`blocked_path`)
+  - no added code line uses a DYNAMIC_CODE call (the tripwire's "dynamic code" label also fires on
+    harmless `re.compile`, so the gate checks the dangerous calls itself)
   - `main`'s tripwire on merge-base(origin/main, SHA)..SHA raised no blocking flag (see `blocking`)
+  Paths come from git with a fixed configuration and NUL separators, so quoting can't hide them.
   - the cruise merge token file is a regular file owned by this user, with mode 600
 
 Just before merging, it re-reads GitHub's `main` and the stop file, and refuses if either changed.
@@ -35,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -47,10 +53,28 @@ REQUIRED_CHECKS = ("checks (ubuntu-latest)", "checks (macos-latest)", "tests (ub
 STOP_FILE = "cruise-stop"  # in the git common dir: `touch .git/cruise-stop` stops every merge
 TOKEN_FILE_ENV = "CRUISE_MERGE_TOKEN_FILE"
 DEFAULT_TOKEN_FILE = "~/.config/coin-accounting/cruise-merge-token"
-# Paths the gate refuses on top of the tripwire's risky paths: the tax, doxx and chain engines, and
-# the files that control cruise mode itself.
-BLOCKED_PATHS = ("backend/coinacct/tax/", "backend/coinacct/doxx/", "backend/coinacct/chain/", "PROCESS_MODE",
-                 "docs/cruise-mode.md")
+# Paths the gate refuses on top of the tripwire's risky paths: anything under backend/ with a tax,
+# doxx or chain component (the engines, their tests and golden files), and the files that control
+# cruise mode itself. Compared in lower case: macOS checkouts are case-insensitive.
+BLOCKED_COMPONENTS = ("tax", "doxx", "chain")
+BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md")
+# Every changed file must have one of these suffixes: no binaries, no unscanned file types.
+TEXT_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".json", ".toml", ".yml", ".yaml",
+                 ".css", ".html", ".md", ".csv")
+CODE_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx")
+# Calls that build or run code at run time, and so could hide process, network or file access.
+DYNAMIC_CODE = re.compile(r"\b(eval|exec|__import__|importlib|pickle|marshal|ctypes|Function|compile\s*\(\s*['\"])\b"
+                          r"|globalThis\s*\[|\bnew\s+Function\b")
+GIT_ENV = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1",
+           "LC_ALL": "C"}
+GIT_OPTS = ("-c", "core.quotePath=false", "-c", "diff.external=", "-c", "core.attributesFile=" + os.devnull)
+DIFF_OPTS = ("--no-color", "--no-ext-diff", "--no-textconv", "--no-renames")
+
+
+def blocked_path(path: str) -> bool:
+    low = path.lower()
+    parts = low.split("/")
+    return low in BLOCKED_FILES or (parts[0] == "backend" and any(c in parts[1:-1] for c in BLOCKED_COMPONENTS))
 
 # Every tripwire flag blocks except these content labels, which fire on every `re.compile` and
 # `os.environ` and are left to the Opus tripwire check. Any new or renamed label blocks.
@@ -77,9 +101,21 @@ def decide(facts: dict) -> list[str]:
         reasons.append(f"PROCESS_MODE on main is {facts['mode']!r}, not 'cruise'")
     if facts["stop_file"]:
         reasons.append("the stop file .git/cruise-stop exists")
-    missing = [c for c in REQUIRED_CHECKS if c not in facts["protected_checks"]]
-    if not facts["main_protected"] or missing:
-        reasons.append("main isn't protected with every required check (see docs/cruise-mode.md)")
+    if not facts["gate_is_mains"]:
+        reasons.append("this gate isn't main's copy of scripts/cruise_merge.py")
+    prot = facts["protection"] or {}
+    checks = prot.get("required_status_checks") or {}
+    missing = [c for c in REQUIRED_CHECKS if c not in (checks.get("contexts") or [])]
+    if (
+        missing
+        or checks.get("strict") is not True
+        or (prot.get("enforce_admins") or {}).get("enabled") is not True
+        or not prot.get("required_pull_request_reviews")
+    ):
+        reasons.append(
+            "main's protection must require a PR, every gate check and up-to-date branches, for admins too "
+            "(see docs/cruise-mode.md)"
+        )
     pr, sha, owner = facts["pr"], facts["sha"], facts["owner"]
     if pr.get("state") != "open":
         reasons.append("the PR isn't open")
@@ -125,8 +161,11 @@ def decide(facts: dict) -> list[str]:
             reasons.append(f"check-run {r.get('name')} concluded {r.get('conclusion')}")
     reasons.extend(f"binary file changed: {p}" for p in facts["binary_files"])
     for p in facts["changed_files"]:
-        if any(p == b or (b.endswith("/") and p.startswith(b)) for b in BLOCKED_PATHS):
+        if blocked_path(p):
             reasons.append(f"blocked path changed: {p}")
+        elif not p.lower().endswith(TEXT_SUFFIXES):
+            reasons.append(f"file type the gate doesn't scan: {p}")
+    reasons.extend(f"dynamic code call added: {p} (line {n})" for p, n in facts["dynamic_code"])
     if facts["tripwire"] is None:
         reasons.append("the tripwire did not run")
     else:
@@ -168,6 +207,34 @@ def git_dir() -> Path:
     return Path(run("git", "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
 
 
+def git_z(*args: str) -> list[str]:
+    """NUL-separated git output, with a fixed configuration, so paths are never quoted or rewritten."""
+    out = subprocess.run(["git", *GIT_OPTS, *args], check=True, capture_output=True, env=GIT_ENV).stdout
+    return [f.decode("utf-8", "surrogateescape") for f in out.split(b"\0") if f]
+
+
+def added_dynamic_code(merge_base: str, sha: str, paths: list[str]) -> list[tuple[str, int]]:
+    hits = []
+    for path in paths:
+        if not path.lower().endswith(CODE_SUFFIXES):
+            continue
+        patch = subprocess.run(
+            ["git", *GIT_OPTS, "diff", *DIFF_OPTS, "--text", "-U0", merge_base, sha, "--", f":(literal){path}"],
+            check=True, capture_output=True, env=GIT_ENV,
+        ).stdout.decode("utf-8", "replace")
+        line_no = 0
+        for line in patch.split("\n"):
+            m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if m:
+                line_no = int(m.group(1))
+                continue
+            if line.startswith("+") and not line.startswith("+++"):
+                if DYNAMIC_CODE.search(line[1:]):
+                    hits.append((path, line_no))
+                line_no += 1
+    return hits
+
+
 def gather(n: int, sha: str) -> dict:
     repo = json.loads(run("gh", "repo", "view", "--json", "nameWithOwner,owner"))
     name, owner = repo["nameWithOwner"], repo["owner"]["login"]
@@ -177,8 +244,13 @@ def gather(n: int, sha: str) -> dict:
         mode = run("git", "show", "refs/remotes/origin/main:PROCESS_MODE").strip()
     except subprocess.CalledProcessError:
         mode = "(missing)"
-    branch = gh_api(f"repos/{name}/branches/main")
-    checks = ((branch.get("protection") or {}).get("required_status_checks") or {}).get("contexts") or []
+    try:
+        protection = gh_api(f"repos/{name}/branches/main/protection")  # needs the owner's admin read
+    except subprocess.CalledProcessError:
+        protection = None  # 404 (unprotected) or no access: refused
+    own = Path(__file__).read_bytes()
+    mains = subprocess.run(["git", "show", "refs/remotes/origin/main:scripts/cruise_merge.py"],
+                           capture_output=True, check=True).stdout
     pr = gh_api(f"repos/{name}/pulls/{n}")
     commits: list = []
     for page in (1, 2, 3):
@@ -196,9 +268,10 @@ def gather(n: int, sha: str) -> dict:
             break
     head_has_main = subprocess.run(["git", "merge-base", "--is-ancestor", github_main, sha]).returncode == 0
     merge_base = run("git", "merge-base", "refs/remotes/origin/main", sha).strip()
-    numstat = run("git", "diff", "--numstat", "--no-renames", merge_base, sha).splitlines()
-    binary = [line.split("\t", 2)[2] for line in numstat if line.startswith("-\t-\t")]
-    changed = run("git", "diff", "--name-only", "--no-renames", merge_base, sha).splitlines()
+    numstat = git_z("diff", *DIFF_OPTS, "--numstat", "-z", merge_base, sha)
+    binary = [f.split("\t", 2)[2] for f in numstat if f.startswith("-\t-\t")]
+    changed = git_z("diff", *DIFF_OPTS, "--name-only", "-z", merge_base, sha)
+    dynamic = added_dynamic_code(merge_base, sha, changed)
     tripwire = None
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "tripwire.py"
@@ -214,8 +287,8 @@ def gather(n: int, sha: str) -> dict:
         "main_fresh": local_main == github_main,
         "mode": mode,
         "stop_file": (git_dir() / STOP_FILE).exists(),
-        "main_protected": branch.get("protected") is True,
-        "protected_checks": checks,
+        "gate_is_mains": own == mains,
+        "protection": protection,
         "pr": pr,
         "sha": sha,
         "owner": owner,
@@ -225,6 +298,7 @@ def gather(n: int, sha: str) -> dict:
         "check_runs_total": total,
         "binary_files": binary,
         "changed_files": changed,
+        "dynamic_code": dynamic,
         "tripwire": tripwire,
         "token_problem": token_problem,
     }

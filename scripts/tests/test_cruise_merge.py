@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -29,8 +30,12 @@ def good_facts() -> dict:
         "main_fresh": True,
         "mode": "cruise",
         "stop_file": False,
-        "main_protected": True,
-        "protected_checks": list(cruise_merge.REQUIRED_CHECKS),
+        "gate_is_mains": True,
+        "protection": {
+            "required_status_checks": {"strict": True, "contexts": list(cruise_merge.REQUIRED_CHECKS)},
+            "enforce_admins": {"enabled": True},
+            "required_pull_request_reviews": {"required_approving_review_count": 0},
+        },
         "sha": SHA,
         "owner": OWNER,
         "pr": {
@@ -48,6 +53,7 @@ def good_facts() -> dict:
         "check_runs_total": len(runs),
         "binary_files": [],
         "changed_files": ["backend/coinacct/services/discovery.py", "backend/tests/unit/test_discovery.py"],
+        "dynamic_code": [],
         "tripwire": [
             {"file": "backend/coinacct/services/discovery.py", "kind": "content",
              "detail": "dynamic code or deserialisation (line 3)"},
@@ -70,8 +76,13 @@ class DecideTests(unittest.TestCase):
             "standard mode": lambda f: f.update(mode="standard"),
             "missing mode": lambda f: f.update(mode="(missing)"),
             "stop file": lambda f: f.update(stop_file=True),
-            "main unprotected": lambda f: f.update(main_protected=False),
-            "tests not required": lambda f: f.update(protected_checks=["checks (ubuntu-latest)"]),
+            "not main's gate": lambda f: f.update(gate_is_mains=False),
+            "main unprotected": lambda f: f.update(protection=None),
+            "tests not required": lambda f: f["protection"]["required_status_checks"].update(
+                contexts=["checks (ubuntu-latest)"]),
+            "not strict": lambda f: f["protection"]["required_status_checks"].update(strict=False),
+            "admins bypass": lambda f: f["protection"].update(enforce_admins={"enabled": False}),
+            "no PR required": lambda f: f["protection"].pop("required_pull_request_reviews"),
             "closed": lambda f: f["pr"].update(state="closed"),
             "draft": lambda f: f["pr"].update(draft=True),
             "draft unknown": lambda f: f["pr"].pop("draft"),
@@ -95,9 +106,17 @@ class DecideTests(unittest.TestCase):
             "check-runs incomplete": lambda f: f.update(check_runs_total=101),
             "binary file": lambda f: f["binary_files"].append("backend/coinacct/fast.cpython-313-x86_64-linux-gnu.so"),
             "tax engine": lambda f: f["changed_files"].append("backend/coinacct/tax/engine.py"),
+            "tax tests": lambda f: f["changed_files"].append("backend/tests/unit/tax/test_lots.py"),
+            "tax golden file": lambda f: f["changed_files"].append("backend/tests/integration/tax/golden/8949.csv"),
+            "tax in upper case": lambda f: f["changed_files"].append("backend/coinacct/Tax/engine.py"),
+            "tax with a non-ASCII name": lambda f: f["changed_files"].append("backend/coinacct/tax/règles.py"),
+            "unscanned file type": lambda f: f["changed_files"].append("backend/coinacct/payload.txt"),
+            "no suffix": lambda f: f["changed_files"].append("backend/coinacct/runme"),
+            "dynamic code": lambda f: f["dynamic_code"].append(("backend/coinacct/x.py", 3)),
             "doxx engine": lambda f: f["changed_files"].append("backend/coinacct/doxx/rules.py"),
             "chain module": lambda f: f["changed_files"].append("backend/coinacct/chain/scan.py"),
             "mode switch": lambda f: f["changed_files"].append("PROCESS_MODE"),
+            "mode switch, lower case": lambda f: f["changed_files"].append("process_mode"),
             "cruise guide": lambda f: f["changed_files"].append("docs/cruise-mode.md"),
             "tripwire didn't run": lambda f: f.update(tripwire=None),
             "no token": lambda f: f.update(token_problem="no readable cruise merge token"),
@@ -110,8 +129,8 @@ class DecideTests(unittest.TestCase):
 
     def test_a_similar_path_outside_the_blocked_ones_is_allowed(self):
         facts = good_facts()
-        facts["changed_files"].append("backend/coinacct/taxonomy.py")
-        facts["changed_files"].append("docs/cruise-mode-notes.md")
+        facts["changed_files"] += ["backend/coinacct/taxonomy.py", "docs/cruise-mode-notes.md",
+                                   "frontend/src/views/tax/Report.tsx", "backend/coinacct/services/tax.py"]
         self.assertEqual(cruise_merge.decide(facts), [])
 
     def test_every_flag_blocks_except_the_two_noisy_content_labels(self):
@@ -152,6 +171,55 @@ class DecideTests(unittest.TestCase):
         facts = good_facts()
         facts["tripwire"] = [{"file": "x.py", "kind": "content", "detail": "network use (line 2)", "text": "SECRET"}]
         self.assertNotIn("SECRET", "\n".join(cruise_merge.decide(facts)))
+
+
+class GitScanTests(unittest.TestCase):
+    """The gate's own git reads: unquoted NUL-separated paths, and the dynamic-call scan."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+        self._cwd = os.getcwd()
+        os.chdir(self.repo)
+        self.git("init", "-q", "-b", "main")
+        (self.repo / "a.py").write_text("x = 1\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "base")
+        self.base = self.git("rev-parse", "HEAD").strip()
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+        self._tmp.cleanup()
+
+    def git(self, *args: str) -> str:
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+        return subprocess.run(["git", *args], cwd=self.repo, env=env, check=True, capture_output=True,
+                              text=True).stdout
+
+    def commit(self, files: dict[str, str]) -> str:
+        for name, text in files.items():
+            path = self.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "change")
+        return self.git("rev-parse", "HEAD").strip()
+
+    def test_a_non_ascii_path_comes_back_unquoted_and_is_blocked(self):
+        head = self.commit({"backend/coinacct/tax/règles.py": "y = 2\n"})
+        changed = cruise_merge.git_z("diff", *cruise_merge.DIFF_OPTS, "--name-only", "-z", self.base, head)
+        self.assertEqual(changed, ["backend/coinacct/tax/règles.py"])
+        self.assertTrue(cruise_merge.blocked_path(changed[0]))
+
+    def test_dangerous_dynamic_calls_are_found_and_re_compile_is_not(self):
+        head = self.commit({
+            "b.py": "import re\nPAT = re.compile(r'x')\nf = getattr(obj, 'name')\n",
+            "c.py": "z = 1\nexec(open('p.txt').read())\nm = __import__('o' + 's')\n",
+        })
+        hits = cruise_merge.added_dynamic_code(self.base, head, ["b.py", "c.py"])
+        self.assertEqual(hits, [("c.py", 2), ("c.py", 3)])
 
 
 class TokenFileTests(unittest.TestCase):

@@ -396,19 +396,23 @@ PR #N Review (round R):
 
 ## Cruise profile
 
-Applies only when **both** of these hold. Everything above holds except what this section overrides.
+Applies only when **all three** of these hold. Everything above holds except what this section overrides.
 - `PROCESS_MODE` on `origin/main` is `cruise` (ADR 0030). Read it at the start of every round, not from the PR branch.
 - The PR is one of the **slices** listed in `$GIT_DIR_ABS/cruise/run.json`.
+- The panel's state records `"started_by": "cruise"`. It is set once, when a `/cruise` run creates the state, and never changed. A panel the human starts records `"human"`.
 
-Every other PR, including a run's milestone-closing PR and any PR the human runs `/review-panel` on, gets the standard profile.
+Every other PR gets the standard profile. That includes a run's milestone-closing PR, and any PR the human runs `/review-panel` on, even a slice.
 
 - **Reviewers by risk.** Run the mechanical tripwire on `merge_base..head_sha` at the start of round 1.
-  - **All four reviewers** if it raised any `path` flag, or the diff touches `backend/coinacct/chain/`, `tax/` or `doxx/`.
+  - **All four reviewers** if it raised any `path` flag, or the diff touches any `tax`, `doxx` or `chain` path under `backend/`.
   - **Otherwise two:** `opus` and `sol`, each with one combined FOCUS that pastes the security and the functional block together. Their state keys are `opus` and `sol`.
 - **Rounds.**
   - Round 1 reviews the whole diff.
   - **Later rounds review only the fix.** The diff file is `previous head_sha..head_sha`, plus a note naming the files around it. The prompt says "review only this fix, and whether it fixes the listed P1s without breaking anything", and lists the P1s it addresses.
-  - **The round limit is 2,** not 5. After round 2, **any** validated P1 still open ends the cruise path for this PR. The hand-off goes back to the `/cruise` run with the open P1s listed, and the run gives the PR to the human as a draft, never to the gate. Only non-P1 findings become issues.
+  - **The round limit is 2,** not 5. After round 2 (user decision, 2026-10-03):
+    - **Fix every remaining validated P1 that is functional, or a High security finding.** Run the tests and checks, push, and run no further review round. The mechanical and Opus tripwires then run on the fixed SHA as usual.
+    - **A Critical security finding ends the cruise path,** and so does any committed secret or real user data, whatever its rating: a fix commit can't take it out of history. The hand-off goes back to the `/cruise` run with the finding stated in general terms, and the run gives the PR to the human as a draft and notifies them.
+    - Only non-P1 findings become issues.
 - **Severity.** A **P1** is only:
   - a Critical/High finding the orchestrator has confirmed
   - a broken build or test, including a credibly flaky test
@@ -417,10 +421,7 @@ Every other PR, including a run's milestone-closing PR and any PR the human runs
 
   On its own, none of these is a P1: a mismatch with a binding document, a gap in a best-effort control (such as log redaction), or a Medium. They become issues. The ADR 0023 downgrades still apply.
 - **Records.**
-  - **One comment per round** (marker `…:round`). It holds the triage, followed by each reviewer's report in a `<details>` block, with security reports reduced as usual.
+  - **One comment per round** (marker `…:round`). It holds the triage, followed by each reviewer's report in a `<details>` block, with security reports reduced as usual. The post-round-2 fixes are listed in a final `…:fixes` comment.
   - **One follow-up issue per PR** (marker `…:issue`): comment on it in later rounds, don't open new ones. Nits stay in the round comment.
 - **Docs.** Don't ask for THREAT_MODEL/ENGINEERING version, changelog or evidence edits in feature PRs; the `/cruise` closing PR makes them. Ask for manual mutation-checks only in `chain/`, `tax/` and `doxx/`.
-- **Hand-off.**
-  - The mechanical tripwire and the Opus tripwire still run on the final SHA.
-  - When the panel was started by `/cruise`, the hand-off goes back to that run, which decides between the gate and the human (see `.claude/skills/cruise/SKILL.md`).
-  - When the human started the panel, the hand-off is as in the standard profile.
+- **Hand-off.** The mechanical tripwire and the Opus tripwire still run on the final SHA. The hand-off then goes back to the `/cruise` run, which decides between the gate and the human (see `.claude/skills/cruise/SKILL.md`).

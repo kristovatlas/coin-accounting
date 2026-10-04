@@ -50,7 +50,7 @@ If a request conflicts with these documents, stop and ask the human instead of w
   Everything the gate refuses goes to the human as a draft. With `PROCESS_MODE` set to `standard`, the rule above applies without exception.
 - End commit messages with a `Co-Authored-By` trailer for the agent.
 - PR descriptions list the affected threat IDs and ADRs, **what was verified (commands run, tests added) and what was not**.
-- Update `THREAT_MODEL.md`, ADRs, `PLAN.md` and `DEPENDENCIES.md` in the same PR as the change that affects them.
+- Update `THREAT_MODEL.md`, ADRs, `PLAN.md` and `DEPENDENCIES.md` in the same PR as the change that affects them. In cruise mode, a `/cruise` run's slices leave THREAT_MODEL statuses, evidence and changelog rows, plus PLAN progress, to the run's milestone-closing PR (ADR 0030).
 
 ### Done means done
 - A task is done only when the Definition of Done (ENGINEERING §8) holds.
@@ -58,7 +58,7 @@ If a request conflicts with these documents, stop and ask the human instead of w
 - Don't weaken a test to make it pass (anti-slop rules, ENGINEERING §3.5).
 
 ### Reviews
-- `/review-panel #N` runs the review panel in `.claude/skills/review-panel/SKILL.md` ([ADR 0020](docs/adr/0020-review-panel.md)). It reviews, fixes, files issues and runs the tripwire, then hands the PR to the human. It never merges. In cruise mode, it uses the skill's cruise profile, and `/cruise` may run it ([ADR 0030](docs/adr/0030-cruise-mode.md)).
+- `/review-panel #N` runs the review panel in `.claude/skills/review-panel/SKILL.md` ([ADR 0020](docs/adr/0020-review-panel.md)). It reviews, fixes, files issues and runs the tripwire, then hands the PR to the human. It never merges. In cruise mode, a `/cruise` run may run it on its own slices, with the skill's cruise profile; every other PR gets the standard profile ([ADR 0030](docs/adr/0030-cruise-mode.md)).
 - When asked to run AI reviews, post each review as a PR comment.
 - Verify each finding before acting on it; reviewers can be wrong.
 - Afterwards, post a triage comment recording what was addressed, deferred or rejected, and why. Valid non-P1 findings of Low or higher become GitHub issues labelled `review-panel`; nits stay in the triage comment.

@@ -18,7 +18,7 @@ Work through `<scope>` of `PLAN.md` in cruise mode ([ADR 0030](../../../docs/adr
 - **Merging** is only through **`main`'s copy** of the gate, at the absolute path recorded as `gate_path` in `run.json` (`<git common dir>/cruise/gate.py`, resolved once at **Start**). Use three separate shell calls, and write the path out literally, never through a shell variable, so the owner's permission rule matches it (`docs/cruise-mode.md`):
   1. Update `origin/main` and the PR head (`git`, with `+refs/heads/main:refs/remotes/origin/main` and `refs/pull/N/head`).
   2. `mkdir -p` the gate's directory, then `git show refs/remotes/origin/main:scripts/cruise_merge.py >` that path.
-  3. `python3 <gate_path> N SHA`.
+  3. `python3 <gate_path> N SHA`, run from the main checkout (the directory above the git common dir), so `gh` resolves this repository.
 
   Also:
   - **The first time a run reaches the gate,** call it with `--dry-run` first. Record the result in the tracking issue, and only then call it for real.
@@ -37,7 +37,7 @@ Work through `<scope>` of `PLAN.md` in cruise mode ([ADR 0030](../../../docs/adr
   - CI or scripts
   - binding documents
   - security-critical modules
-  - `tax/`, `doxx/` and `chain/`
+  - anything with a `tax`, `doxx` or `chain` path component under `backend/`, tests and golden files included
   - `PROCESS_MODE` and `docs/cruise-mode.md`
 - **The tracking issue is the run's record.** Every merge, refusal, decision, pause and stop is added to it, through the review panel's posting path (the marker is `<!-- cruise:<run-id>:<kind> -->`).
 - **Notify the human** when blocked on them, when paused, and when the run ends.
@@ -60,7 +60,7 @@ Shell variables don't survive between calls, so every call sets these again. `$C
   "gate_path": "/abs/path/.git/cruise/gate.py", "gate_dry_run_done": false,
   "stage": "slice|closing|done|stopped|awaiting-human",
   "slices": [{"id": 1, "title": "…", "depends_on": [], "branch": "cruise/m0.3-1-…", "pr": null,
-              "status": "todo|building|reviewing|merged|handed-to-human|blocked"}],
+              "status": "todo|building|reviewing|merged|handed-to-human|blocked", "gate_exit2": 0}],
   "closing_pr": null, "decisions": [], "awaiting_reason": null
 }
 ```
@@ -70,7 +70,9 @@ A lock file, `run.lock`, works like the review panel's: one session per run, and
 ## Each tick
 
 1. **`/cruise stop`:** go to **Stop**. Otherwise, run the mode and pause checks (Rules).
-2. **Load the state.** If there is none, run **Start**.
+2. **Load the state:**
+   - **None, or the stage is `done` or `stopped`:** move any old `run.json` to `run-<run_id>.json`, then run **Start** for the scope given.
+   - **A live run for a different scope:** refuse, and tell the human which run is live (`/cruise stop` ends it).
 3. **Reconcile with GitHub before anything else.** For every slice with a PR that isn't `merged`, read the PR:
    - **Merged** (by the gate in an earlier tick that was cut off, or by the human): mark it `merged`, and add the merge SHA to the tracking issue if it isn't there yet.
    - **Closed without merging:** mark it `blocked`, and say so in the issue.
@@ -110,15 +112,20 @@ Take the first slice whose dependencies are `merged` and whose status is `todo`,
 3. **Review** it with the review panel's **cruise profile**: follow `.claude/skills/review-panel/SKILL.md` inline for this PR, with its state file.
 4. **When the panel reaches the hand-off** (clean round, CI green, mechanical tripwire and Opus tripwire done):
    - **Hand it to the human instead of running the gate** if either holds:
-     - the panel ended with any validated P1 still open
+     - the panel ended on a **Critical** security finding, or a committed secret or real user data (the cruise profile fixes functional and High security P1s itself, user decision 2026-10-03)
      - the Opus tripwire raised any flag of Medium or above
 
      Convert the PR to a draft (`gh api graphql` with `convertPullRequestToDraft`), post the panel's standard hand-off, and mark the slice `handed-to-human`.
-   - **If `main` moved since the PR's last CI run** (the head doesn't contain `origin/main`), merge `origin/main` into the branch and push. If that merge has conflicts, hand the PR to the human. Then wait for CI on the new head. The new head needs no new review round when its only new commit is that clean merge: the gate's tripwire still scans the whole change.
+   - **If `main` moved since the PR's last CI run** (the head doesn't contain `origin/main`):
+     - Merge `origin/main` into the branch and push. If that merge has conflicts, hand the PR to the human.
+     - Wait for CI on the new head.
+     - Run the mechanical tripwire and the **Opus tripwire** again on the new head.
+
+     That needs no new review round when the only new commit is that clean merge.
    - **Otherwise run the gate** on the head SHA (Rules):
-     - **Exit 0 (merged):** mark the slice `merged`, add the merge to the tracking issue, and delete the branch.
+     - **Exit 0 (merged):** mark the slice `merged`, and add the merge to the tracking issue. Then run the review panel's **After the merge** routine for the PR: it deletes the branch only at its final SHA and with no dependent PR, and cleans up the worktrees and files.
      - **Exit 1 (refused):** convert the PR to a draft, post the standard hand-off with the gate's reasons, and mark the slice `handed-to-human`. Until CI runs `make test`/`make lint` (#44), the gate refuses every PR, so this is the normal path.
-     - **Exit 2 (couldn't check):** try once more on the next tick. A second exit 2 goes to `awaiting-human`.
+     - **Exit 2 (couldn't check):** increment the slice's `gate_exit2`, and try again on the next tick. At 2, go to `awaiting-human`.
 5. **If later slices depend on a `handed-to-human` slice,** they wait; take independent slices meanwhile. If nothing is left to take, go to `awaiting-human` (reason: `merges`) and notify.
 6. **When every slice is `merged`,** go to `closing`.
 
@@ -148,6 +155,8 @@ Nothing happens automatically. Act only on the human's own typed message, for ex
 - "stop"
 
 ## Stop
+
+If there's no run state (for example, the mode isn't `cruise` on the very first call), just say so and stop.
 
 1. Finish or abandon the current step without merging anything.
 2. Delete the cron job.
