@@ -34,6 +34,7 @@ MADR-format records of significant decisions (see [ADR 0001](0001-record-decisio
 | [0025](0025-coverage-startup-hook.md) | Allow coverage.py's own start-up hook, pinned by content |
 | [0026](0026-workflow-linters.md) | actionlint and zizmor as pinned toolchain binaries, with zizmor's online audits |
 | [0027](0027-osv-scanner-audit.md) | osv-scanner as the pinned vulnerability audit, with a dev-time flow to OSV |
+| [0028](0028-web-stack-fastapi-uvicorn.md) | FastAPI and uvicorn as the runtime web stack, with pydantic-core's native wheels |
 | [0029](0029-minimum-core-31-1.md) | Minimum Bitcoin Core version 31.1 |
 | [0030](0030-cruise-mode.md) | Cruise mode: a lighter review panel, gated automatic merges and milestone loops |
 

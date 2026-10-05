@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| Version | 0.7.34 (M0 in progress) |
+| Version | 0.7.35 (M0 in progress) |
 | Last updated | 2026-10-04 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -389,3 +389,4 @@ This applies to almost any project that vets its dependencies.
 | 2026-10-04 | 0.7.32 | T-405: the dismount watchdog (Implemented, partly) |
 | 2026-10-04 | 0.7.33 | T-608 Implemented: CI's `tests` job installs and tests on every PR (Linux and macOS), passing `DEPS_APPROVED=1` on the make command line, on the `pull_request` trigger only (#44). Its `tests (…)` checks are the ones the cruise gate requires (ADR 0030) |
 | 2026-10-04 | 0.7.34 | R-10: another local user impersonating the node on the loopback RPC port is an accepted risk (single-user machine; #107). The minimum Core version is 31.1 (ADR 0029) |
+| 2026-10-04 | 0.7.35 | T-601, T-602, T-604 (ADR 0028, proposed): FastAPI 0.141.1 and uvicorn 0.53.0 proposed as the first runtime dependencies, with `pydantic-core` as allowed native code. FastAPI 0.142.x is avoided for now because it requires `opentelemetry-api` (T-604). Every new wheel was checked against its hash for `.pth` files and install scripts. Statuses unchanged |
