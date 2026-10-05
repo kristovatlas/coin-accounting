@@ -3,7 +3,7 @@
 Shutdown can be asked for from anywhere: a signal handler, the dismount watchdog's thread, or quit
 from the UI. `Shutdown.request` is safe to call from any of them, any number of times, and never
 raises: the first call starts the shutdown and later calls only log. The steps run on their own
-thread, in the order they were added (stop accepting requests, cancel the current job, close the
+thread, in the order they were added (stop the server, cancel the current job, close the
 DB, flush the logs), so a slow step never blocks the caller.
 
 The app must not keep running after shutdown was asked for, for example on a dismounted volume
