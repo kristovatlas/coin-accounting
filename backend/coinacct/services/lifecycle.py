@@ -2,23 +2,27 @@
 
 Shutdown can be asked for from anywhere: a signal handler, the dismount watchdog's thread, or quit
 from the UI. `Shutdown.request` is safe to call from any of them, any number of times, and never
-raises: the first call starts the shutdown and later calls only log. The steps run on their own
-thread, in the order they were added (stop the server, cancel the current job, close the
-DB, flush the logs), so a slow step never blocks the caller.
+raises. It does almost nothing itself, because a signal handler runs on the main thread between
+bytecodes and may interrupt that thread anywhere, even inside `threading` or `logging`:
+
+- It **claims** shutdown with one non-blocking lock acquire, which can't be interrupted halfway, so
+  exactly one caller wins even when a signal handler re-enters.
+- It then only **sets an event**. A waiter thread, started with the coordinator, wakes, arms the
+  deadline timer, starts the runner, and only then logs. So no thread is started and nothing is
+  logged from inside a signal handler, and a log write that blocks on a hung volume can't delay the
+  deadline or the steps.
+
+The runner is an explicitly **non-daemon** thread (a thread inherits the daemon flag of the thread
+that starts it, and the waiter and the watchdog are daemons), so the interpreter waits for the steps
+when the server returns and the main thread ends. It runs the steps in the order they were added
+(stop the server, cancel the current job, close the DB, flush the logs), reading the list under the
+lock, so a step being added when the claim happened isn't lost.
 
 The app must not keep running after shutdown was asked for, for example on a dismounted volume
-(T-405). So:
-- The deadline timer is armed **before anything else**, logging included: on a hung volume even a
-  log write can block, and the timer must still end the process.
-- If a step raises, the other steps still run, and then the process exits hard. If the steps don't
-  finish within the deadline, it exits hard at once. The hard exit writes one line to stderr and
-  never goes through `logging`.
-- The steps run on a non-daemon thread, so the interpreter waits for them when the server returns
-  and the main thread ends; a clean shutdown then exits normally, writing logs and coverage.
-- The lock is re-entrant: a signal handler runs on the main thread between bytecodes, possibly
-  while that thread holds the lock, and must not deadlock.
-
-A clean shutdown exits with code 0 through the launcher; a failed or overdue one exits with 1.
+(T-405). If a step raises, the other steps still run and the process then exits hard; if the steps
+don't finish within the deadline, it exits hard at once. The hard exit writes one line to stderr
+and never goes through `logging`. A clean shutdown exits with code 0 through the launcher; a failed
+or overdue one exits with 1.
 """
 
 from __future__ import annotations
@@ -68,13 +72,17 @@ class Shutdown:
         self._hard_exit = hard_exit
         self._timer = timer
         self._steps: list[tuple[str, Callable[[], object]]] = []
-        self._lock = threading.RLock()
+        self._lock = threading.Lock()  # guards _steps; never taken by request()
+        self._claim = threading.Lock()  # held for good by the first request
+        self._wake = threading.Event()
         self._reason: str | None = None
         self._done = threading.Event()
+        self._waiter = threading.Thread(target=self._wait_for_request, name="shutdown-waiter", daemon=True)
+        self._waiter.start()
 
     @property
     def requested(self) -> bool:
-        return self._reason is not None
+        return self._claim.locked()
 
     @property
     def reason(self) -> str | None:
@@ -83,26 +91,17 @@ class Shutdown:
     def add_step(self, name: str, step: Callable[[], object]) -> None:
         """Add a step; steps run in the order they were added. Only before shutdown starts."""
         with self._lock:
-            if self._reason is not None:
+            if self.requested:
                 raise RuntimeError("shutdown has already started")
             self._steps.append((name, step))
 
     def request(self, reason: str) -> None:
         """Start shutting down. Safe from any thread or a signal handler; never raises."""
         try:
-            with self._lock:
-                first = self._reason
-                if first is None:
-                    self._reason = reason
-                    steps = list(self._steps)
-            if first is not None:
-                log.info("shutdown already under way (%s); also asked: %s", first, reason)
-                return
-            timer = self._timer(self._deadline, self._overdue)
-            timer.start()  # armed before anything that could block, logging included
-            log.critical("shutting down: %s", reason)
-            runner = threading.Thread(target=self._run, args=(steps, timer), name="shutdown")
-            runner.start()
+            if not self._claim.acquire(blocking=False):
+                return  # already under way; the first reason stands
+            self._reason = reason
+            self._wake.set()
         except BaseException:  # a failure here must still end the process
             self._exit_now("shutdown could not start")
 
@@ -111,7 +110,24 @@ class Shutdown:
         process is then being ended)."""
         return self._done.wait(timeout)
 
-    def _run(self, steps: list[tuple[str, Callable[[], object]]], timer: Timer) -> None:
+    def _wait_for_request(self) -> None:
+        self._wake.wait()
+        try:
+            timer = self._timer(self._deadline, self._overdue)
+            timer.start()  # armed before anything that could block, logging included
+            runner = threading.Thread(target=self._run, args=(timer,), name="shutdown", daemon=False)
+            runner.start()
+        except BaseException:
+            self._exit_now("shutdown could not start")
+            return
+        try:
+            log.critical("shutting down: %s", self._reason)
+        except BaseException:  # noqa: S110 - logging may be what's broken; the steps already run
+            pass
+
+    def _run(self, timer: Timer) -> None:
+        with self._lock:  # waits for an add_step that was interrupted by the claim
+            steps = list(self._steps)
         failed = []
         for name, step in steps:
             try:
@@ -125,8 +141,8 @@ class Shutdown:
         if failed:
             self._exit_now(f"shutdown steps failed ({', '.join(failed)})")
             return
+        self._done.set()  # before cancelling, so a timer already firing sees a clean finish
         timer.cancel()
-        self._done.set()
 
     def _overdue(self) -> None:
         if not self._done.is_set():
