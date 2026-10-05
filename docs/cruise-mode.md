@@ -48,7 +48,7 @@ The gate and the skills read the value **from `origin/main`**, never from a PR b
    - **do not allow bypassing the above settings** (it applies to administrators, so your token can't skip it)
 
    This stops the token from pushing to `main` directly. The gate refuses until all of this is in place, including the two `tests` checks, so it merges nothing before #44.
-5. **CI must run the tests.** The `tests (…)` jobs, which run `make test` and `make lint` on both platforms, come from a separate CI PR (#44). Until it's merged, the gate refuses every PR, and runs hand every slice to you as a draft: still reviewed, but not merged automatically.
+5. **CI must run the tests.** The `tests (…)` jobs, which run `make test` and `make lint` on both platforms, come from CI's `tests` job (#44). Until it's merged, the gate refuses every PR, and runs hand every slice to you as a draft: still reviewed, but not merged automatically.
 6. **Optional: notifications.** Put a hard-to-guess ntfy topic in `~/.config/coin-accounting/ntfy-topic` (mode 600; runs keep it off the command line). Without it, runs don't notify. The topic is never committed: ntfy topics work like shared secrets.
 
 ## Starting a run
