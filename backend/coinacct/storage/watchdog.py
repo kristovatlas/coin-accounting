@@ -1,9 +1,11 @@
 """The dismount watchdog (architecture §3; THREAT_MODEL T-405).
 
 Every 2 s it checks that the verified data directory is still there: the same path, on the same
-device, with the same inode. If the volume has been dismounted, or the directory was removed or
-replaced, it calls `on_lost` once (which starts shutdown) and stops. It never tries to recover:
-whatever is at that path now is not the directory that was verified.
+device, with the same inode, as recorded when `open_data_dir` verified it (not when the watchdog
+starts, so a directory swapped in between is never trusted). If the volume has been dismounted,
+or the directory was removed or replaced, it calls `on_lost` once (which starts shutdown) and
+stops. It never tries to recover: whatever is at that path now is not the directory that was
+verified.
 """
 
 from __future__ import annotations
@@ -12,8 +14,9 @@ import logging
 import os
 import threading
 from collections.abc import Callable
-from pathlib import Path
 from typing import Final
+
+from coinacct.storage.datadir import DataDir
 
 log = logging.getLogger(__name__)
 
@@ -22,11 +25,10 @@ INTERVAL_SECONDS: Final = 2.0
 
 class Watchdog:
     def __init__(
-        self, root: Path, on_lost: Callable[[str], None], *, interval: float = INTERVAL_SECONDS
+        self, data_dir: DataDir, on_lost: Callable[[str], None], *, interval: float = INTERVAL_SECONDS
     ) -> None:
-        st = os.stat(root)
-        self._root = root
-        self._identity = (st.st_dev, st.st_ino)
+        self._root = data_dir.root
+        self._identity = (data_dir.device, data_dir.inode)  # as verified, never re-read here
         self._on_lost = on_lost
         self._interval = interval
         self._stop = threading.Event()
