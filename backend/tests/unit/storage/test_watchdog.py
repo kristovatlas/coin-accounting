@@ -96,3 +96,25 @@ def test_a_directory_swapped_in_after_verification_is_never_trusted_t405(
     verified.root.mkdir(mode=0o700)
     dog = Watchdog(verified, ignore)
     assert dog.problem() == "the data directory was replaced or remounted"
+
+
+def test_the_watchdog_asks_for_shutdown_before_it_logs_t405(
+    verified: DataDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # On a dismounted volume the log write can block (the log file is there); shutdown comes first.
+    order: list[str] = []
+    done = threading.Event()
+
+    def critical(*args: object, **kwargs: object) -> None:
+        order.append("log")
+        done.set()
+
+    monkeypatch.setattr("coinacct.storage.watchdog.log.critical", critical)
+    dog = Watchdog(verified, lambda reason: order.append("shutdown"), interval=0.01)
+    dog.start()
+    shutil.rmtree(verified.root)
+    try:
+        assert done.wait(5)
+    finally:
+        dog.stop()
+    assert order == ["shutdown", "log"]

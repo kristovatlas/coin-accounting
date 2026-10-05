@@ -61,6 +61,7 @@ class Watchdog:
         while not self._stop.wait(self._interval):
             reason = self.problem()
             if reason is not None:
-                log.critical("shutting down: %s (T-405)", reason)
+                # Shutdown first: on a dismounted volume the log write can block (the log is there).
                 self._on_lost(reason)
+                log.critical("shutting down: %s (T-405)", reason)
                 return
