@@ -50,9 +50,9 @@ def test_a_new_data_directory_accepts_any_known_chain() -> None:
 
 
 @pytest.mark.parametrize(
-    ("version", "too_old"), [(309900, True), (300000, True), (310000, False), (320000, False)]
+    ("version", "too_old"), [(310000, True), (309900, True), (310099, True), (310100, False), (320000, False)]
 )
-def test_core_31_0_is_the_minimum_version(version: int, too_old: bool) -> None:
+def test_core_31_1_is_the_minimum_version(version: int, too_old: bool) -> None:
     assert (Problem.VERSION_TOO_OLD in problems(facts(version=version))) is too_old
 
 
