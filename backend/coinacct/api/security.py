@@ -4,6 +4,10 @@ Pure ASGI, so it runs before routing and for every response, errors included:
 
 - **Host allowlist (T-101):** exactly `127.0.0.1:<port>`. Anything else, `localhost` included, is
   refused with 421 before routing, which stops DNS rebinding.
+- **Body size limit:** every request body is read here, before routing, up to `MAX_BODY_BYTES`;
+  a larger one (by `Content-Length`, or counted as it streams in, chunked included) is refused with
+  413 and never reaches FastAPI, which would otherwise read it whole before validating it
+  (architecture §1). Any local process can reach the unauthenticated session route (T-103).
 - **JSON only (T-102):** a request with a body under `/api/` must be `application/json`. A plain
   HTML form can't send that, so it can't reach a state-changing route. The bearer token is the main
   CSRF control; this is a second one. There are never any CORS headers.
@@ -38,6 +42,8 @@ SECURITY_HEADERS: Final = (
 )
 _REPLACED: Final = frozenset(name for name, _ in SECURITY_HEADERS)
 METHODS_WITH_BODY: Final = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+# Every request body so far is a small JSON object. Uploads (later) get their own, larger limit.
+MAX_BODY_BYTES: Final = 64 * 1024
 
 
 def allowed_host(port: int) -> bytes:
@@ -73,7 +79,51 @@ class SecurityMiddleware:
             if len(types) != 1 or types[0].split(b";")[0].strip().lower() != b"application/json":
                 await _plain(send_with_headers, 415, "Only application/json is accepted")
                 return
-        await self.app(scope, receive, send_with_headers)
+        body = await _read_body(headers, receive)
+        if body is None:
+            await _plain(send_with_headers, 413, f"Request body larger than {MAX_BODY_BYTES} bytes")
+            return
+        await self.app(scope, _replay(body, receive), send_with_headers)
+
+
+async def _read_body(headers: list[tuple[bytes, bytes]], receive: Receive) -> bytes | None:
+    """The whole request body, or None if it is (or claims to be) larger than the limit."""
+    lengths = [v for k, v in headers if k.lower() == b"content-length"]
+    if lengths:
+        try:
+            declared = int(lengths[0])
+        except ValueError:
+            return None
+        if len(lengths) > 1 or declared < 0 or declared > MAX_BODY_BYTES:
+            return None
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        message = await receive()
+        if message["type"] != "http.request":
+            break  # the client went away; the app sees an empty body and then the disconnect
+        chunk = message.get("body", b"")
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            return None
+        chunks.append(chunk)
+        if not message.get("more_body", False):
+            break
+    return b"".join(chunks)
+
+
+def _replay(body: bytes, receive: Receive) -> Receive:
+    """Give the app the already-read body once, then pass later messages (disconnect) through."""
+    sent = False
+
+    async def replayed() -> Message:
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    return replayed
 
 
 async def _plain(send: Send, status: int, text: str) -> None:

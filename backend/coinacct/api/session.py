@@ -4,6 +4,11 @@ The launcher creates a one-time bootstrap token T and hands it to the browser th
 The SPA sends T once to `POST /api/session` and gets the session token S, which lasts until the
 backend exits. T is single-use and expires 60 s after start-up; a second claim is refused and logged.
 There is exactly one session per process. Comparisons are constant-time.
+
+Refused claims are logged, but only the first `MAX_LOGGED_REFUSALS`: the route needs no
+authentication, so any local process could otherwise fill the log on the data volume (T-103). A
+reuse of the real token after the claim (a sign it leaked, T-110) is told apart from a wrong token.
+The launcher deletes the bootstrap file on claim (`on_claimed`) and at `expires_at`.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from typing import Final
 log = logging.getLogger(__name__)
 
 BOOTSTRAP_TTL_SECONDS: Final = 60.0
+MAX_LOGGED_REFUSALS: Final = 10
 ALREADY_CLAIMED: Final = "Session already claimed. Restart the app."
 
 
@@ -46,20 +52,39 @@ class Sessions:
         self._on_claimed = on_claimed
         self._session: str | None = None
         self._lock = threading.Lock()
+        self.refused = 0
+
+    @property
+    def expires_at(self) -> float:
+        """When the bootstrap token stops working, on the clock given to the constructor."""
+        return self._expires_at
+
+    def _refuse(self, error: ClaimError, why: str) -> ClaimError:
+        self.refused += 1
+        if self.refused <= MAX_LOGGED_REFUSALS:
+            log.warning("%s", why)
+        if self.refused == MAX_LOGGED_REFUSALS:
+            log.warning("further refused claims are counted but not logged")
+        return error
 
     def claim(self, token: str) -> str | ClaimError:
         """Exchange the bootstrap token for the session token, once. Returns the session token or
         why the claim was refused."""
         with self._lock:
+            matches = hmac.compare_digest(token.encode(), self._bootstrap.encode())
             if self._session is not None:
-                log.warning("a second claim of the launch token was refused (T-110)")
-                return ClaimError.ALREADY_CLAIMED
-            if not hmac.compare_digest(token.encode(), self._bootstrap.encode()):
-                log.warning("a claim with a wrong launch token was refused")
-                return ClaimError.WRONG_TOKEN
+                why = (
+                    "the launch token was used again after the session was claimed (T-110)"
+                    if matches
+                    else "a claim was refused: the session is already claimed"
+                )
+                return self._refuse(ClaimError.ALREADY_CLAIMED, why)
+            if not matches:
+                return self._refuse(ClaimError.WRONG_TOKEN, "a claim with a wrong launch token was refused")
             if self._clock() >= self._expires_at:
-                log.warning("a claim of an expired launch token was refused (T-110)")
-                return ClaimError.EXPIRED
+                return self._refuse(
+                    ClaimError.EXPIRED, "a claim of an expired launch token was refused (T-110)"
+                )
             self._session = secrets.token_urlsafe(32)
             session = self._session
         log.info("session claimed")
