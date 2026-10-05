@@ -20,7 +20,7 @@ Transitive packages are covered by the lockfiles, the lockfile policy check and 
 
 Step 1 of [ENGINEERING §2.4](ENGINEERING.md#24-adding-a-dependency-vet-before-anything-is-installed) is to justify each dependency. **Nothing below is installed.** Once the human approves this list and the pinned toolchain is installed, each package is resolved with `make propose-*` in its own PR, the Socket report is reviewed, and the human approves the lockfile diff before `make bootstrap`. Versions are picked at that point, at least 7 days old.
 
-**Python, runtime**: `fastapi` and `uvicorn` are proposed in PR #104 (ADR 0028) and listed in the table above.
+**Python, runtime**: `fastapi` and `uvicorn` were approved by the owner on 2026-10-04 (Socket verdict and lockfile diff; PR #104, ADR 0028), and are listed in the table above.
 
 Deliberately **not** proposed, because the stdlib or our own code covers it:
 - the RPC client (`http.client`)

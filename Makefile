@@ -175,6 +175,36 @@ audit: ## Vulnerability audit of the lockfiles with the pinned osv-scanner (quer
 audit-tools: ## Install the pinned osv-scanner (hash-verified; pins must be on origin/main)
 	"$(SYS_PYTHON)" scripts/toolchain.py install --only osv-scanner $(if $(DEPS_OK),--approved)
 
+# --- tests and lint (the approved dev tools from the verified virtual environment) ---
+
+# Backend sources the floors apply to (ENGINEERING §3.3). A floored module that doesn't exist
+# yet is skipped; the overall floor always applies.
+COV_FLOOR_ALL := 85
+COV_FLOOR_STRICT := 95
+COV_STRICT_MODULES := chain tax doxx
+
+.PHONY: test
+test: require-toolchain ## Run the backend tests with coverage (socket guard on; floors per ENGINEERING §3.3; needs make test-tools)
+	@"$(SYS_PYTHON)" scripts/toolchain.py verify bitcoind >/dev/null || { echo "Run 'make test-tools' first: the integration tests need the pinned regtest bitcoind." >&2; exit 1; }
+	@# Plugins load only when named (PYTEST_DISABLE_PLUGIN_AUTOLOAD above); hypothesis is the one we use.
+	"$(ROOT)/.venv/bin/python" -m coverage erase
+	"$(ROOT)/.venv/bin/python" -m coverage run -m pytest -p hypothesis.extra.pytestplugin backend/tests
+	"$(ROOT)/.venv/bin/python" -m coverage report --fail-under=$(COV_FLOOR_ALL)
+	@# `|| exit 1`: GNU Make 3.81 (macOS) has no .SHELLFLAGS, so without -e the loop would
+	@# return the last module's status and hide an earlier failed floor.
+	@for m in $(COV_STRICT_MODULES); do \
+	  if [ -d "backend/coinacct/$$m" ]; then \
+	    echo "coverage floor $(COV_FLOOR_STRICT)% for $$m/"; \
+	    "$(ROOT)/.venv/bin/python" -m coverage report --include="backend/coinacct/$$m/*" --fail-under=$(COV_FLOOR_STRICT) || exit 1; \
+	  fi; \
+	done
+
+.PHONY: lint
+lint: require-toolchain ## Lint, format check and strict typing for the backend and test harness (ruff, mypy --strict)
+	"$(ROOT)/.venv/bin/ruff" check backend e2e/harness
+	"$(ROOT)/.venv/bin/ruff" format --check backend e2e/harness
+	"$(ROOT)/.venv/bin/mypy" backend/coinacct backend/tests e2e/harness
+
 # --- checks (standard library only, so they run before any dependency exists) ---
 
 .PHONY: check
