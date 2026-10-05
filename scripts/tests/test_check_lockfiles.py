@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -22,6 +23,12 @@ NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
 HASH = "sha256:" + "a" * 64
 FILES = "https://files.pythonhosted.org/packages/ab/cd/" + "e" * 60 + "/"  # the real URL shape
 OLD = "2026-09-01T00:00:00Z"
+RES = "    resolution: {integrity: sha512-" + "A" * 86 + "==}\n"
+PNPM_BODY = ("importers:\n\n  frontend:\n    dependencies:\n      react:\n        specifier: ^19.3.0\n"
+             "        version: 19.3.0\n\npackages:\n\n  '@scope/pkg@1.0.0':\n" + RES
+             + "    engines: {node: '>=20'}\n\n  react@19.3.0:\n" + RES)
+PNPM_SNAPSHOTS = "\nsnapshots:\n\n  react@19.3.0: {}\n"
+PNPM_TIMES = {"@scope/pkg@1.0.0": OLD, "react@19.3.0": OLD}
 
 
 def wheel(name: str, uploaded: str = OLD, url: str | None = None, hash_: str = HASH) -> str:
@@ -100,9 +107,84 @@ class CheckLockfilesTests(unittest.TestCase):
         self.lock(self.pkg("sdistonly", wheels="[]"))
         self.assertIn("no wheels", self.errors())
 
-    def test_a_pnpm_lockfile_fails_closed_for_now(self):
-        (self.repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
-        self.assertIn("pnpm lockfile check is not implemented", self.errors())
+    # --- pnpm-lock.yaml (ENGINEERING §2.5) ---------------------------------------------------------
+
+    def pnpm(self, packages: str = "", times: dict | None = None, head: str = "lockfileVersion: '9.0'\n") -> None:
+        default = PNPM_BODY + packages + PNPM_SNAPSHOTS
+        (self.repo / "pnpm-lock.yaml").write_text(head + "\nsettings:\n  autoInstallPeers: true\n"
+                                                 "  excludeLinksFromLockfile: false\n\n" + default)
+        if times is not None:
+            (self.repo / "pnpm-lock.times.json").write_text(json.dumps(times))
+
+    def test_a_registry_pnpm_lockfile_with_old_packages_passes(self):
+        self.pnpm(times=PNPM_TIMES)
+        self.assertEqual(check_lockfiles.check(self.repo, NOW), [])
+
+    def test_a_package_younger_than_the_cooldown_fails_on_the_npm_side(self):
+        self.pnpm(times={**PNPM_TIMES, "react@19.3.0": "2026-09-28T00:00:00Z"})
+        self.assertIn("react@19.3.0 was published 2026-09-28, less than 7 days ago", self.errors())
+
+    def test_a_missing_publish_time_or_times_file_fails(self):
+        self.pnpm(times={"@scope/pkg@1.0.0": OLD})
+        self.assertIn("no publish time for react@19.3.0", self.errors())
+        (self.repo / "pnpm-lock.times.json").unlink()
+        self.assertIn("pnpm-lock.times.json is missing", self.errors())
+
+    def test_non_registry_sources_fail(self):
+        for bad in ("    resolution: {tarball: https://evil.example/x.tgz}\n",
+                    "    resolution: {type: git, repo: https://github.com/a/b, commit: abc}\n",
+                    "    resolution: {directory: ../x, type: directory}\n"):
+            with self.subTest(bad=bad):
+                self.pnpm("\n  evil@1.0.0:\n" + bad, times={**PNPM_TIMES, "evil@1.0.0": OLD})
+                errors = self.errors()
+                self.assertIn("a source other than the npm registry", errors)
+                self.assertIn("evil@1.0.0 must have exactly one registry resolution", errors)
+
+    def test_link_and_file_versions_in_importers_fail(self):
+        for spec in ("link:../x", "file:../x.tgz", "workspace:*", "npm:other@1", "github:a/b"):
+            with self.subTest(spec=spec):
+                (self.repo / "pnpm-lock.yaml").write_text(
+                    "lockfileVersion: '9.0'\n\nimporters:\n\n  frontend:\n    dependencies:\n"
+                    f"      x:\n        specifier: {spec}\n        version: {spec}\n")
+                self.assertIn("a source other than the npm registry", self.errors())
+
+    def test_a_weak_or_extra_integrity_fails(self):
+        for res in ("{integrity: sha1-" + "A" * 27 + "=}", "{integrity: sha512-short==}",
+                    "{integrity: sha512-" + "A" * 86 + "==, extra: 1}"):
+            with self.subTest(res=res):
+                self.pnpm("\n  x@1.0.0:\n    resolution: " + res + "\n", times={**PNPM_TIMES, "x@1.0.0": OLD})
+                self.assertIn("a resolution must be exactly {integrity: sha512-...}", self.errors())
+
+    def test_a_package_without_a_resolution_or_with_two_fails(self):
+        self.pnpm("\n  x@1.0.0:\n    engines: {node: '>=20'}\n", times={**PNPM_TIMES, "x@1.0.0": OLD})
+        self.assertIn("x@1.0.0 must have exactly one registry resolution", self.errors())
+        self.pnpm("\n  x@1.0.0:\n" + RES + RES, times={**PNPM_TIMES, "x@1.0.0": OLD})
+        self.assertIn("x@1.0.0 must have exactly one registry resolution", self.errors())
+
+    def test_unknown_top_level_keys_settings_and_versions_fail(self):
+        (self.repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n\noverrides:\n  x: 1.0.0\n")
+        self.assertIn("top-level key 'overrides' is not allowed", self.errors())
+        self.pnpm(times=PNPM_TIMES, head="lockfileVersion: '6.0'\n")
+        self.assertIn("lockfileVersion: '9.0'", self.errors())
+        (self.repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: false\n")
+        self.assertIn("unexpected setting", self.errors())
+
+    def test_a_second_document_anchors_tags_and_non_ascii_fail(self):
+        for extra in ("---\nlockfileVersion: '9.0'\n", "\n  x@1.0.0: &a\n", "\n  y@1.0.0: !!str\n"):
+            with self.subTest(extra=extra):
+                self.pnpm(extra, times=PNPM_TIMES)
+                self.assertIn("only one plain YAML document is allowed", self.errors())
+        (self.repo / "pnpm-lock.yaml").write_bytes("\ufefflockfileVersion: '9.0'\n".encode())
+        self.assertIn("non-ASCII content", self.errors())
+
+    def test_a_resolution_outside_packages_fails(self):
+        (self.repo / "pnpm-lock.yaml").write_text(
+            "lockfileVersion: '9.0'\n\nsnapshots:\n\n  react@19.3.0:\n" + RES)
+        self.assertIn("a resolution outside the packages section", self.errors())
+
+    def test_a_duplicate_package_entry_fails(self):
+        self.pnpm("\n  react@19.3.0:\n" + RES, times=PNPM_TIMES)
+        self.assertIn("react@19.3.0 appears twice", self.errors())
 
     def test_lifecycle_scripts_pnpmfile_and_config_dependencies_fail(self):
         (self.repo / "frontend").mkdir()
@@ -194,8 +276,8 @@ class CheckLockfilesTests(unittest.TestCase):
         (self.repo / "node_modules" / "x").mkdir(parents=True)
         (self.repo / "node_modules" / "x" / "pnpm-lock.yaml").write_text("")  # skipped: not ours
         found = self.errors()
-        for needle in (".PnpmFile.cjs: a .pnpmfile is not allowed", "frontend/pnpm-lock.yaml:", "pnpm-lock.main.yaml:",
-                       "e2e/PNPM-LOCK.YAML:"):
+        for needle in (".PnpmFile.cjs: a .pnpmfile is not allowed", "frontend/pnpm-lock.yaml: only pnpm-lock.yaml",
+                       "pnpm-lock.main.yaml:", "e2e/PNPM-LOCK.YAML:"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, found)
         self.assertNotIn("node_modules", found)

@@ -9,9 +9,16 @@ lockfile could still bring in a fresh or off-registry package. This check reads 
   every file (wheel or sdist) is an https URL on files.pythonhosted.org whose file name matches
   the entry's name and version, carries a sha256 hash, and was uploaded at least 7 days ago.
   Declared Python dependencies without a `uv.lock` fail.
-- pnpm lockfiles: not supported yet, so any `pnpm-lock*.yaml` (any case) in the tree fails the
-  check, as do the settings that create per-package or per-branch lockfiles (`sharedWorkspaceLockfile`,
-  `gitBranchLockfile`) or that ignore or relocate the lockfile (`lockfile`, `lockfileDir`).
+- `pnpm-lock.yaml` (the only pnpm lockfile allowed: any other `pnpm-lock*.yaml`, in any case and
+  anywhere, fails, as do the settings that create per-package or per-branch lockfiles,
+  `sharedWorkspaceLockfile` and `gitBranchLockfile`, or that ignore or relocate it, `lockfile` and
+  `lockfileDir`). It is read in full, strictly: lockfile version 9.0, one YAML document, ASCII, only
+  the top-level keys pnpm writes for registry packages, no URL, git, tarball, link, file or
+  directory source anywhere, and for every package exactly one resolution, `{integrity: sha512-…}`,
+  which pnpm writes only for the default registry. Each package's publish time comes from
+  `pnpm-lock.times.json`, which `make propose-js` records from the registry: it must be at least 7
+  days old. Like `uv.lock`'s `upload-time`, a hand-edited times file could back-date a package; the
+  owner accepted that limit for npm too (2026-10-05), since every change needs the owner's approval.
 - Our `package.json` files have no lifecycle scripts and no `packageManager` field; there is no
   `.pnpmfile.*` (any case), no `configDependencies` in any spelling, no `pnpmfile` or
   `globalPnpmfile` setting, and `ignorePnpmfile: true` is present exactly once. YAML syntax that
@@ -63,6 +70,15 @@ FORBIDDEN_WORKSPACE_KEYS = re.compile(
 # fails closed (PR #81 review).
 WORKSPACE_INDIRECT_SYNTAX = re.compile(r"^\s*(?:[?!&*{\[]|<<|---|\.\.\.)|:\s*[!&*]", re.M)
 IGNORE_PNPMFILE = re.compile(r"^ignorePnpmfile:\s*true\s*(?:#.*)?$", re.M)
+PNPM_LOCK = "pnpm-lock.yaml"
+PNPM_TIMES = "pnpm-lock.times.json"
+PNPM_TOP_KEYS = {"lockfileVersion", "settings", "importers", "packages", "snapshots"}
+PNPM_SETTINGS = {"  autoInstallPeers: true", "  excludeLinksFromLockfile: false"}
+PNPM_PACKAGE = re.compile(r"^  '?((?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*)@([0-9][0-9A-Za-z.+-]*)'?:$")
+PNPM_RESOLUTION = re.compile(r"^    resolution: \{integrity: sha512-[A-Za-z0-9+/]{86}==\}$")
+# Anything that names a source other than the default registry. pnpm writes no URL at all for it.
+PNPM_FOREIGN = re.compile(r"://|\b(?:link|file|git|github|gitlab|bitbucket|workspace|catalog|npm|portal|patch):"
+                          r"|\btarball\b|\bdirectory\b|\btype: |\brepo: |\bcommit: ")
 SKIP_DIRS = {".git", ".venv", ".toolchain", "node_modules", ".pnpm-store", ".uv-cache"}
 
 
@@ -162,13 +178,100 @@ def check_uv_lock(repo: Path, now: datetime) -> list[str]:
     return errors
 
 
+def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
+    """ENGINEERING §2.5 for the npm side. A strict line-by-line read of the format pnpm 12 writes for
+    registry packages: anything else fails closed, so nothing is skipped by a lenient parser."""
+    path = repo / PNPM_LOCK
+    if not path.exists():
+        return []
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError:
+        return [f"{PNPM_LOCK}: non-ASCII content (including a byte-order mark)"]
+    lines = text.split("\n")
+    if lines[0] != "lockfileVersion: '9.0'":
+        return [f"{PNPM_LOCK}: the first line must be lockfileVersion: '9.0'"]
+    errors: list[str] = []
+    for n, line in enumerate(lines, 1):
+        if "\t" in line or "\r" in line:
+            errors.append(f"{PNPM_LOCK}:{n}: tabs and carriage returns are not allowed")
+        if line.startswith(("---", "...", "%")) or re.search(r"(?:^|[\s:,\[{])[&*!?]", line):
+            errors.append(f"{PNPM_LOCK}:{n}: only one plain YAML document is allowed (no markers, anchors, "
+                          "aliases, tags or explicit keys)")
+        if PNPM_FOREIGN.search(line):
+            errors.append(f"{PNPM_LOCK}:{n}: a source other than the npm registry")
+    section = None
+    packages: dict[str, int] = {}  # "name@version" -> resolution lines seen
+    current = None
+    for n, line in enumerate(lines, 1):
+        if not line:
+            continue
+        if not line.startswith(" "):
+            key = line.split(":", 1)[0]
+            if key not in PNPM_TOP_KEYS:
+                errors.append(f"{PNPM_LOCK}:{n}: top-level key {key!r} is not allowed")
+            section, current = key, None
+            continue
+        if section == "settings" and line not in PNPM_SETTINGS:
+            errors.append(f"{PNPM_LOCK}:{n}: unexpected setting")
+        if section != "packages":
+            if line.lstrip().startswith("resolution:"):
+                errors.append(f"{PNPM_LOCK}:{n}: a resolution outside the packages section")
+            continue
+        if not line.startswith("    "):
+            match = PNPM_PACKAGE.match(line)
+            if match is None:
+                errors.append(f"{PNPM_LOCK}:{n}: unexpected package entry")
+                current = None
+                continue
+            current = f"{match.group(1)}@{match.group(2)}"
+            if current in packages:
+                errors.append(f"{PNPM_LOCK}:{n}: {current} appears twice")
+            packages[current] = 0
+        elif line.startswith("    resolution:"):
+            if current is None or not PNPM_RESOLUTION.match(line):
+                errors.append(f"{PNPM_LOCK}:{n}: a resolution must be exactly {{integrity: sha512-...}}")
+            elif current is not None:
+                packages[current] += 1
+    for pkg, count in packages.items():
+        if count != 1:
+            errors.append(f"{PNPM_LOCK}: {pkg} must have exactly one registry resolution")
+    errors += check_pnpm_times(repo, packages, now)
+    return errors
+
+
+def check_pnpm_times(repo: Path, packages: dict[str, int], now: datetime) -> list[str]:
+    times_path = repo / PNPM_TIMES
+    if not packages:
+        return []
+    if not times_path.exists():
+        return [f"{PNPM_TIMES} is missing: run make propose-js to record publish times"]
+    times = json.loads(times_path.read_text())
+    if not isinstance(times, dict):
+        return [f"{PNPM_TIMES}: not a JSON object"]
+    errors = []
+    for pkg in packages:
+        published = times.get(pkg)
+        if not isinstance(published, str):
+            errors.append(f"{PNPM_TIMES}: no publish time for {pkg}, so its age can't be checked")
+            continue
+        when = datetime.fromisoformat(published.replace("Z", "+00:00"))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if now - when < COOLDOWN:
+            errors.append(f"{PNPM_LOCK}: {pkg} was published {when:%Y-%m-%d}, less than 7 days ago "
+                          "(cooldown, ENGINEERING §2.1)")
+    return errors
+
+
 def check_js_side(repo: Path) -> list[str]:
     errors: list[str] = []
     files = list(walk(repo))
     for lockfile in files:  # case-insensitive, like the .pnpmfile check (PR #81 review)
-        if lockfile.name.lower().startswith("pnpm-lock") and lockfile.name.lower().endswith(".yaml"):
-            errors.append(f"{lockfile.relative_to(repo)}: the pnpm lockfile check is not implemented yet (lands "
-                          "with the first JavaScript dependency); if this file is untracked, delete it")
+        name = lockfile.name.lower()
+        if name.startswith("pnpm-lock") and name.endswith(".yaml") and lockfile != repo / PNPM_LOCK:
+            errors.append(f"{lockfile.relative_to(repo)}: only {PNPM_LOCK} at the repository root is allowed")
     for pkg_json in [repo / "package.json", *sorted(repo.glob("*/package.json"))]:
         if not pkg_json.exists():
             continue
@@ -230,7 +333,7 @@ def check_js_side(repo: Path) -> list[str]:
 
 
 def check(repo: Path, now: datetime) -> list[str]:
-    return check_uv_lock(repo, now) + check_js_side(repo)
+    return check_uv_lock(repo, now) + check_js_side(repo) + check_pnpm_lock(repo, now)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.29 |
-| Last updated | 2026-10-04 |
+| Version | 0.2.30 |
+| Last updated | 2026-10-05 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -143,7 +143,12 @@ The cooldown only applies when versions are *resolved*. A hand-edited or bot-gen
 - none of these YAML constructs: explicit keys (`?`), tags, anchors, aliases, merge keys, document markers, or a flow collection at the start of a line. This is a text heuristic, not a YAML parser; the approval gate and the owner's review of `pnpm-workspace.yaml` cover what it doesn't model
 - `ignorePnpmfile: true` must be present, exactly once
 
-A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile part lands with the first JavaScript dependency; until then, any `pnpm-lock*.yaml` in the tree, in any letter case, fails the check. The `scripts/check-lockfiles` wrapper and the Makefile (its `SYS_PYTHON`, which also runs every toolchain verification) find the host `python3` on `PATH` skipping `.toolchain/bin` and the pinned binary, so the pinned Python never verifies itself; it runs only after that host interpreter has verified it. There are no cooldown exceptions yet, so the check allows none: recording one (§2.6) means extending the check in the same PR. **Known limit, accepted by the owner (PR #63):** the age check trusts the `upload-time` recorded in `uv.lock`, so a hand-edited lockfile could back-date a package. Every lockfile change still needs the owner's approval with the Socket report (§2.4).
+A `.pnpmfile.*` in any letter case anywhere in the tree fails. **`pnpm-lock.yaml`** (M0.3) is the only pnpm lockfile allowed; any other `pnpm-lock*.yaml`, in any letter case and anywhere, fails. It is read in full and strictly, line by line, with no YAML library:
+- lockfile version `9.0`, one document, ASCII only, no tabs, and none of the YAML constructs above
+- only the top-level keys pnpm writes for registry packages (`lockfileVersion`, `settings`, `importers`, `packages`, `snapshots`), and only its two default settings
+- no URL, git, tarball, `link:`, `file:`, `workspace:`, `npm:` alias or directory source anywhere in the file, direct or transitive
+- every `packages` entry has exactly one resolution, of exactly the form `{integrity: sha512-…}`, which pnpm writes only for the default registry; no resolution anywhere else
+- every package's publish time, read from **`pnpm-lock.times.json`**, is at least 7 days old. `make propose-js` records those times with the pinned pnpm under `sfw` (`scripts/npm_publish_times.py`), so `make check` stays offline. **Known limit, accepted by the owner (2026-10-05), as for `uv.lock`:** a hand-edited times file could back-date a package; every lockfile change still needs the owner's approval with the Socket report (§2.4). The `scripts/check-lockfiles` wrapper and the Makefile (its `SYS_PYTHON`, which also runs every toolchain verification) find the host `python3` on `PATH` skipping `.toolchain/bin` and the pinned binary, so the pinned Python never verifies itself; it runs only after that host interpreter has verified it. There are no cooldown exceptions yet, so the check allows none: recording one (§2.6) means extending the check in the same PR. **Known limit, accepted by the owner (PR #63):** the age check trusts the `upload-time` recorded in `uv.lock`, so a hand-edited lockfile could back-date a package. Every lockfile change still needs the owner's approval with the Socket report (§2.4).
 
 ### 2.6 Updating dependencies
 
@@ -422,3 +427,4 @@ A change is done only when:
 | 2026-10-03 | 0.2.27 | Cruise mode (ADR 0030): a switchable faster process. It adds a lighter review-panel profile, gated automatic merges (`scripts/cruise_merge.py`), `/cruise` milestone loops, and threat-model and changelog updates in a milestone-closing PR (§4.3, §6, §8); `PROCESS_MODE` = `standard` restores the previous rules |
 | 2026-10-04 | 0.2.28 | §5.2: `ctypes` is its own capability in `scripts/check_architecture.py`, allowed only in `launcher.py` (for `prctl(PR_SET_DUMPABLE, 0)`, architecture §1); `storage/volume.py` no longer gets it with `subprocess` |
 | 2026-10-04 | 0.2.29 | §2.7: CI's `tests` job runs `make test` and `make lint` on every PR, on Linux and macOS, passing `DEPS_APPROVED=1` as decided in #44 (T-608) |
+| 2026-10-05 | 0.2.30 | §2.5: the pnpm lockfile check lands with the first JavaScript dependencies (M0.3): a strict full read of `pnpm-lock.yaml` (registry-only sources, one sha512 integrity per package, no foreign keys or YAML constructs) and the 7-day cooldown from publish times that `make propose-js` records in `pnpm-lock.times.json` (owner decision: recorded at propose time, same back-dating limit as `uv.lock`) |
