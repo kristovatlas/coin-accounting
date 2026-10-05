@@ -77,6 +77,14 @@ class ArchitectureCheckTests(unittest.TestCase):
         self.assertIn("capability-subprocess: import subprocess", out)
         self.assertIn("capability-subprocess: os.system()", out)
 
+    def test_ctypes_only_in_the_launcher(self):
+        # Architecture §1: prctl(PR_SET_DUMPABLE, 0) in the launcher needs ctypes. Nowhere else.
+        self.assertEqual(self.run_tree({"launcher.py": "import ctypes\n"}), [])
+        for path, src in (("storage/volume.py", "import ctypes\n"), ("rpc.py", "from ctypes import CDLL\n"),
+                          ("services/x.py", "import _ctypes\n"), ("chain/y.py", "import ctypes.util\n")):
+            with self.subTest(path=path):
+                self.assertFlags({path: src}, "capability-ctypes")
+
     def test_every_os_exec_and_spawn_form_is_subprocess(self):
         self.assertFlags({"services/x.py": "import os\nos.posix_spawnp('a', 'a', [], {})\n"},
                          "capability-subprocess: os.posix_spawnp()")
