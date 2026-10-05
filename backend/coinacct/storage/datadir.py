@@ -10,7 +10,6 @@ it. Whether it may be used at all depends on the volume (`volume.py`) and the ch
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,12 +31,18 @@ class DataDirError(Exception):
 class DataDir:
     root: Path
     volume: VolumeStatus
+    # The device `volume` describes. Anything under `root` on another device (a mount or bind mount
+    # at `<data>/exports`, say) wasn't classified, so it is refused rather than trusted (T-401).
+    device: int
 
     def path(self, *parts: str) -> Path:
-        """A path under the data directory; refuses anything that resolves outside it (§6)."""
+        """A path under the data directory, on the verified device; refuses anything that resolves
+        outside it (§6) or whose nearest existing part is on another filesystem (T-401)."""
         candidate = self.root.joinpath(*parts).resolve()
         if candidate != self.root and self.root not in candidate.parents:
             raise DataDirError("refusing a path outside the data directory")
+        existing = next(p for p in (candidate, *candidate.parents) if os.path.lexists(p))
+        require_device(existing, os.lstat(existing), self.device)
         return candidate
 
     @property
@@ -69,8 +74,8 @@ def open_data_dir(raw: str | None) -> DataDir:
             "move it out so it can't be committed (T-406)"
         )
     for name in SUBDIRS:
-        ensure_private_subdir(root / name)
-    return DataDir(root=root, volume=detect(root))
+        ensure_private_subdir(root / name, st.st_dev)
+    return DataDir(root=root, volume=detect(root), device=st.st_dev)
 
 
 def check_private(path: Path, st: os.stat_result, what: str) -> None:
@@ -101,7 +106,15 @@ def is_git_marker(dot_git: Path) -> bool:
     return False
 
 
-def ensure_private_subdir(path: Path) -> None:
+def require_device(path: Path, st: os.stat_result, device: int) -> None:
+    if st.st_dev != device:
+        raise DataDirError(
+            f"{path} is on a different filesystem from the data directory (a mount?); everything must be "
+            "on the verified volume (T-401)"
+        )
+
+
+def ensure_private_subdir(path: Path, device: int) -> None:
     try:
         path.mkdir(mode=0o700)
     except FileExistsError:
@@ -109,17 +122,31 @@ def ensure_private_subdir(path: Path) -> None:
     st = path.lstat()
     if not stat.S_ISDIR(st.st_mode):
         raise DataDirError(f"{path} must be a directory, not a link or a file")
+    require_device(path, st, device)
     check_private(path, st, path.name)
 
 
 def clear_tmp(data_dir: DataDir) -> None:
-    """Empty `<data>/tmp` (at start and at shutdown, architecture §6). Links inside it are removed,
-    never followed."""
+    """Empty `<data>/tmp` (at start and at shutdown, architecture §6). Links are removed, never
+    followed, and the walk never crosses into another filesystem: `tmp` itself and every directory
+    under it must be a real directory on the verified device, or nothing more is removed."""
+    st = data_dir.tmp.lstat()
+    if not stat.S_ISDIR(st.st_mode):
+        raise DataDirError(f"{data_dir.tmp} must be a directory, not a link or a file")
+    require_device(data_dir.tmp, st, data_dir.device)
     for entry in os.scandir(data_dir.tmp):
-        if entry.is_dir(follow_symlinks=False):
-            shutil.rmtree(entry.path)
-        else:
-            os.unlink(entry.path)
+        _remove(Path(entry.path), data_dir.device)
+
+
+def _remove(path: Path, device: int) -> None:
+    st = path.lstat()
+    if stat.S_ISDIR(st.st_mode):
+        require_device(path, st, device)  # a mount point inside tmp: refuse, never descend
+        for entry in os.scandir(path):
+            _remove(Path(entry.path), device)
+        path.rmdir()
+    else:
+        path.unlink()
 
 
 def storage_refusal(volume: VolumeStatus, chain: str | None, allow_unencrypted: bool) -> str | None:
