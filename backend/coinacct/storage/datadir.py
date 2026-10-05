@@ -34,6 +34,9 @@ class DataDir:
     # The device `volume` describes. Anything under `root` on another device (a mount or bind mount
     # at `<data>/exports`, say) wasn't classified, so it is refused rather than trusted (T-401).
     device: int
+    # The root's inode when it was verified: with `device`, the identity the watchdog keeps checking
+    # (T-405), so a directory swapped in after verification is never trusted.
+    inode: int
 
     def path(self, *parts: str) -> Path:
         """A path under the data directory, on the verified device; refuses anything that resolves
@@ -75,7 +78,7 @@ def open_data_dir(raw: str | None) -> DataDir:
         )
     for name in SUBDIRS:
         ensure_private_subdir(root / name, st.st_dev)
-    return DataDir(root=root, volume=detect(root), device=st.st_dev)
+    return DataDir(root=root, volume=detect(root), device=st.st_dev, inode=st.st_ino)
 
 
 def check_private(path: Path, st: os.stat_result, what: str) -> None:
