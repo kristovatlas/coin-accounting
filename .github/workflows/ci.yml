@@ -1,5 +1,7 @@
-# Repository checks (ENGINEERING §2.7). Standard-library Python only, so nothing is
-# installed. Dependency installs, tests and E2E join from M0.2 onwards.
+# Repository checks on every PR and push (ENGINEERING §2.7), and the backend tests on every PR.
+# The `checks` job is standard-library Python only, so nothing is installed. The `tests` job
+# installs the pinned toolchain, the locked dependencies and bitcoind, so it runs only on the
+# `pull_request` trigger (THREAT_MODEL T-608, §5.6.1).
 name: ci
 
 on:
@@ -31,3 +33,29 @@ jobs:
         env:
           BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
         run: make check BASE="$BASE"
+
+  # `make test` and `make lint` on Linux and macOS (ENGINEERING §2.7, §3; the cruise gate requires
+  # both jobs, ADR 0030). On a dependency PR this installs dependencies the human hasn't approved
+  # yet, which is allowed only here, on a fresh GitHub-hosted runner with no secrets, a read-only
+  # token and no cache: `DEPS_APPROVED=1` is passed explicitly on the make command line, never
+  # inferred from `CI`/`GITHUB_ACTIONS` (user decision, 2026-09-28, #44; T-608). Only the
+  # `pull_request` trigger runs it.
+  tests:
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install the pinned toolchain, the locked dependencies and bitcoind
+        run: make toolchain bootstrap test-tools DEPS_APPROVED=1
+      - name: Tests (socket guard on, coverage floors)
+        run: make test
+      - name: Lint and strict typing
+        run: make lint
