@@ -38,7 +38,7 @@ Deliberately **not** proposed, because the stdlib or our own code covers it:
 
 | Package | Purpose | Notes |
 |---|---|---|
-| `react`, `react-dom` | UI (ADR 0002) | |
+| `react`, `react-dom` | UI (ADR 0002) | 19.3.0, proposed in the M0.3 H3 PR (resolve only; `scheduler` comes with it) |
 | `cytoscape` | Graph rendering | Must pass the E2E strict-CSP check (inline styles) |
 | `cytoscape-dagre` (+ `dagre`) | DAG layout for the UTXO graph | Alternative: `cytoscape-elk` (heavier) |
 
@@ -46,10 +46,10 @@ Deliberately **not** proposed, because the stdlib or our own code covers it:
 
 | Package | Purpose | Notes |
 |---|---|---|
-| `vite`, `@vitejs/plugin-react` | Build and bundle (writes the shipped bundle, so it is vetted like runtime) | `esbuild`/`rollup` native binaries come in transitively; they are prebuilt, not built at install, so `allowBuilds` stays empty (verify in M0.2) |
-| `typescript` | Strict typing | |
+| `vite`, `@vitejs/plugin-react` | Build and bundle (writes the shipped bundle, so it is vetted like runtime) | 8.3.1 and 6.1.1, proposed in the M0.3 H3 PR. Vite 8 bundles with `rolldown` (Rust, prebuilt per platform: `@rolldown/binding-*`) and minifies CSS with `lightningcss` (Rust, prebuilt per platform); `fsevents` is macOS-only. No install scripts (`allowBuilds` stays empty). Earlier note: `esbuild`/`rollup` native binaries come in transitively; they are prebuilt, not built at install, so `allowBuilds` stays empty (verify in M0.2) |
+| `typescript` | Strict typing | 6.0.3, proposed in the M0.3 H3 PR: the last pure-JavaScript release (7.x ships a prebuilt native compiler per platform) |
 | `vitest`, `@vitest/coverage-v8` | Frontend unit tests and coverage | |
-| `@playwright/test` | E2E (ENGINEERING §3.1) | Browser downloads are pinned and hash-checked separately |
+| `@playwright/test` | E2E (ENGINEERING §3.1) | 1.63.0, proposed in the M0.3 H3 PR. Browser downloads are pinned and hash-checked separately (not part of this proposal) |
 | `eslint`, `typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks` | Lint, including the CSP/XSS and network-sink rules (§5.2) | |
 
 **Tools (pinned binaries, M0.2):** `zizmor` and `actionlint` for workflow checks: pinned in the toolchain table below, pending approval.
