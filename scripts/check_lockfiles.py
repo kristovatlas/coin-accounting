@@ -73,7 +73,9 @@ WORKSPACE_INDIRECT_SYNTAX = re.compile(r"^\s*(?:[?!&*{\[]|<<|---|\.\.\.)|:\s*[!&
 IGNORE_PNPMFILE = re.compile(r"^ignorePnpmfile:\s*true\s*(?:#.*)?$", re.M)
 PNPM_LOCK = "pnpm-lock.yaml"
 PNPM_TIMES = "pnpm-lock.times.json"
-PNPM_TOP_KEYS = {"lockfileVersion", "settings", "importers", "packages", "snapshots"}
+# The top-level sections, in the order pnpm writes them; a section out of order fails.
+PNPM_TOP_ORDER = ("lockfileVersion", "settings", "importers", "packages", "snapshots")
+PNPM_TOP_KEYS = set(PNPM_TOP_ORDER)
 PNPM_SETTINGS = {"  autoInstallPeers: true", "  excludeLinksFromLockfile: false"}
 # A package name as a key or item: quoted all-or-nothing (a quote left open would make YAML read the
 # following lines differently from this check), a scoped name always quoted (YAML can't start a plain
@@ -91,9 +93,27 @@ PNPM_RESOLUTION = re.compile(r"^    resolution: \{integrity: sha512-[A-Za-z0-9+/
 PNPM_FIELD = re.compile(r"^    (resolution|engines|os|cpu|libc|hasBin|deprecated|peerDependencies|peerDependenciesMeta):"
                         r"(?: (.*))?$")
 PNPM_FLOW_FIELDS = {"resolution", "engines", "os", "cpu", "libc"}  # pnpm writes these as one-line flow values
-# One closed, non-nested flow collection per line, so no value can stay open and swallow the next line.
-PNPM_FLOW_VALUE = {"engines": re.compile(r"^\{[^{}\[\]]*\}$"), "os": re.compile(r"^\[[^{}\[\]]*\]$"),
-                   "cpu": re.compile(r"^\[[^{}\[\]]*\]$"), "libc": re.compile(r"^\[[^{}\[\]]*\]$")}
+# One closed, non-nested flow collection per line, read item by item, so no value can stay open and
+# swallow the next line. A quote inside a plain flow item (`[a'b, 'c]`) is plain text to YAML, so
+# counting quotes isn't enough: each item is either plain with no quote, or one whole quoted scalar.
+_FLOW_QUOTED = r"'(?:[^']|'')*'"
+_FLOW_ITEM = rf"(?:[A-Za-z0-9][A-Za-z0-9._-]*|{_FLOW_QUOTED})"
+_FLOW_PLAIN = r"[^\s,'{}\[\]#&*!|>%@`?:-][^,'{}\[\]#:]*"  # no `:` either: `a: b` is a nested key
+# An engine name: any plain YAML token with no quote, space, `:`, `#` or flow indicator, or one whole
+# quoted scalar.
+_ENGINE_NAME = rf"(?:[^\s,'{{}}\[\]#&*!|>%@`?:\"-][^\s,'{{}}\[\]#:\"]*|{_FLOW_QUOTED})"
+_FLOW_PAIR = rf"{_ENGINE_NAME}: (?:{_FLOW_PLAIN}|{_FLOW_QUOTED})"
+_FLOW_LIST = re.compile(rf"^\[(?:{_FLOW_ITEM}(?:, {_FLOW_ITEM})*)?\]$")
+PNPM_FLOW_VALUE = {"engines": re.compile(rf"^\{{(?:{_FLOW_PAIR}(?:, {_FLOW_PAIR})*)?\}}$"),
+                   "os": _FLOW_LIST, "cpu": _FLOW_LIST, "libc": _FLOW_LIST}
+# A plain one-line value (`deprecated`, `hasBin`): either one whole quoted scalar, or a block plain
+# scalar. In block context a quote after the first character is literal text and the scalar ends
+# at the end of the line (later, deeper lines are rejected as unexpected), so `Don't use it` is
+# safe. A `#` after a space would start a comment and `: ` a nested mapping, so neither may appear;
+# a `#` right after another character is text (`https://x.example/y#z`).
+_BLOCK_PLAIN = r"[^\s'{\[|>#&*!%@`?:,-](?:[^#:\s]|\s(?!#)|:(?!\s|$)|(?<=\S)#)*"
+PNPM_PLAIN_VALUE = re.compile(rf"^(?:{_FLOW_QUOTED}|{_BLOCK_PLAIN})$")
+PNPM_BLOCK_PLAIN_LINE = re.compile(rf"^    (?:deprecated|hasBin): {_BLOCK_PLAIN}$")
 PNPM_PEER = re.compile(rf"^      {_OPEN}{_CLOSE}:(?: [^{{\[|>'][^']*|(?: '[^']*'))?$")
 PNPM_PEER_META = re.compile(r"^        optional: (?:true|false)$")
 # `snapshots` and `importers` are read just as strictly: a snapshot's fields are merged into its
@@ -313,8 +333,9 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
             # pnpm writes plain and single-quoted scalars only; a double-quoted one can hide a source
             # behind escapes (`"li\\u006ek:../x"` decodes to `link:../x`) that the scan above can't see.
             errors.append(f"{PNPM_LOCK}:{n}: double quotes and backslashes are not allowed")
-        if line.count("'") % 2:
-            # pnpm escapes a quote inside a quoted scalar as `''`, so its lines always have an even count
+        if line.count("'") % 2 and not PNPM_BLOCK_PLAIN_LINE.match(line):
+            # pnpm escapes a quote inside a quoted scalar as `''`, so its lines have an even count, except
+            # a block plain value, where a quote after the first character is literal text
             errors.append(f"{PNPM_LOCK}:{n}: a single quote is left open")
     section = None
     seen_sections: set[str] = set()
@@ -334,6 +355,8 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
                 errors.append(f"{PNPM_LOCK}:{n}: top-level key {key!r} is not allowed")
             elif key in seen_sections:
                 errors.append(f"{PNPM_LOCK}:{n}: the {key} section appears twice")
+            elif any(PNPM_TOP_ORDER.index(seen) > PNPM_TOP_ORDER.index(key) for seen in seen_sections & PNPM_TOP_KEYS):
+                errors.append(f"{PNPM_LOCK}:{n}: the {key} section is out of order ({', '.join(PNPM_TOP_ORDER)})")
             elif n != 1 and line != f"{key}:":
                 # e.g. `packages: {...}`: a flow-style section would hide every entry from the check
                 errors.append(f"{PNPM_LOCK}:{n}: the {key} section must be written as a block (`{key}:` alone)")
@@ -377,12 +400,12 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
                 else:
                     errors.append(f"{PNPM_LOCK}:{n}: a resolution must be exactly {{integrity: sha512-...}}")
             elif field in PNPM_FLOW_FIELDS:
-                if not PNPM_FLOW_VALUE[field].match(value) or value.count("'") % 2:
+                if not PNPM_FLOW_VALUE[field].match(value):
                     errors.append(f"{PNPM_LOCK}:{n}: {field} must be a one-line value")
             elif field.startswith("peerDependencies"):
                 if value:
                     errors.append(f"{PNPM_LOCK}:{n}: {field} must be written as a block")
-            elif not value or value.startswith(("{", "[", "|", ">")) or value.count("'") % 2:
+            elif not PNPM_PLAIN_VALUE.match(value):
                 errors.append(f"{PNPM_LOCK}:{n}: {field} must be a plain one-line value")
         elif field in ("peerDependencies", "peerDependenciesMeta") and PNPM_PEER.match(line):
             pass
