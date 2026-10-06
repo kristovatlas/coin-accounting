@@ -1,11 +1,11 @@
 # Engineering Practices — Coin Accounting
 
-> **Binding once approved.** From the first line of code, these practices apply to every contributor, human or AI agent. Changing them requires a PR that edits this file and gets human approval. A change that weakens a control also needs an ADR and an update to [`THREAT_MODEL.md`](THREAT_MODEL.md).
+> **Binding once approved.** From the first line of code, these practices apply to every contributor, human or AI agent. Changing them requires a PR that edits this file and gets human approval; under cruise mode with autopilot ([ADR 0031](adr/0031-autopilot.md)), a change that keeps every control merges after the AI review panel instead. A change that weakens a control always needs an ADR, the human's approval and an update to [`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 | | |
 |---|---|
-| Version | 0.2.29 |
-| Last updated | 2026-10-04 |
+| Version | 0.2.31 |
+| Last updated | 2026-10-05 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -107,6 +107,8 @@ Configured in `pyproject.toml` `[tool.uv]`.
 
 The same process applies to a new direct dependency, and to a version bump of an existing one:
 
+Third-party code is never copied into the repository (a vendored package, a minified bundle, a file with another project's licence header); it comes in through this process, so Socket and the lockfile diff see it (ADR 0031).
+
 1. **Justify it.** Why can't the standard library or ~100 lines of our own code do the job? Could a package we already use do it?
 2. **Resolve only.** Run `make propose-js`/`make propose-py`. This updates the manifest and lockfile without installing anything, and without building sdists or loading a `.pnpmfile` (step 7).
 3. **Review the Socket verdict** for every new or changed package in the lockfile diff. Use the Socket GitHub App's report on the draft PR (which contains only the manifest/lockfile change), or the package's socket.dev page. Look for install scripts, network or filesystem access, obfuscated code, telemetry, new maintainers and typosquat signals.
@@ -180,7 +182,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **Branch protection on `main`:**
   - PRs only, with all required checks green
   - stacked PRs are merged with merge commits
-  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605. The one exception is cruise mode's gate (ADR 0030, R-11)
+  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605. The exception is cruise mode's gate with autopilot (ADR 0030, ADR 0031, R-11, R-12): it merges every PR the review panel cleared (its `review-panel` commit status) except dependency, lock and install-config files, ADRs and the architecture baseline, and the agents' own controls, including the test socket guard and every `conftest.py` (ADR 0031 §3)
 - **Commit signing is not required** (user decision, 2026-09-27). Agents would need the owner's key, so signatures couldn't tell agent commits from human ones. GitHub signs the merge commits it creates. If releases are ever published for other users, release tags will be signed (THREAT_MODEL T-606).
 - GitHub secret scanning and push protection are enabled.
 
@@ -247,7 +249,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 7. **Duplicate another test** without adding a distinct case.
 8. **Have unclear names.** Names must state the behaviour and, where relevant, the threat or rule ID in the form `t508`, e.g. `test_late_identification_is_flagged_not_overridden_t508`.
 
-**Test audits:** at each milestone close, and at least monthly while coding is active, a test-audit pass reviews the suite against these rules plus the mutation report. It deletes or strengthens weak tests, and its findings go into the milestone PR. An AI reviewer may do a first pass; a human approves the result.
+**Test audits:** at each milestone close, and at least monthly while coding is active, a test-audit pass reviews the suite against these rules plus the mutation report. It deletes or strengthens weak tests, and its findings go into the milestone PR. An AI reviewer may do a first pass; a human approves the result (under autopilot, a milestone-closing PR carrying the audit goes to the human, ADR 0031).
 
 ## 4. Design records
 
@@ -276,7 +278,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 
 ### 4.3 Threat model
 
-- Any PR touching a boundary, asset, store, network flow (including build-time flows), dependency or tax rule updates `THREAT_MODEL.md` in the same PR: statuses, evidence links, changelog. **In cruise mode** ([ADR 0030](adr/0030-cruise-mode.md)), a `/cruise` run's feature PRs leave all three to the run's milestone-closing PR, which the human merges.
+- Any PR touching a boundary, asset, store, network flow (including build-time flows), dependency or tax rule updates `THREAT_MODEL.md` in the same PR: statuses, evidence links, changelog. **In cruise mode** ([ADR 0030](adr/0030-cruise-mode.md)), a `/cruise` run's feature PRs leave all three to the run's milestone-closing PR, which merges through the gate like a slice (ADR 0031).
 - A threat moves to **Verified** only when a linked test would fail if the mitigation were removed.
 
 ## 5. Code standards
@@ -323,10 +325,10 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
   - run any install or fetch-and-run command outside the `make` targets (§2.3); `UV_NO_SYNC=1` is always set
   - weaken a control
   - change `docs/architecture.md` without an ADR
-  - commit to `main` directly or merge PRs unless the human explicitly says so (§2.7). The one exception is cruise mode, through `main`'s copy of `scripts/cruise_merge.py` only (ADR 0030)
+  - commit to `main` directly or merge PRs unless the human explicitly says so (§2.7). The one exception is cruise mode with autopilot, through `main`'s copy of `scripts/cruise_merge.py` only (ADR 0030, ADR 0031)
   - add MCP servers or tools that fetch and run packages
 - **Transparency.** Agent-authored commits carry a `Co-Authored-By` trailer. PR descriptions state what was verified (commands run, tests added) and what wasn't.
-- **Review.** Every agent PR gets human review, except a cruise slice that the gate merges (ADR 0030). Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
+- **Review.** Every agent PR gets human review, except one the gate merges in cruise mode with autopilot (ADR 0030, ADR 0031), in a `/cruise` run or not. Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
   - **The review panel** (`/review-panel #N`, [ADR 0020](adr/0020-review-panel.md)) does the AI review:
     - Rounds of four reviews (Opus 5.5 and Codex gpt-5.6-sol, security and functional) find issues, and the panel fixes valid P1s and files issues for the rest.
     - When a round is clean and CI is green, the **tripwire** checks the final commit: a mechanical scan (`scripts/tripwire.py`, from `main`'s copy) plus a separate Opus check for malicious patterns. Examples: process or network use in tests, weakened or deleted guards and tests, new hosts, obfuscated code, dependency or agent-instruction changes. It is a heuristic that points the human's attention, not a guarantee.
@@ -339,15 +341,15 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
       - later rounds review only the fix, with at most 2 rounds
       - a P1 is only a confirmed Critical/High, a broken or flaky test, a real leak, or wrong tax figures
       - one comment per round
-    - **`/cruise <scope>`** works through a PLAN scope. PRs outside the risky paths are merged by the mechanical gate `scripts/cruise_merge.py` (`main`'s copy, with a separate repository-scoped token). Everything else goes to the human as a draft.
-    - **Docs:** each run ends with a milestone-closing PR that the human merges, holding the threat-model and changelog updates.
+    - **`/cruise <scope>`** works through a PLAN scope. With autopilot (ADR 0031) the agent starts the panel on every PR it opens, and the mechanical gate `scripts/cruise_merge.py` (`main`'s copy, with a separate repository-scoped token) merges every PR the review panel cleared except dependency files, ADRs and the architecture baseline, and the agents' own controls. Those, and anything else the gate refuses, go to the human as a draft.
+    - **Docs:** each run ends with a milestone-closing PR, merged through the gate, holding the threat-model and changelog updates.
 
 ## 7. Workflow
 
 - **Branches:** `main` is always releasable. Work happens on short-lived branches (`<type>/<topic>`, e.g. `feat/scan-jobs`, `docs/adr-0003`).
 - **PRs:**
   - small and focused
-  - opened as **drafts** for human review on GitHub. The exception is cruise mode: a `/cruise` run opens its slices ready for review, and the gate merges only non-draft PRs (ADR 0030)
+  - opened as **drafts** for human review on GitHub. The exception is cruise mode with autopilot: the agent opens every PR it means the gate to merge ready for review, in a `/cruise` run or not, and the gate merges only non-draft PRs (ADR 0030, ADR 0031). A PR the gate would refuse is still opened as a draft
   - stacked PRs are allowed and merged with merge commits
   - each PR description lists the affected threat IDs and ADRs
 - **Commits:** imperative subject ≤ 72 chars; the body explains *why*.
@@ -383,9 +385,9 @@ A change is done only when:
 | Module import edges and capability rules | `scripts/check-architecture` (architecture §2) |
 | No symbolic links or submodules in the tree | `scripts/check-repo-files` (ADR 0023) |
 | ADR immutability, diagram hash | CI checks |
-| Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review |
+| Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review; under autopilot (ADR 0031), threat-model and DEPENDENCIES updates are reviewed by the AI panel (the Opus tripwire's "binding-document control" flag goes to the human), and ADRs stay with the human |
 | Test-slop rules | Partly automated (§3.5) + review checklist + periodic test audit |
-| Only the human merges, except through cruise mode's gate (ADR 0030) | Procedural (Documented, T-605); the gate's conditions are mechanical (`scripts/cruise_merge.py`, R-11) |
+| Only the human merges, except through cruise mode's gate (ADR 0030, autopilot ADR 0031) | Procedural (Documented, T-605); the gate's conditions are mechanical (`scripts/cruise_merge.py`, R-11) |
 | No real data for agents | `AGENTS.md` + SessionStart hook + human discipline (Documented, T-607, R-6) |
 
 ## 10. Changelog
@@ -422,3 +424,4 @@ A change is done only when:
 | 2026-10-03 | 0.2.27 | Cruise mode (ADR 0030): a switchable faster process. It adds a lighter review-panel profile, gated automatic merges (`scripts/cruise_merge.py`), `/cruise` milestone loops, and threat-model and changelog updates in a milestone-closing PR (§4.3, §6, §8); `PROCESS_MODE` = `standard` restores the previous rules |
 | 2026-10-04 | 0.2.28 | §5.2: `ctypes` is its own capability in `scripts/check_architecture.py`, allowed only in `launcher.py` (for `prctl(PR_SET_DUMPABLE, 0)`, architecture §1); `storage/volume.py` no longer gets it with `subprocess` |
 | 2026-10-04 | 0.2.29 | §2.7: CI's `tests` job runs `make test` and `make lint` on every PR, on Linux and macOS, passing `DEPS_APPROVED=1` as decided in #44 (T-608) |
+| 2026-10-05 | 0.2.31 | Autopilot (ADR 0031): §6 the agent starts the review panel and the gate merges every PR the panel cleared except dependency and install files, ADRs and the architecture baseline, and the agents' own controls; §4.3 the milestone-closing PR merges through the gate. (0.2.30 is taken by the open PR #136.) |
