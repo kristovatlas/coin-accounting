@@ -14,8 +14,9 @@ lockfile could still bring in a fresh or off-registry package. This check reads 
   `sharedWorkspaceLockfile` and `gitBranchLockfile`, or that ignore or relocate it, `lockfile` and
   `lockfileDir`). It is read in full, strictly: lockfile version 9.0, one YAML document, ASCII, only
   the top-level keys pnpm writes for registry packages, no URL, git, tarball, link, file or
-  directory source anywhere, and for every package exactly one resolution, `{integrity: sha512-…}`,
-  which pnpm writes only for the default registry. Each package's publish time comes from
+  directory source anywhere, no `@jsr/` scope (by default it resolves to JSR's registry), and for every package
+  exactly one resolution, `{integrity: sha512-…}`, which pnpm writes when the tarball comes from the
+  registry configured for that scope (pinning that to registry.npmjs.org is #36 and #93). Each package's publish time comes from
   `pnpm-lock.times.json`, which `make propose-js` records from the registry: it must be at least 7
   days old. Like `uv.lock`'s `upload-time`, a hand-edited times file could back-date a package; the
   owner accepted that limit for npm too (2026-10-05), since every change needs the owner's approval.
@@ -74,7 +75,15 @@ PNPM_LOCK = "pnpm-lock.yaml"
 PNPM_TIMES = "pnpm-lock.times.json"
 PNPM_TOP_KEYS = {"lockfileVersion", "settings", "importers", "packages", "snapshots"}
 PNPM_SETTINGS = {"  autoInstallPeers: true", "  excludeLinksFromLockfile: false"}
-PNPM_PACKAGE = re.compile(r"^  '?((?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*)@([0-9][0-9A-Za-z.+-]*)'?:$")
+# A package name as a key or item: quoted all-or-nothing (a quote left open would make YAML read the
+# following lines differently from this check), a scoped name always quoted (YAML can't start a plain
+# scalar with `@`), and never the `@jsr/` scope, which by default resolves to JSR's registry.
+_SCOPE = r"@(?!jsr/)[a-z0-9][a-z0-9._~-]*/"
+_BARE = r"[a-z0-9][a-z0-9._~-]*"
+_OPEN = rf"(?P<q>')?(?P<name>(?(q)(?:{_SCOPE})?){_BARE})"  # the closing quote is _CLOSE
+_CLOSE = r"(?(q)')"
+_VER = r"[0-9][0-9A-Za-z.+-]*"
+PNPM_PACKAGE = re.compile(rf"^  {_OPEN}@(?P<ver>{_VER}){_CLOSE}:$")
 PNPM_RESOLUTION = re.compile(r"^    resolution: \{integrity: sha512-[A-Za-z0-9+/]{86}==\}$")
 # Inside `packages`, every line has one of these shapes, exactly as pnpm 12 writes registry packages.
 # Anything else (other indentation, other fields such as `name:`/`version:`/`tarball:`, flow-style
@@ -85,27 +94,25 @@ PNPM_FLOW_FIELDS = {"resolution", "engines", "os", "cpu", "libc"}  # pnpm writes
 # One closed, non-nested flow collection per line, so no value can stay open and swallow the next line.
 PNPM_FLOW_VALUE = {"engines": re.compile(r"^\{[^{}\[\]]*\}$"), "os": re.compile(r"^\[[^{}\[\]]*\]$"),
                    "cpu": re.compile(r"^\[[^{}\[\]]*\]$"), "libc": re.compile(r"^\[[^{}\[\]]*\]$")}
-PNPM_PEER = re.compile(r"^      '?(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*'?:(?: [^{\[|>'][^']*|(?: '[^']*'))?$")
+PNPM_PEER = re.compile(rf"^      {_OPEN}{_CLOSE}:(?: [^{{\[|>'][^']*|(?: '[^']*'))?$")
 PNPM_PEER_META = re.compile(r"^        optional: (?:true|false)$")
 # `snapshots` and `importers` are read just as strictly: a snapshot's fields are merged into its
 # package by pnpm, so a `name:`/`version:` there would redirect the fetch, and every reference must
 # name a checked `packages` entry.
-_NAME = r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*"
-_VER = r"[0-9][0-9A-Za-z.+-]*"
 _PEERS = r"(?:\([^\s'\"\\:]+\))*"
-PNPM_SNAPSHOT = re.compile(rf"^  '?({_NAME})@({_VER})({_PEERS})'?:(?: \{{\}})?$")
+PNPM_SNAPSHOT = re.compile(rf"^  {_OPEN}@(?P<ver>{_VER}){_PEERS}{_CLOSE}:(?: \{{\}})?$")
 PNPM_SNAPSHOT_FIELD = re.compile(r"^    (?:(dependencies|optionalDependencies|transitivePeerDependencies):|optional: true)$")
 # No `name@version` values: that is an npm alias, which would install another package under this
 # dependency's name. The committed lockfile has none; one needs an explicit decision.
-PNPM_SNAPSHOT_DEP = re.compile(rf"^      '?({_NAME})'?: ()({_VER}){_PEERS}$")
-PNPM_SNAPSHOT_PEER = re.compile(rf"^      - '?{_NAME}'?$")
+PNPM_SNAPSHOT_DEP = re.compile(rf"^      {_OPEN}{_CLOSE}: (?P<ver>{_VER}){_PEERS}$")
+PNPM_SNAPSHOT_PEER = re.compile(rf"^      - {_OPEN}{_CLOSE}$")
 PNPM_IMPORTER = re.compile(r"^  (?:\.|[a-z0-9][a-z0-9._-]*):(?: \{\})?$")
 PNPM_IMPORTER_GROUP = re.compile(r"^    (?:dependencies|devDependencies|optionalDependencies):$")
-PNPM_IMPORTER_DEP = re.compile(rf"^      '?({_NAME})'?:$")
+PNPM_IMPORTER_DEP = re.compile(rf"^      {_OPEN}{_CLOSE}:$")
 PNPM_IMPORTER_SPEC = re.compile(r"^        specifier: (?:[^\s{\[|>'][^']*|'[^']*')$")
-PNPM_IMPORTER_VERSION = re.compile(rf"^        version: ()({_VER}){_PEERS}$")
+PNPM_IMPORTER_VERSION = re.compile(rf"^        version: (?P<ver>{_VER}){_PEERS}$")
 # Anything that names a source other than the default registry. pnpm writes no URL at all for it.
-PNPM_FOREIGN = re.compile(r"://|\b(?:link|file|git|github|gitlab|bitbucket|workspace|catalog|npm|portal|patch):"
+PNPM_FOREIGN = re.compile(r"://|\b(?:link|file|git|github|gitlab|bitbucket|workspace|catalog|npm|jsr|portal|patch):"
                           r"|\btarball\b|\bdirectory\b|\btype: |\brepo: |\bcommit: ")
 SKIP_DIRS = {".git", ".venv", ".toolchain", "node_modules", ".pnpm-store", ".uv-cache"}
 
@@ -212,7 +219,7 @@ def _snapshot_line(n: int, line: str, state: dict, references: list, snapshots: 
         if match is None:
             state["key"] = None
             return [f"{PNPM_LOCK}:{n}: unexpected snapshot entry"]
-        state["key"], state["field"] = f"{match.group(1)}@{match.group(2)}", None
+        state["key"], state["field"] = f"{match['name']}@{match['ver']}", None
         snapshots.add(state["key"])
         return []
     if state["key"] is None:
@@ -225,7 +232,7 @@ def _snapshot_line(n: int, line: str, state: dict, references: list, snapshots: 
     if state["field"] in ("dependencies", "optionalDependencies"):
         match = PNPM_SNAPSHOT_DEP.match(line)
         if match:
-            references.append((n, f"{match.group(2) or match.group(1)}@{match.group(3)}"))
+            references.append((n, f"{match['name']}@{match['ver']}"))
             return []
     elif state["field"] == "transitivePeerDependencies" and PNPM_SNAPSHOT_PEER.match(line):
         return []
@@ -243,14 +250,14 @@ def _importer_line(n: int, line: str, state: dict, references: list) -> list[str
         return [] if ok else [f"{PNPM_LOCK}:{n}: unexpected line in an importer"]
     if not line.startswith("        "):
         match = PNPM_IMPORTER_DEP.match(line) if state["group"] else None
-        state["dep"] = match.group(1) if match else None
+        state["dep"] = match["name"] if match else None
         return [] if match else [f"{PNPM_LOCK}:{n}: unexpected line in an importer"]
     if state["dep"] is not None:
         if PNPM_IMPORTER_SPEC.match(line):
             return []
         match = PNPM_IMPORTER_VERSION.match(line)
         if match:
-            references.append((n, f"{match.group(1) or state['dep']}@{match.group(2)}"))
+            references.append((n, f"{state['dep']}@{match['ver']}"))
             return []
     return [f"{PNPM_LOCK}:{n}: unexpected line in an importer"]
 
@@ -306,6 +313,9 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
             # pnpm writes plain and single-quoted scalars only; a double-quoted one can hide a source
             # behind escapes (`"li\\u006ek:../x"` decodes to `link:../x`) that the scan above can't see.
             errors.append(f"{PNPM_LOCK}:{n}: double quotes and backslashes are not allowed")
+        if line.count("'") % 2:
+            # pnpm escapes a quote inside a quoted scalar as `''`, so its lines always have an even count
+            errors.append(f"{PNPM_LOCK}:{n}: a single quote is left open")
     section = None
     seen_sections: set[str] = set()
     packages: dict[str, int] = {}  # "name@version" -> resolution lines seen
@@ -349,7 +359,7 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
                 errors.append(f"{PNPM_LOCK}:{n}: unexpected package entry")
                 current, field = None, None
                 continue
-            current, field = f"{match.group(1)}@{match.group(2)}", None
+            current, field = f"{match['name']}@{match['ver']}", None
             if current in packages:
                 errors.append(f"{PNPM_LOCK}:{n}: {current} appears twice")
             packages[current] = 0

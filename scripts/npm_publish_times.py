@@ -32,21 +32,23 @@ def packages(lockfile: Path) -> list[tuple[str, str]]:
             continue
         match = PNPM_PACKAGE.match(line) if in_packages else None
         if match:
-            found.append((match.group(1), match.group(2)))
+            found.append((match["name"], match["ver"]))
     return found
 
 
 def publish_time(command: list[str], name: str, version: str) -> str:
-    # pnpm's output goes to a file, not a pipe: under sfw the pipe can be non-blocking, and pnpm
+    # pnpm's output goes to files, not pipes: under sfw a pipe can be non-blocking, and pnpm
     # aborts when a large write to it returns EAGAIN.
-    with tempfile.TemporaryFile() as out_file:
+    with tempfile.TemporaryFile() as out_file, tempfile.TemporaryFile() as err_file:
         done = subprocess.run(  # noqa: S603 - the pinned sfw and pnpm, a fixed subcommand
             [*command, "view", f"{name}@{version}", "time", "--json"],
-            stdout=out_file, stderr=subprocess.PIPE, text=True, check=False, timeout=120,
+            stdout=out_file, stderr=err_file, check=False, timeout=120,
         )
         if done.returncode != 0:
+            err_file.seek(0)
+            err = err_file.read().decode(errors="replace")
             raise SystemExit(f"npm_publish_times: looking up {name}@{version} failed "
-                             f"(exit {done.returncode}):\n{done.stderr.strip()[-2000:]}")
+                             f"(exit {done.returncode}):\n{err.strip()[-2000:]}")
         out_file.seek(0)
         out = out_file.read().decode()
     try:

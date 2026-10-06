@@ -4,7 +4,7 @@ date: 2026-10-06
 deciders: repository owner (human), drafted by Claude Code
 ---
 
-# 0032: Prebuilt native binaries for the frontend build tools (Rolldown, Lightning CSS)
+# 0032: Prebuilt native binaries for the frontend build tools (Rolldown, Lightning CSS, fsevents)
 
 ## Context and Problem Statement
 
@@ -39,12 +39,12 @@ Proposed: **1**. The owner decides between the options when approving PR #136.
   - `allowBuilds: {}` with `strictDepBuilds: true`: no install script runs, and any package that needs one fails the install
   - `blockExoticSubdeps`
   - the lockfile policy check: no explicit non-registry source, one sha512 integrity per package (which registry a bare integrity resolution means is the configured one; pinning it to registry.npmjs.org is not yet enforced: #36, #93)
-- **Residual risk:** the compiled code (Rust in `rolldown` and `lightningcss`; C++ in `fsevents`) isn't reviewed beyond its hashes and Socket's report. A compromised bundler could change the **shipped bundle**, which runs in the user's browser with the session token. That is a frontend supply-chain risk (THREAT_MODEL T-601, T-604, and the browser-side threats T-104 and T-106), not the backend in-process risk R-4 covers. It is limited only by:
+- **Residual risk:** the compiled code (Rust in `rolldown` and `lightningcss`; a C Node-API addon in `fsevents`) isn't reviewed beyond its hashes and Socket's report. A compromised bundler could change the **shipped bundle**, which runs in the user's browser with the session token. That is a frontend supply-chain risk (THREAT_MODEL T-601, T-604, and the browser-side threats T-104 and T-106), not the backend in-process risk R-4 covers. It is limited only by:
   - the production-build E2E tests under the real CSP (ENGINEERING §3.1), which fail if the bundle reaches an external host (T-106)
   - the pinned hashes and the Socket report
 
   **Not mitigated:** tampering inside the app's own origin (altered values shown to the user, or the session token used against the same-origin API). The reproducible-build comparison (ENGINEERING §2.7) builds twice with the same binaries, so it catches nondeterminism, not a malicious bundler. A cross-check (building with another platform's binary, or against a pure-JavaScript build) is possible future work.
-- **Build-time execution:** the binaries also run with the developer's and CI's privileges at build time (the checkout, git credentials, whatever a CI job holds). That is the same exposure as Vite's own JavaScript, which runs there too, and it is covered by T-601 and the existing supply-chain controls. **The owner accepts this residual risk by accepting this ADR,** and it is recorded as a new accepted risk in THREAT_MODEL in the same PR that accepts the ADR.
+- **Build-time execution:** the binaries also run with the developer's and CI's privileges at build time (the checkout, git credentials, whatever a CI job holds). That is the same exposure as Vite's own JavaScript, which runs there too, and it is covered by T-601 and the existing supply-chain controls. **The owner accepts this residual risk by accepting this ADR.** It is recorded as accepted risk R-13 in THREAT_MODEL, which takes effect when this ADR is accepted.
 
 ### Consequences
 

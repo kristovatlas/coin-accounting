@@ -245,6 +245,49 @@ class CheckLockfilesTests(unittest.TestCase):
         lock.write_text(lock.read_text() + "\nsettings:\n  autoInstallPeers: true\n")
         self.assertIn("the settings section appears twice", self.errors())
 
+    def test_keys_and_items_are_quoted_all_or_nothing(self):
+        # PR #136 round 4: a quote opened or closed alone makes YAML read a different key, or run on into
+        # the following lines, so the check and pnpm would disagree about the entries.
+        cl = check_lockfiles
+        for pattern, good, bads in (
+            (cl.PNPM_PACKAGE, ["  react@19.3.0:", "  '@scope/pkg@1.0.0':", "  'react@19.3.0':"],
+             ["  react@19.3.0':", "  'react@19.3.0:", "  @scope/pkg@1.0.0:", "  '@jsr/std__x@1.0.0':"]),
+            (cl.PNPM_SNAPSHOT, ["  react@19.3.0: {}", "  '@scope/pkg@1.0.0(react@19.3.0)':"],
+             ["  react@19.3.0': {}", "  '@scope/pkg@1.0.0(react@19.3.0):"]),
+            (cl.PNPM_SNAPSHOT_DEP, ["      react: 19.3.0", "      '@scope/pkg': 1.0.0"],
+             ["      'react: 19.3.0", "      @scope/pkg: 1.0.0", "      '@jsr/x': 1.0.0"]),
+            (cl.PNPM_SNAPSHOT_PEER, ["      - react", "      - '@types/node'"],
+             ["      - '@types/node", "      - react'", "      - @types/node"]),
+            (cl.PNPM_IMPORTER_DEP, ["      react:", "      '@scope/pkg':"], ["      'react:", "      react':"]),
+            (cl.PNPM_PEER, ["      react: '>=18'", "      '@types/node': ^20"], ["      'react: '>=18'"]),
+        ):
+            for line in good:
+                with self.subTest(line=line):
+                    self.assertIsNotNone(pattern.match(line))
+            for line in bads:
+                with self.subTest(line=line):
+                    self.assertIsNone(pattern.match(line))
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        lock.write_text(lock.read_text().replace("  react@19.3.0: {}\n", "  react@19.3.0:\n    transitivePeerDependencies:\n"
+                                                 "      - 'x\n", 1))
+        self.assertIn("a single quote is left open", self.errors())
+
+    def test_jsr_sources_fail(self):
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        lock.write_text(lock.read_text().replace("specifier: ^19.3.0", "specifier: jsr:@std/x", 1))
+        self.assertIn("a source other than the npm registry", self.errors())
+
+    def test_indented_lines_under_lockfile_version_and_a_repeated_packages_section_fail(self):
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        text = lock.read_text()
+        lock.write_text(text.replace("lockfileVersion: '9.0'\n", "lockfileVersion: '9.0'\n  x: 1\n", 1))
+        self.assertIn("unexpected indented line under lockfileVersion", self.errors())
+        lock.write_text(text + "\npackages:\n")
+        self.assertIn("the packages section appears twice", self.errors())
+
     def test_a_malformed_publish_time_makes_the_check_exit_1(self):
         self.pnpm(times={**PNPM_TIMES, "react@19.3.0": "last tuesday"})
         with redirect_stdout(io.StringIO()), unittest.mock.patch("sys.stderr", io.StringIO()):
