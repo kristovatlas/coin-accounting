@@ -39,7 +39,7 @@ Work through `<scope>` of `PLAN.md` in cruise mode ([ADR 0030](../../../docs/adr
   - the test socket guard and what switches it on: `backend/tests/socket_guard.py`, `backend/tests/__init__.py`, every `conftest.py`, `pytest.toml`/`pytest.ini`
   - the lint, type-check and coverage settings (`ruff.toml`, `mypy.ini`, `.coveragerc`, `eslint.config.*`, `vitest.config.*`), and other agents' and editors' configuration (`GEMINI.md`, `.vscode/`, …)
 
-  The full list is ADR 0031 §3. Application code, its tests and golden files, the `tax/`, `doxx/` and `chain/` engines, the security-critical modules, build configuration and the living binding documents (`THREAT_MODEL.md`, `ENGINEERING.md`, `PLAN.md`, `DEPENDENCIES.md`) are ordinary slices. A change that weakens a control in a binding document is a human item.
+  The full list is ADR 0031 §3. Application code, its tests and golden files, the `tax/`, `doxx/` and `chain/` engines, the security-critical modules, build configuration other than `vite.config.*` (`tsconfig.json`, `playwright.config.*`) and the living binding documents (`THREAT_MODEL.md`, `ENGINEERING.md`, `PLAN.md`, `DEPENDENCIES.md`) are ordinary slices. A change that weakens a control in a binding document is a human item.
 - **The tracking issue is the run's record.** Every merge, refusal, decision, pause and stop is added to it, through the review panel's posting path (the marker is `<!-- cruise:<run-id>:<kind> -->`).
 - **Notify the human** when blocked on them, when paused, and when the run ends.
   - Use ntfy, with the topic read from `~/.config/coin-accounting/ntfy-topic`. That file is never committed, and it must be the user's own, with mode 600. Keep the topic out of the command line, since other local users can read process arguments: pass the URL to `curl -sS -m 15 -K -` on stdin as `url = "https://ntfy.sh/<topic>"`, with the message as `-H "Title: Claude Code" -d "<minimal message>"`.
@@ -72,8 +72,8 @@ A lock file, `run.lock`, works like the review panel's: one session per run, and
 
 The cron job's prompt is `/cruise <scope> --tick`. A call without `--tick` is the human's own.
 
-1. **Reconcile with GitHub before anything else,** whenever a live state exists, including before **Stop** or a pause. For every slice with a PR that isn't `merged`, read the PR:
-   - **Merged** (by the gate in an earlier tick that was cut off, or by the human): mark it `merged`, and add the merge SHA to the tracking issue if it isn't there yet.
+1. **Reconcile with GitHub before anything else,** whenever a live state exists, including before **Stop** or a pause. For every slice with a PR that isn't `merged`, and for `closing_pr` if set, read the PR (a merged closing PR is recorded in the tracking issue, and the run goes on to its summary and `done`):
+   - **Merged** (by the gate in an earlier tick that was cut off, or by the human): mark it `merged`, and add the merge SHA to the tracking issue if it isn't there yet. Also, for every slice marked `merged` without `merge_recorded`, post its record now.
    - **Closed without merging:** mark it `blocked`, and say so in the issue.
 2. **`/cruise stop`:** go to **Stop**. Otherwise, run the mode and pause checks (Rules).
 3. **Load the state:**
@@ -119,7 +119,7 @@ Take the first slice whose dependencies are `merged` and whose status is `todo`,
    - **The panel decides whether the PR goes to the human** (review-panel skill, cruise profile, Hand-off): a Critical finding, a committed secret or real data in any round, an open human item, or an Opus tripwire flag that sends a PR to the human. If the panel handed the PR to the human without setting the `review-panel` status, mark the slice `handed-to-human` and don't run the gate.
    - **If `main` moved since the PR's last CI run** (the head doesn't contain `origin/main`), run the review panel's **Refresh** (cruise profile): it merges `origin/main` in, waits for CI, runs both tripwires again and sets the `review-panel` status on the new head only if they pass, or hands the PR to the human.
    - **Otherwise run the gate** on the head SHA (Rules):
-     - **Exit 0 (merged):** mark the slice `merged`, and add the merge to the tracking issue. Then run the review panel's **After the merge** routine for the PR: it deletes the branch only at its final SHA and with no dependent PR, and cleans up the worktrees and files.
+     - **Exit 0 (merged):** add the merge to the tracking issue first, then mark the slice `merged` (with `merge_recorded`); if posting fails, mark it `merged` without `merge_recorded`, and reconciliation posts the record on a later tick before anything else. Then run the review panel's **After the merge** routine for the PR: it deletes the branch only at its final SHA and with no dependent PR, and cleans up the worktrees and files.
      - **Exit 1 (refused):** convert the PR to a draft, post the standard hand-off with the gate's reasons, and mark the slice `handed-to-human`.
      - **Exit 2 (couldn't check):** increment the slice's `gate_exit2`, and try again on the next tick. At 2, go to `awaiting-human`.
 5. **If later slices depend on a `handed-to-human` slice,** they wait; take independent slices meanwhile. If nothing is left to take, go to `awaiting-human` (reason: `merges`) and notify.

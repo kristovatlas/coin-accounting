@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import os
 import re
 import subprocess
@@ -187,6 +189,21 @@ class DecideTests(unittest.TestCase):
             "a tax module deleted": lambda f: f["deleted_files"].append("backend/coinacct/tax/lots.py"),
             "a chain module renamed away": lambda f: f["deleted_files"].append("backend/coinacct/chain/scan.py"),
             "the permanent block label": lambda f: f["pr"].update(labels=[{"name": "autopilot-blocked"}]),
+            "socket config": lambda f: f["changed_files"].append("socket.yml"),
+            "copied node_modules": lambda f: f["changed_files"].append("frontend/node_modules/pkg/index.js"),
+            "copied site-packages": lambda f: f["changed_files"].append("backend/site-packages/pkg/__init__.py"),
+            "a minified tsx": lambda f: f["changed_files"].append("frontend/src/bundle.min.tsx"),
+            "a minified svg": lambda f: f["changed_files"].append("frontend/src/asset.min.svg"),
+            "nested socket config": lambda f: f["changed_files"].append("frontend/.socket.yaml"),
+            "zed settings": lambda f: f["changed_files"].append(".zed/settings.json"),
+            "opencode config": lambda f: f["changed_files"].append("opencode.json"),
+            "a root module shadowing coverage": lambda f: f["changed_files"].append("coverage.py"),
+            "a root package shadowing pytest": lambda f: f["changed_files"].append("pytest/__init__.py"),
+            "a new top-level directory": lambda f: f["changed_files"].append("tools/notes.md"),
+            "a module directly under backend": lambda f: f["changed_files"].append("backend/hypothesis.py"),
+            "a .pth file under backend": lambda f: f["changed_files"].append("backend/x.pth"),
+            "a new package under backend": lambda f: f["changed_files"].append("backend/_pytest/__init__.py"),
+            "a new package under e2e": lambda f: f["changed_files"].append("e2e/pytest/__init__.py"),
             "not cleared by the panel": lambda f: f.update(review_status=None),
             "the panel's status failed": lambda f: f.update(review_status="failure"),
             "the panel's status pending": lambda f: f.update(review_status="pending"),
@@ -337,11 +354,55 @@ class GitScanTests(unittest.TestCase):
         head = self.commit({"backend/coinacct/x.py": "y = 1\n", "backend/tests/conftest.py": "z = 1\n"})
         self.assertEqual(cruise_merge.list_blocked(self.base, head), ["backend/tests/conftest.py"])
 
+    def test_list_blocked_cli_prints_the_refused_paths_and_fails_on_an_unknown_commit(self):
+        head = self.commit({"backend/coinacct/x.py": "y = 1\n", "backend/tests/conftest.py": "z = 1\n"})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cruise_merge.main(["--list-blocked", self.base, head]), 0)
+        self.assertEqual(out.getvalue(), "backend/tests/conftest.py\n")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cruise_merge.main(["--list-blocked", self.base, "d" * 40]), 2)
+
     def test_a_non_ascii_path_comes_back_unquoted_and_is_blocked(self):
         head = self.commit({"docs/adr/0099-règles.md": "y = 2\n"})
         changed = cruise_merge.git_z("diff", *cruise_merge.DIFF_OPTS, "--name-only", "-z", self.base, head)
         self.assertEqual(changed, ["docs/adr/0099-règles.md"])
         self.assertTrue(cruise_merge.blocked_path(changed[0]))
+
+
+class RecheckTests(unittest.TestCase):
+    def setUp(self):
+        self._saved = (cruise_merge.gh_api, cruise_merge.git_dir)
+        self.tmp = tempfile.TemporaryDirectory()
+        cruise_merge.git_dir = lambda: Path(self.tmp.name)
+        self.labels: list = []
+        self.statuses = [{"context": "review-panel", "state": "success", "creator": {"login": OWNER}}]
+
+        def api(path):
+            if path.endswith("/commits/main"):
+                return {"sha": "c" * 40}
+            if "/statuses" in path:
+                return self.statuses
+            return {"labels": self.labels}
+
+        cruise_merge.gh_api = api
+        self.facts = {**good_facts(), "name": "owner/repo"}
+        self.facts["pr"]["number"] = 5
+
+    def tearDown(self):
+        cruise_merge.gh_api, cruise_merge.git_dir = self._saved
+        self.tmp.cleanup()
+
+    def test_unchanged_passes(self):
+        self.assertEqual(cruise_merge.recheck(self.facts), [])
+
+    def test_a_block_label_added_just_before_merging_refuses(self):
+        self.labels.append({"name": "autopilot-blocked"})
+        self.assertTrue(cruise_merge.recheck(self.facts))
+
+    def test_a_newer_failing_owner_status_refuses(self):
+        self.statuses.insert(0, {"context": "review-panel", "state": "failure", "creator": {"login": OWNER}})
+        self.assertTrue(cruise_merge.recheck(self.facts))
 
 
 class ListBlockedCliTests(unittest.TestCase):

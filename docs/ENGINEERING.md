@@ -385,7 +385,7 @@ A change is done only when:
 | Module import edges and capability rules | `scripts/check-architecture` (architecture §2) |
 | No symbolic links or submodules in the tree | `scripts/check-repo-files` (ADR 0023) |
 | ADR immutability, diagram hash | CI checks |
-| Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review |
+| Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review; under autopilot (ADR 0031), threat-model and DEPENDENCIES updates are reviewed by the AI panel (the Opus tripwire's "binding-document control" flag goes to the human), and ADRs stay with the human |
 | Test-slop rules | Partly automated (§3.5) + review checklist + periodic test audit |
 | Only the human merges, except through cruise mode's gate (ADR 0030, autopilot ADR 0031) | Procedural (Documented, T-605); the gate's conditions are mechanical (`scripts/cruise_merge.py`, R-11) |
 | No real data for agents | `AGENTS.md` + SessionStart hook + human discipline (Documented, T-607, R-6) |

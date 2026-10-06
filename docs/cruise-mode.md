@@ -103,7 +103,7 @@ It runs from a 10-minute check-in job in that Claude Code session. The job expir
 
 **Merges automatically** (autopilot, ADR 0031), after a clean cruise review, an Opus tripwire with no flag of Medium or above, and green CI:
 - application code, including the security-critical modules (`api/`, the launcher, `storage/`, `rpc.py`, `config.py`) and the `tax/`, `doxx/` and `chain/` engines
-- tests, golden files, E2E specs and build configuration (`vite.config.*`, …)
+- tests, golden files, E2E specs and build configuration other than `vite.config.*` (`tsconfig.json`, `playwright.config.*`)
 - the living binding documents: `THREAT_MODEL.md`, `ENGINEERING.md`, `PLAN.md`, `DEPENDENCIES.md`
 - the milestone-closing PR
 - PRs outside a `/cruise` run: the review panel runs the gate itself
@@ -113,7 +113,7 @@ The panel marks a commit it cleared with the commit status `review-panel`, and t
 **Always comes to you,** whatever the mode:
 - dependency approvals, and any change to dependency manifests, lockfiles or install configuration (`uv.toml`, `.npmrc`, `.python-version`, …), in any directory
 - ADR-level decisions, ADRs, and `docs/architecture.md`
-- changes to the agents' own controls: `scripts/`, `.github/`, the `Makefile`, `PROCESS_MODE`, this guide; agent instructions, skills and tool configuration in any directory (`.claude/`, `.codex/`, `AGENTS*.md`, `CLAUDE*.md`, `.mcp.json`); the test socket guard, every `conftest.py` and a `pytest.toml`/`pytest.ini`; the lint, type-check, coverage and mutation settings (`ruff.toml`, `mypy.ini`, `.coveragerc`, `eslint.config.*`, `vitest.config.*`, `vite.config.*`, `mutation-exclusions.md`); other agents' and editors' configuration (`GEMINI.md`, `.vscode/`, `.windsurf/`, `.devcontainer/`, …); vendored or minified third-party code; deleting or renaming a file in the `tax/`, `doxx/` or `chain/` engines
+- changes to the agents' own controls: `scripts/`, `.github/`, the `Makefile`, `PROCESS_MODE`, this guide; agent instructions, skills and tool configuration in any directory (`.claude/`, `.codex/`, `AGENTS*.md`, `CLAUDE*.md`, `.mcp.json`); the test socket guard, every `conftest.py` and a `pytest.toml`/`pytest.ini`; the lint, type-check, coverage and mutation settings (`ruff.toml`, `mypy.ini`, `.coveragerc`, `eslint.config.*`, `vitest.config.*`, `vite.config.*`, `mutation-exclusions.md`); other agents' and editors' configuration (`GEMINI.md`, `.vscode/`, `.windsurf/`, `.devcontainer/`, `.zed/`, …); Socket's `socket.yml`; any new file or directory at the top of the repository, or Python module directly under `backend/` or `e2e/` (it could stand in for a test tool); vendored or minified third-party code; deleting or renaming a file in the `tax/`, `doxx/` or `chain/` engines
 - a change that weakens a control in a binding document (it needs an ADR)
 - a Critical security finding, or a committed secret or real user data, found in **any** round: the panel labels the PR `autopilot-blocked`, and only you remove that label (functional and High security P1s are fixed during the run)
 - any Opus tripwire flag of Medium or above, any "binding-document control", "third-party code" or "check suppression" flag, and anything else the gate refuses

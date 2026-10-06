@@ -82,6 +82,10 @@ BLOCKED_NAMES = ("pyproject.toml", "uv.lock", "uv.toml", "package.json", "pnpm-l
                  "conftest.py", "pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg",
                  "ruff.toml", ".ruff.toml", "mypy.ini", ".mypy.ini", ".coveragerc",
                  ".mcp.json", ".cursorrules", ".windsurfrules", ".clinerules", ".devcontainer.json",
+                 "opencode.json", "opencode.jsonc",
+                 # Socket's repository config: it can ignore paths or turn off the PR alerts the owner
+                 # approves dependencies by (ENGINEERING §2.4)
+                 "socket.yml", "socket.yaml", ".socket.yml", ".socket.yaml",
                  # the mutation-testing exclusion list (ENGINEERING §3.5), like a coverage setting
                  "mutation-exclusions.md")
 BLOCKED_NAME_PATTERNS = ("requirements*.txt", "constraints*.txt", ".pnpmfile.*",
@@ -91,14 +95,16 @@ BLOCKED_NAME_PATTERNS = ("requirements*.txt", "constraints*.txt", ".pnpmfile.*",
                          # no vitest.config.*
                          "vite.config.*",
                          # copied-in third-party code skips the dependency decision (ENGINEERING §2.4)
-                         "*.min.js", "*.min.mjs", "*.min.cjs", "*.min.css",
+                         "*.min.*",
                          # agent instructions and skills, at any depth (AGENTS.override.md, backend/CLAUDE.md)
                          "*agents*.md", "*claude*.md", "*gemini*.md", "skill.md", ".aider*")
 # Agent and editor tool configuration directories, at any depth (.vscode can hold MCP servers and tasks).
 BLOCKED_DIRS = (".claude", ".codex", ".agents", ".cursor", ".gemini", ".vscode", ".idea", ".windsurf",
-                ".clinerules", ".continue", ".roo", ".kiro", ".amazonq", ".devcontainer",
+                ".clinerules", ".continue", ".roo", ".kiro", ".amazonq", ".devcontainer", ".zed", ".opencode",
+                ".junie", ".kilocode", ".trae", ".fleet",
                 # vendored third-party code (ENGINEERING §2.4)
-                "vendor", "vendored", "third_party", "third-party")
+                "vendor", "vendored", "third_party", "third-party", "node_modules", "bower_components",
+                "site-packages", "dist-packages")
 # Deleting or renaming a file in these engines would quietly drop the 95 % coverage floor and the
 # mutation runs, which the Makefile keys on these directory names (ENGINEERING §3.3).
 FLOORED_DIRS = ("backend/coinacct/tax/", "backend/coinacct/doxx/", "backend/coinacct/chain/")
@@ -115,12 +121,33 @@ GIT_OPTS = ("-c", "core.quotePath=false", "-c", "diff.external=", "-c", "core.at
 DIFF_OPTS = ("--no-color", "--no-ext-diff", "--no-textconv", "--no-renames")
 
 
+# Only these may change at the top of the repository: anything else there (a root `coverage.py`, a
+# `pytest/` package) would be imported in place of a real tool by the `python -m` commands CI runs from
+# the root, and could turn the tests off. The blocked top-level entries stay with the owner anyway.
+ALLOWED_TOP = ("backend", "frontend", "e2e", "docs", "plan.md", "readme.md")
+# Python packages that may sit directly under backend/ and e2e/ (both are on the tests' sys.path):
+# any other module there could shadow pytest, its plugins or the standard library.
+ALLOWED_PACKAGES = {"backend": ("coinacct", "tests"), "e2e": ("harness",)}
+
+
+def shadows_a_tool(parts: list[str]) -> bool:
+    if parts[0] not in ALLOWED_TOP:
+        return True
+    allowed = ALLOWED_PACKAGES.get(parts[0])
+    if allowed is None or len(parts) < 2:
+        return False
+    if len(parts) == 2:  # a file directly under backend/ or e2e/
+        return parts[1].endswith((".py", ".pyi", ".pth"))
+    return parts[1] not in allowed and parts[-1].endswith((".py", ".pyi"))
+
+
 def blocked_path(path: str) -> bool:
     low = path.lower()
     parts = low.split("/")
     name = parts[-1]
     return (
-        low in BLOCKED_FILES
+        shadows_a_tool(parts)
+        or low in BLOCKED_FILES
         or low.startswith(BLOCKED_PREFIXES)
         or name in BLOCKED_NAMES
         or any(fnmatch.fnmatchcase(name, pat) for pat in BLOCKED_NAME_PATTERNS)
@@ -353,12 +380,21 @@ def gather(n: int, sha: str) -> dict:
 
 
 def recheck(facts: dict) -> list[str]:
-    """The conditions that can change in the seconds between `gather` and the merge."""
+    """The conditions that can change in the seconds between `gather` and the merge: `main`, the stop
+    file, and the panel's two signals (the block label and the owner's status), which branch protection
+    doesn't enforce."""
     reasons = []
-    if gh_api(f"repos/{facts['name']}/commits/main")["sha"] != facts["github_main"]:
+    name = facts["name"]
+    if gh_api(f"repos/{name}/commits/main")["sha"] != facts["github_main"]:
         reasons.append("main moved while the gate was checking")
     if (git_dir() / STOP_FILE).exists():
         reasons.append("the stop file .git/cruise-stop appeared")
+    pr = gh_api(f"repos/{name}/pulls/{facts['pr']['number']}")
+    if BLOCK_LABEL in {(lb or {}).get("name") for lb in (pr.get("labels") or [])}:
+        reasons.append(f"the PR was labelled {BLOCK_LABEL} while the gate was checking")
+    statuses = gh_api(f"repos/{name}/commits/{facts['sha']}/statuses?per_page=100")
+    if owner_review_status(statuses, facts["owner"]) != "success":
+        reasons.append("the review panel's status changed while the gate was checking")
     return reasons
 
 
