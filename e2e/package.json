@@ -2,5 +2,8 @@
   "name": "coinacct-e2e",
   "private": true,
   "version": "0.0.0",
-  "description": "E2E workspace (@playwright/test specs; M0.3). No lifecycle scripts allowed (ENGINEERING §2.1)."
+  "description": "E2E workspace (@playwright/test specs; M0.3). No lifecycle scripts allowed (ENGINEERING §2.1).",
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
 }
