@@ -64,7 +64,7 @@ PANEL="$GIT_DIR_ABS/review-panel"; WT="$GIT_DIR_ABS/review-panel-wt"; umask 077
   "posted": {"<marker>": "<comment or issue id>"},
   "p1_fixes": [], "human_items": [],
   "awaiting_reason": "p1-decision|round-limit|blocker|reviewer-failures",
-  "started_by": "human|cruise", "no_clearance": null, "gate_exit2": 0, "gate_dry_run_done": false,
+  "started_by": "human|cruise", "no_clearance": null, "gate_exit2": 0, "merge_recorded": false,
   "history": []
 }
 ```
@@ -363,6 +363,11 @@ cd "$WT/prN-review" && ( echo "$BASHPID" > "$P-a$A.pid"
 > - changes to dependencies, lockfiles, CI, scripts or agent instructions that don't match the PR's stated purpose
 > - edits to a binding document (`ENGINEERING.md`, `THREAT_MODEL.md`, `PLAN.md`, `DEPENDENCIES.md`) that remove, relax or reword a control, or change a threat's status or mitigation without the code to back it; label these "binding-document control"
 > - new files that shadow a module the checks rely on (a standard-library name, a `.pyi` stub next to a `.py`)
+> - third-party code copied in rather than added as a dependency: another project's licence header, a vendored package, a minified bundle; label these "third-party code"
+> - file-level suppressions of a check, or test-time changes to the socket guard: `# mypy: ignore-errors`, `@ts-nocheck`, a file-wide `eslint-disable`, code that clears or bypasses `socket_guard`; label these "check suppression"
+> - in `PLAN.md`, new scope (a milestone, a feature or a network flow the plan didn't have); label it "binding-document control"
+>
+> A change to a threat's status in `THREAT_MODEL.md` is backed when its evidence points at code and tests already on `main` (the milestone-closing PR is made of such changes); flag only a status whose evidence is missing or doesn't support it.
 >
 > Answer "no flags" or a list of flags. **Don't judge code quality.** When unsure, flag it.
 
@@ -398,11 +403,11 @@ PR #N Review (round R):
 
 ## Cruise profile
 
-Applies only when **all three** of these hold. Everything above holds except what this section overrides.
+Applies only when **all four** of these hold. Everything above holds except what this section overrides.
 - `PROCESS_MODE` on `origin/main` is `cruise` (ADR 0030). Read it at the start of every round, not from the PR branch.
-- The PR was opened by the agent for the human's request: a `/cruise` run's slice, its closing PR, or any other PR the agent opened (autopilot, ADR 0031). "Opened by the agent" means its number was recorded when this session or run opened it (in `run.json`, or in `$PANEL/agent-prs.txt`); a PR not recorded there, even a ready one of the owner's, gets the standard profile.
-- No path in the round-1 diff is one the gate refuses: run `main`'s copy of the gate with `--list-blocked "$merge_base" "$head_sha"`, and use the standard profile if it prints anything.
-- The panel's state records `"started_by": "cruise"`. It is set once, when the agent creates the state, and never changed. A panel the human starts with `/review-panel #N` records `"human"`.
+- The PR was opened by the agent for the human's request: a `/cruise` run's slice, its closing PR, or any other PR the agent opened (autopilot, ADR 0031). "Opened by the agent" means its number was recorded when it was opened: in `run.json` for a run's PRs, otherwise in `$PANEL/agent-prs.txt`. **Whenever the agent opens a PR under autopilot, outside a run, it appends the PR number on its own line to that file (mode 600) right after `gh pr create`**, and the panel removes the line in **After the merge** or when it hands the PR to the human. A PR not recorded there, even a ready one of the owner's, gets the standard profile.
+- No path in the round-1 diff is one the gate refuses: run `main`'s copy of the gate with `--list-blocked "$merge_base" "$head_sha"`, and use the standard profile if it prints anything **or exits non-zero**.
+- The panel's state records `"started_by": "cruise"`. It is set when the agent creates the state. A panel the human starts with `/review-panel #N` records `"human"`, and the human's own `/review-panel #N` on a PR whose state says `"cruise"` switches it to `"human"` for good (a one-way change to the standard profile).
 
 Every other PR gets the standard profile: any PR the human runs `/review-panel` on, even one the agent opened, and an agent PR that touches a path the gate refuses (ADR 0031 §3), which goes to the human anyway. Decide this when the state is created, from the round-1 diff. If a later fix round adds such a path, switch to the standard profile and start a round over the full diff.
 
@@ -418,8 +423,12 @@ Every other PR gets the standard profile: any PR the human runs `/review-panel` 
       2. Re-read the PR, and refresh `merge_base`.
       3. Rewrite the diff file as the full `merge_base..head_sha` diff.
       4. Go to `handing-off`, where CI, the mechanical tripwire and the Opus tripwire run on that commit.
-    - **A Critical security finding ends the cruise path,** in **any** round, and so does any committed secret or real user data, whatever its rating: a fix commit can't take it out of history. Record it at once in the state's `no_clearance` (a general description), and never set the `review-panel` status for this PR afterwards, even after a later clean round. The PR goes to the human as a draft, with the finding stated in general terms, and the human is notified (through the `/cruise` run, when the PR is one of its slices).
     - Only non-P1 findings become issues.
+- **A Critical security finding ends the cruise path,** in **any** round (not only after round 2), and so does any committed secret or real user data, whatever its rating: a fix commit can't take it out of history. At once:
+  - add the label `autopilot-blocked` to the PR (create it if needed). The gate refuses any PR that carries it, so the block survives a lost state file or a new session. No agent ever removes it; only the human does.
+  - record it in the state's `no_clearance` (a general description), and never set the `review-panel` status for this PR afterwards.
+
+  The PR goes to the human as a draft, with the finding stated in general terms, and the human is notified (through the `/cruise` run, when the PR is one of its slices).
 - **Severity.** A **P1** is only:
   - a Critical/High finding the orchestrator has confirmed
   - a broken build or test, including a credibly flaky test
@@ -436,11 +445,11 @@ Every other PR gets the standard profile: any PR the human runs `/review-panel` 
   - **Before the tripwires, rewrite the diff file as the full `merge_base..final head_sha` diff.** The later rounds' diff files show only the fixes, and the Opus tripwire must see the whole change.
   - The mechanical tripwire and the Opus tripwire then run on the final SHA.
   - **This replaces the standard hand-off's steps 1, 7 and 8:** wait for all four `checks (…)` and `tests (…)` jobs, not only `checks`. The panel stays in `handing-off`, with its cron job, until the gate exits 0 or 1.
-  - **The human gets the PR as a draft instead** when `no_clearance` is set, when the panel has a human item open, or when the Opus tripwire raised a flag of Medium or above, or any "binding-document control" flag. Post the standard hand-off, set `handed-off`, delete the cron job, and notify.
+  - **The human gets the PR as a draft instead** when `no_clearance` is set or the PR carries `autopilot-blocked`, when the panel has a human item open, or when the Opus tripwire raised a flag of Medium or above, or any "binding-document control", "third-party code" or "check suppression" flag. Post the standard hand-off, set `handed-off`, delete the cron job, and notify.
   - **Otherwise clear the commit for the gate:** set the commit status `review-panel` on the final SHA (`gh api -X POST repos/{owner}/{repo}/statuses/<sha> -f state=success -f context=review-panel -f description="cleared: round R; Opus tripwire below Medium"`). Never set it in any other case, except in **Refresh** below. The gate refuses a commit without it.
-  - **Then the gate.** For a `/cruise` run's slice, the run takes over at its stage `slice` step 4. For any other PR, the panel runs the gate itself, exactly as the `/cruise` skill's Rules describe (three separate calls, `main`'s copy at `<git common dir>/cruise/gate.py`, written out literally; `--dry-run` first the very first time this repository's gate is used):
-    - **Before the gate,** if the head doesn't contain the current `main`, run **Refresh** first.
-    - **Exit 0 (merged):** add the merge (PR, SHA, merge commit) to the standing tracking issue **"Autopilot merges"** (label `cruise`; create it if it doesn't exist), through "Posting". Then run **After the merge**.
+  - **Then the gate.** For a `/cruise` run's slice, the run takes over at its stage `slice` step 4. For any other PR, the panel runs the gate itself, exactly as the `/cruise` skill's Rules describe (three separate calls, `main`'s copy at `<git common dir>/cruise/gate.py`, written out literally; `--dry-run` first the very first time this repository's gate is used, recorded repository-wide by the file `$PANEL/gate-dry-run-done`):
+    - **Before the gate,** if the head doesn't contain the current `main`, run **Refresh** first. Make sure the standing tracking issue **"Autopilot merges"** (label `cruise`) exists, creating it if needed, so the record can't fail for lack of it.
+    - **Exit 0 (merged):** add the merge (PR, SHA, merge commit) to "Autopilot merges", through "Posting", and set `merge_recorded`. Then run **After the merge**. **After the merge** never cleans up while `merge_recorded` is false on an autopilot PR: it posts the record first, and retries on the next tick if posting fails.
     - **Exit 1 (refused):** convert the PR to a draft (`gh api graphql` with `convertPullRequestToDraft`), post the standard hand-off with the gate's reasons, set `handed-off`, delete the cron job, and notify.
     - **Exit 2 (couldn't check):** count it in the state's `gate_exit2`, and try again on the next tick. At 2, go to `awaiting-human` (`blocker`) and notify.
 - **Refresh** (when `main` moved after the panel cleared the PR; used by the `/cruise` run too). No new review round:
@@ -449,5 +458,5 @@ Every other PR gets the standard profile: any PR the human runs `/review-panel` 
   3. Rewrite the diff file as the full `merge_base..head_sha` diff.
   4. Wait for all four CI jobs on the new head.
   5. Run the mechanical tripwire and the Opus tripwire again on the new head.
-  6. If `--list-blocked` now prints a path, or the Opus tripwire raised a Medium-or-above or "binding-document control" flag, the PR goes to the human as a draft. Otherwise set the `review-panel` status on the new head, and run the gate.
+  6. The PR goes to the human as a draft if `--list-blocked` now prints a path or exits non-zero, if `no_clearance` is set, the PR carries `autopilot-blocked` or a human item is open, or if the Opus tripwire raised any flag that sends a PR to the human (above). Otherwise set the `review-panel` status on the new head, and run the gate.
 - **The profile is set when the panel's state is created,** and changes only to the standard profile (above). If `PROCESS_MODE` on `main` stops being `cruise` while a cruise-started panel is running, the panel stops reviewing and sets no `review-panel` status; the PR goes to the human as a draft (through the run, which is stopping, when it is a slice).

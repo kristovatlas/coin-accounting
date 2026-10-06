@@ -13,7 +13,7 @@ The standard process ([ADR 0018](adr/0018-repository-governance.md), [0020](adr/
 
 | Value | Effect |
 |---|---|
-| `cruise` | ADR 0030 applies: the cruise panel profile, gated merges, `/cruise` loops |
+| `cruise` | ADR 0030 and ADR 0031 (autopilot) apply: the cruise panel profile, gated merges of every PR the panel cleared, `/cruise` loops |
 | `standard` | ADR 0018/0020/0023 apply unchanged; the gate refuses every merge |
 
 The gate and the skills read the value **from `origin/main`**, never from a PR branch, so a PR can't switch the mode for itself.
@@ -113,7 +113,7 @@ The panel marks a commit it cleared with the commit status `review-panel`, and t
 **Always comes to you,** whatever the mode:
 - dependency approvals, and any change to dependency manifests, lockfiles or install configuration (`uv.toml`, `.npmrc`, `.python-version`, …), in any directory
 - ADR-level decisions, ADRs, and `docs/architecture.md`
-- changes to the agents' own controls: `scripts/`, `.github/`, the `Makefile`, `PROCESS_MODE`, this guide; agent instructions, skills and tool configuration in any directory (`.claude/`, `.codex/`, `AGENTS*.md`, `CLAUDE*.md`, `.mcp.json`); the test socket guard, every `conftest.py` and a `pytest.toml`/`pytest.ini`; the lint, type-check and coverage settings (`ruff.toml`, `mypy.ini`, `.coveragerc`, `eslint.config.*`, `vitest.config.*`); other agents' and editors' configuration (`GEMINI.md`, `.vscode/`, …)
+- changes to the agents' own controls: `scripts/`, `.github/`, the `Makefile`, `PROCESS_MODE`, this guide; agent instructions, skills and tool configuration in any directory (`.claude/`, `.codex/`, `AGENTS*.md`, `CLAUDE*.md`, `.mcp.json`); the test socket guard, every `conftest.py` and a `pytest.toml`/`pytest.ini`; the lint, type-check, coverage and mutation settings (`ruff.toml`, `mypy.ini`, `.coveragerc`, `eslint.config.*`, `vitest.config.*`, `vite.config.*`, `mutation-exclusions.md`); other agents' and editors' configuration (`GEMINI.md`, `.vscode/`, `.windsurf/`, `.devcontainer/`, …); vendored or minified third-party code; deleting or renaming a file in the `tax/`, `doxx/` or `chain/` engines
 - a change that weakens a control in a binding document (it needs an ADR)
-- a Critical security finding, or a committed secret or real user data, after round 2 (functional and High security P1s are fixed during the run)
-- any Opus tripwire flag of Medium or above, and anything else the gate refuses
+- a Critical security finding, or a committed secret or real user data, found in **any** round: the panel labels the PR `autopilot-blocked`, and only you remove that label (functional and High security P1s are fixed during the run)
+- any Opus tripwire flag of Medium or above, any "binding-document control", "third-party code" or "check suppression" flag, and anything else the gate refuses

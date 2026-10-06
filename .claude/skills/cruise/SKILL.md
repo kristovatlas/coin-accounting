@@ -116,11 +116,7 @@ Take the first slice whose dependencies are `merged` and whose status is `todo`,
 3. **Review** it with the review panel's **cruise profile**: follow `.claude/skills/review-panel/SKILL.md` inline for this PR, with its state file.
    - **If the slice's panel stops in `awaiting-human`** (a blocker, reviewer failures, or a P1 that needs a decision), don't wait on it: convert the PR to a draft, post the panel's reason, mark the slice `handed-to-human` (or `blocked` for an ADR-level question), notify, and take independent slices.
 4. **When the panel reaches the hand-off** (clean round, CI green, mechanical tripwire and Opus tripwire done):
-   - **Hand it to the human instead of running the gate** if either holds:
-     - the panel ended on a **Critical** security finding, or a committed secret or real user data (the cruise profile fixes functional and High security P1s itself, user decision 2026-10-03)
-     - the Opus tripwire raised any flag of Medium or above
-
-     Convert the PR to a draft (`gh api graphql` with `convertPullRequestToDraft`), post the panel's standard hand-off, and mark the slice `handed-to-human`.
+   - **The panel decides whether the PR goes to the human** (review-panel skill, cruise profile, Hand-off): a Critical finding, a committed secret or real data in any round, an open human item, or an Opus tripwire flag that sends a PR to the human. If the panel handed the PR to the human without setting the `review-panel` status, mark the slice `handed-to-human` and don't run the gate.
    - **If `main` moved since the PR's last CI run** (the head doesn't contain `origin/main`), run the review panel's **Refresh** (cruise profile): it merges `origin/main` in, waits for CI, runs both tripwires again and sets the `review-panel` status on the new head only if they pass, or hands the PR to the human.
    - **Otherwise run the gate** on the head SHA (Rules):
      - **Exit 0 (merged):** mark the slice `merged`, and add the merge to the tracking issue. Then run the review panel's **After the merge** routine for the PR: it deletes the branch only at its final SHA and with no dependent PR, and cleans up the worktrees and files.

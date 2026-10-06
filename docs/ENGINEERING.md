@@ -107,6 +107,8 @@ Configured in `pyproject.toml` `[tool.uv]`.
 
 The same process applies to a new direct dependency, and to a version bump of an existing one:
 
+Third-party code is never copied into the repository (a vendored package, a minified bundle, a file with another project's licence header); it comes in through this process, so Socket and the lockfile diff see it (ADR 0031).
+
 1. **Justify it.** Why can't the standard library or ~100 lines of our own code do the job? Could a package we already use do it?
 2. **Resolve only.** Run `make propose-js`/`make propose-py`. This updates the manifest and lockfile without installing anything, and without building sdists or loading a `.pnpmfile` (step 7).
 3. **Review the Socket verdict** for every new or changed package in the lockfile diff. Use the Socket GitHub App's report on the draft PR (which contains only the manifest/lockfile change), or the package's socket.dev page. Look for install scripts, network or filesystem access, obfuscated code, telemetry, new maintainers and typosquat signals.
@@ -323,7 +325,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
   - run any install or fetch-and-run command outside the `make` targets (§2.3); `UV_NO_SYNC=1` is always set
   - weaken a control
   - change `docs/architecture.md` without an ADR
-  - commit to `main` directly or merge PRs unless the human explicitly says so (§2.7). The one exception is cruise mode, through `main`'s copy of `scripts/cruise_merge.py` only (ADR 0030)
+  - commit to `main` directly or merge PRs unless the human explicitly says so (§2.7). The one exception is cruise mode with autopilot, through `main`'s copy of `scripts/cruise_merge.py` only (ADR 0030, ADR 0031)
   - add MCP servers or tools that fetch and run packages
 - **Transparency.** Agent-authored commits carry a `Co-Authored-By` trailer. PR descriptions state what was verified (commands run, tests added) and what wasn't.
 - **Review.** Every agent PR gets human review, except one the gate merges in cruise mode with autopilot (ADR 0030, ADR 0031), in a `/cruise` run or not. Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.

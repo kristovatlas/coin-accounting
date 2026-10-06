@@ -23,7 +23,9 @@ Conditions, all required:
   - SHA contains the current `main`, so CI tested the result of the merge
   - on SHA, every REQUIRED_CHECKS check-run from github-actions succeeded, the check-run list is
     complete, and every other check-run completed without failing
-  - the review panel cleared SHA: its commit status `review-panel` is `success` (set only after a
+  - the PR doesn't carry the label `autopilot-blocked` (the panel's permanent block, ADR 0031 §5)
+  - no file under the floored engines (`tax/`, `doxx/`, `chain/`) is deleted or renamed
+  - the review panel cleared SHA: its commit status `review-panel`, set by the owner, is `success` (set only after a
     clean round and an Opus tripwire with no flag of Medium or above; advisory, since the owner's
     token can set it, R-9 and R-12, but it stops a merge no panel reviewed)
   - no changed file is binary, has a suffix outside TEXT_SUFFIXES, or is blocked (`blocked_path`):
@@ -79,14 +81,30 @@ BLOCKED_NAMES = ("pyproject.toml", "uv.lock", "uv.toml", "package.json", "pnpm-l
                  "pnpm-workspace.yaml", ".npmrc", ".python-version", ".node-version",
                  "conftest.py", "pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg",
                  "ruff.toml", ".ruff.toml", "mypy.ini", ".mypy.ini", ".coveragerc",
-                 ".mcp.json", ".cursorrules", ".windsurfrules")
+                 ".mcp.json", ".cursorrules", ".windsurfrules", ".clinerules", ".devcontainer.json",
+                 # the mutation-testing exclusion list (ENGINEERING §3.5), like a coverage setting
+                 "mutation-exclusions.md")
 BLOCKED_NAME_PATTERNS = ("requirements*.txt", "constraints*.txt", ".pnpmfile.*",
                          # frontend lint and coverage settings
                          "eslint.config.*", ".eslintrc*", "vitest.config.*", "vitest.workspace.*",
+                         # Vitest reads its test and coverage settings from vite.config.* when there is
+                         # no vitest.config.*
+                         "vite.config.*",
+                         # copied-in third-party code skips the dependency decision (ENGINEERING §2.4)
+                         "*.min.js", "*.min.mjs", "*.min.cjs", "*.min.css",
                          # agent instructions and skills, at any depth (AGENTS.override.md, backend/CLAUDE.md)
                          "*agents*.md", "*claude*.md", "*gemini*.md", "skill.md", ".aider*")
 # Agent and editor tool configuration directories, at any depth (.vscode can hold MCP servers and tasks).
-BLOCKED_DIRS = (".claude", ".codex", ".agents", ".cursor", ".gemini", ".vscode", ".idea")
+BLOCKED_DIRS = (".claude", ".codex", ".agents", ".cursor", ".gemini", ".vscode", ".idea", ".windsurf",
+                ".clinerules", ".continue", ".roo", ".kiro", ".amazonq", ".devcontainer",
+                # vendored third-party code (ENGINEERING §2.4)
+                "vendor", "vendored", "third_party", "third-party")
+# Deleting or renaming a file in these engines would quietly drop the 95 % coverage floor and the
+# mutation runs, which the Makefile keys on these directory names (ENGINEERING §3.3).
+FLOORED_DIRS = ("backend/coinacct/tax/", "backend/coinacct/doxx/", "backend/coinacct/chain/")
+# The PR label the review panel adds when a round finds a Critical issue, a committed secret or real
+# data. It is never removed by an agent, and the gate refuses a PR that carries it (ADR 0031 §5).
+BLOCK_LABEL = "autopilot-blocked"
 # Every changed file must have one of these suffixes: no binaries, no unscanned file types.
 TEXT_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".json", ".toml", ".yml", ".yaml",
                  ".css", ".html", ".htm", ".md", ".csv", ".svg", ".txt")
@@ -196,9 +214,17 @@ def decide(facts: dict) -> list[str]:
             reasons.append(f"check-run {r.get('name')} is still {r.get('status')}")
         elif r.get("conclusion") not in ("success", "neutral", "skipped"):
             reasons.append(f"check-run {r.get('name')} concluded {r.get('conclusion')}")
+    labels = {(lb or {}).get("name") for lb in (pr.get("labels") or [])}
+    if BLOCK_LABEL in labels:
+        reasons.append(f"the review panel blocked this PR for good (label {BLOCK_LABEL})")
     if facts["review_status"] != "success":
         reasons.append(f"the review panel hasn't cleared this commit (status {REVIEW_STATUS}: {facts['review_status']})")
     reasons.extend(f"binary file changed: {p}" for p in facts["binary_files"])
+    reasons.extend(
+        f"file deleted or renamed in a floored engine: {p}"
+        for p in facts["deleted_files"]
+        if p.lower().startswith(FLOORED_DIRS)
+    )
     for p in facts["changed_files"]:
         if blocked_path(p):
             reasons.append(f"blocked path changed: {p}")
@@ -291,7 +317,8 @@ def gather(n: int, sha: str) -> dict:
     binary = [f.split("\t", 2)[2] for f in numstat if f.startswith("-\t-\t")]
     changed = git_z("diff", *DIFF_OPTS, "--name-only", "-z", merge_base, sha)
     statuses = gh_api(f"repos/{name}/commits/{sha}/statuses?per_page=100")  # newest first
-    review_status = next((st.get("state") for st in statuses if st.get("context") == REVIEW_STATUS), None)
+    review_status = owner_review_status(statuses, owner)
+    deleted = git_z("diff", *DIFF_OPTS, "--name-only", "--diff-filter=D", "-z", merge_base, sha)
     tripwire = None
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "tripwire.py"
@@ -317,6 +344,7 @@ def gather(n: int, sha: str) -> dict:
         "check_runs": runs,
         "check_runs_total": total,
         "binary_files": binary,
+        "deleted_files": deleted,
         "changed_files": changed,
         "review_status": review_status,
         "tripwire": tripwire,
@@ -347,18 +375,42 @@ def merge(name: str, n: int, sha: str) -> None:
     )  # fmt: skip
 
 
+def owner_review_status(statuses: list, owner: str) -> str | None:
+    """The newest `review-panel` status the owner set; one set by anyone else (an app, a workflow) is ignored."""
+    for st in statuses:
+        if st.get("context") == REVIEW_STATUS and (st.get("creator") or {}).get("login") == owner:
+            return st.get("state")
+    return None
+
+
+def refused_paths(changed: list[str], binary: list[str], deleted: list[str]) -> list[str]:
+    """Every changed path the gate refuses on its own: blocked, binary, an unscanned type, or a deletion
+    in a floored engine."""
+    out = [p for p in changed if blocked_path(p) or not p.lower().endswith(TEXT_SUFFIXES)]
+    out += [p for p in binary if p not in out]
+    out += [p for p in deleted if p.lower().startswith(FLOORED_DIRS) and p not in out]
+    return out
+
+
 def list_blocked(merge_base: str, sha: str) -> list[str]:
     """The changed paths the gate would refuse, so the review panel picks the profile from the gate's own
-    list rather than by eye (ADR 0031 §2)."""
+    rules rather than by eye (ADR 0031 §2)."""
     changed = git_z("diff", *DIFF_OPTS, "--name-only", "-z", merge_base, sha)
-    return [p for p in changed if blocked_path(p)]
+    numstat = git_z("diff", *DIFF_OPTS, "--numstat", "-z", merge_base, sha)
+    binary = [f.split("\t", 2)[2] for f in numstat if f.startswith("-\t-\t")]
+    deleted = git_z("diff", *DIFF_OPTS, "--name-only", "--diff-filter=D", "-z", merge_base, sha)
+    return refused_paths(changed, binary, deleted)
+
+
+def is_sha(value: str) -> bool:
+    return len(value) == 40 and all(c in "0123456789abcdef" for c in value)
 
 
 def main(argv: list[str] | None = None) -> int:
     args_in = sys.argv[1:] if argv is None else argv
     if args_in[:1] == ["--list-blocked"]:
-        if len(args_in) != 3:
-            print("usage: cruise_merge.py --list-blocked MERGE_BASE SHA", file=sys.stderr)
+        if len(args_in) != 3 or not (is_sha(args_in[1]) and is_sha(args_in[2])):
+            print("usage: cruise_merge.py --list-blocked MERGE_BASE SHA (full commit ids)", file=sys.stderr)
             return 2
         try:
             for p in list_blocked(args_in[1], args_in[2]):
@@ -372,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("sha")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(args_in)
-    if len(args.sha) != 40 or any(c not in "0123456789abcdef" for c in args.sha):
+    if not is_sha(args.sha):
         print("cruise_merge: SHA must be a full 40-character commit id", file=sys.stderr)
         return 2
     try:

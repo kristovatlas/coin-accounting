@@ -56,6 +56,7 @@ def good_facts() -> dict:
         "binary_files": [],
         "changed_files": ["backend/coinacct/services/discovery.py", "backend/tests/unit/test_discovery.py"],
         "review_status": "success",
+        "deleted_files": [],
         "tripwire": [
             {"file": "backend/coinacct/services/discovery.py", "kind": "content",
              "detail": "dynamic code or deserialisation (line 3)"},
@@ -174,6 +175,18 @@ class DecideTests(unittest.TestCase):
             "vscode tasks": lambda f: f["changed_files"].append(".vscode/tasks.json"),
             "cursor rules": lambda f: f["changed_files"].append(".cursorrules"),
             "aider config": lambda f: f["changed_files"].append(".aider.conf.yml"),
+            "windsurf rules": lambda f: f["changed_files"].append(".windsurf/rules/rule.md"),
+            "a dev container": lambda f: f["changed_files"].append(".devcontainer/devcontainer.json"),
+            "a root dev container": lambda f: f["changed_files"].append(".devcontainer.json"),
+            "cline rules": lambda f: f["changed_files"].append(".clinerules/rules.md"),
+            "a vite config": lambda f: f["changed_files"].append("frontend/vite.config.ts"),
+            "the mutation exclusions": lambda f: f["changed_files"].append("backend/tests/mutation-exclusions.md"),
+            "vendored code": lambda f: f["changed_files"].append("backend/coinacct/vendor/lib.py"),
+            "third-party code": lambda f: f["changed_files"].append("frontend/src/third_party/x.ts"),
+            "a minified bundle": lambda f: f["changed_files"].append("frontend/src/lib.min.js"),
+            "a tax module deleted": lambda f: f["deleted_files"].append("backend/coinacct/tax/lots.py"),
+            "a chain module renamed away": lambda f: f["deleted_files"].append("backend/coinacct/chain/scan.py"),
+            "the permanent block label": lambda f: f["pr"].update(labels=[{"name": "autopilot-blocked"}]),
             "not cleared by the panel": lambda f: f.update(review_status=None),
             "the panel's status failed": lambda f: f.update(review_status="failure"),
             "the panel's status pending": lambda f: f.update(review_status="pending"),
@@ -201,12 +214,37 @@ class DecideTests(unittest.TestCase):
             "backend/coinacct/doxx/rules.py", "backend/coinacct/chain/scan.py",
             "backend/coinacct/api/security.py", "backend/coinacct/launcher.py", "backend/coinacct/rpc.py",
             "backend/coinacct/storage/watchdog.py", "backend/coinacct/domain/secret.py",
-            "frontend/src/views/tax/Report.tsx", "frontend/vite.config.ts",
+            "frontend/src/views/tax/Report.tsx",
             "e2e/specs/tax/export.spec.ts", "e2e/playwright.config.ts", "frontend/tsconfig.json",
             "docs/THREAT_MODEL.md", "docs/ENGINEERING.md", "PLAN.md", "docs/DEPENDENCIES.md",
             "docs/cruise-mode-notes.md", "frontend/src/logo.svg",
         ]
         self.assertEqual(cruise_merge.decide(facts), [])
+
+    def test_other_labels_and_deletions_outside_the_engines_merge(self):
+        facts = good_facts()
+        facts["pr"]["labels"] = [{"name": "cruise"}]
+        facts["deleted_files"] = ["backend/coinacct/services/old.py"]
+        self.assertEqual(cruise_merge.decide(facts), [])
+
+    def test_only_the_owners_review_status_counts(self):
+        statuses = [
+            {"context": "review-panel", "state": "success", "creator": {"login": "github-actions[bot]"}},
+            {"context": "review-panel", "state": "failure", "creator": {"login": OWNER}},
+            {"context": "review-panel", "state": "success", "creator": {"login": OWNER}},
+        ]
+        self.assertEqual(cruise_merge.owner_review_status(statuses, OWNER), "failure")  # newest of the owner's
+        self.assertIsNone(cruise_merge.owner_review_status(statuses[:1], OWNER))
+
+    def test_refused_paths_covers_every_path_rule(self):
+        self.assertEqual(
+            cruise_merge.refused_paths(
+                ["backend/coinacct/x.py", "backend/run.sh", "backend/tests/conftest.py", "a.bin"],
+                ["a.bin"],
+                ["backend/coinacct/tax/lots.py", "backend/coinacct/services/old.py"],
+            ),
+            ["backend/run.sh", "backend/tests/conftest.py", "a.bin", "backend/coinacct/tax/lots.py"],
+        )
 
     def test_any_branch_of_the_repository_can_merge(self):
         facts = good_facts()
@@ -304,6 +342,13 @@ class GitScanTests(unittest.TestCase):
         changed = cruise_merge.git_z("diff", *cruise_merge.DIFF_OPTS, "--name-only", "-z", self.base, head)
         self.assertEqual(changed, ["docs/adr/0099-règles.md"])
         self.assertTrue(cruise_merge.blocked_path(changed[0]))
+
+
+class ListBlockedCliTests(unittest.TestCase):
+    def test_bad_arguments_exit_2(self):
+        self.assertEqual(cruise_merge.main(["--list-blocked", "abc"]), 2)
+        self.assertEqual(cruise_merge.main(["--list-blocked", "--output=x", SHA]), 2)
+        self.assertEqual(cruise_merge.main(["--list-blocked", SHA, "b" * 39]), 2)
 
 
 class TokenFileTests(unittest.TestCase):
