@@ -1,6 +1,6 @@
 ---
 name: cruise
-description: Cruise mode (ADR 0030). Work through a PLAN.md scope (a milestone or section) as a loop of small PRs. Implement each, review it with the review panel's cruise profile, merge it through main's scripts/cruise_merge.py gate when every condition holds (otherwise hand it to the human as a draft), and finish with a milestone-closing PR for the human. Only for the human's /cruise <scope> command and its own cron tick; `/cruise stop` ends a run.
+description: Cruise mode (ADR 0030). Work through a PLAN.md scope (a milestone or section) as a loop of small PRs. Implement each, review it with the review panel's cruise profile, merge it through main's scripts/cruise_merge.py gate when every condition holds (otherwise hand it to the human as a draft), and finish with a milestone-closing PR that merges the same way. Only for the human's /cruise <scope> command and its own cron tick; `/cruise stop` ends a run.
 argument-hint: "<scope, e.g. M0.3> | stop"
 disable-model-invocation: true
 ---
@@ -32,11 +32,13 @@ Work through `<scope>` of `PLAN.md` in cruise mode ([ADR 0030](../../../docs/adr
   - no symlinks or submodules
   - no VeraCrypt volume mounted (`AGENTS.md`)
 - **Autopilot (ADR 0031): everything merges through the gate except human decisions and the agents' own controls.** The gate refuses these, so put such changes in their own PR, opened as a **draft** for the human, and say so in the tracking issue:
-  - dependency manifests and lockfiles (the human approves the Socket verdict, ENGINEERING §2.4)
+  - dependency manifests, lockfiles and install configuration, in any directory (the human approves the Socket verdict, ENGINEERING §2.4)
   - ADRs and `docs/architecture.md`
-  - `scripts/`, `.github/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`, the `Makefile`, `PROCESS_MODE` and `docs/cruise-mode.md`
+  - `scripts/`, `.github/`, the `Makefile`, `PROCESS_MODE` and `docs/cruise-mode.md`
+  - agent instructions, skills and tool configuration in any directory (`.claude/`, `.codex/`, any `*agents*.md` or `*claude*.md`, `SKILL.md`, `.mcp.json`)
+  - the test socket guard and what switches it on: `backend/tests/socket_guard.py`, `backend/tests/__init__.py`, every `conftest.py`, `pytest.toml`
 
-  Application code, its tests and golden files, the `tax/`, `doxx/` and `chain/` engines, the security-critical modules, tool configuration and the living binding documents (`THREAT_MODEL.md`, `ENGINEERING.md`, `PLAN.md`, `DEPENDENCIES.md`) are ordinary slices.
+  The full list is ADR 0031 §3. Application code, its tests and golden files, the `tax/`, `doxx/` and `chain/` engines, the security-critical modules, build configuration and the living binding documents (`THREAT_MODEL.md`, `ENGINEERING.md`, `PLAN.md`, `DEPENDENCIES.md`) are ordinary slices. A change that weakens a control in a binding document is a human item.
 - **The tracking issue is the run's record.** Every merge, refusal, decision, pause and stop is added to it, through the review panel's posting path (the marker is `<!-- cruise:<run-id>:<kind> -->`).
 - **Notify the human** when blocked on them, when paused, and when the run ends.
   - Use ntfy, with the topic read from `~/.config/coin-accounting/ntfy-topic`. That file is never committed, and it must be the user's own, with mode 600. Keep the topic out of the command line, since other local users can read process arguments: pass the URL to `curl -sS -m 15 -K -` on stdin as `url = "https://ntfy.sh/<topic>"`, with the message as `-H "Title: Claude Code" -d "<minimal message>"`.
@@ -137,15 +139,15 @@ Design questions below the ADR bar may be decided during the run. Record each in
 
 ## Stage `closing`
 
-1. Open the **milestone-closing PR** as a draft for the human, and record it as `closing_pr`. It contains:
+1. Open the **milestone-closing PR**, ready for review (not a draft), on a `cruise/` branch like a slice, and record it as `closing_pr`. It contains:
    - THREAT_MODEL statuses and evidence for everything the run merged
    - one THREAT_MODEL changelog row, and an ENGINEERING row if needed
    - PLAN progress
    - DEPENDENCIES, if changed
-2. Review it with the review panel's **standard** profile. It isn't a slice, so the cruise profile doesn't apply to it. That panel keeps its own `/review-panel #N` cron job. Stay in `closing` until it reaches its hand-off.
+2. Review and merge it exactly like a slice (stage `slice`, steps 3 and 4): the review panel's cruise profile, then the gate (ADR 0031 §7). If it touches a path the gate refuses, it goes to the human as a draft instead. Stay in `closing` until it is merged or handed to the human.
 3. Post a run summary in the tracking issue:
    - the merges
-   - the PRs handed to the human
+   - the PRs handed to the human, including the closing PR if it was
    - the decisions
    - the issues filed
 4. Notify, delete the cron job, and go to `done`.

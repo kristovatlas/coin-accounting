@@ -180,7 +180,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **Branch protection on `main`:**
   - PRs only, with all required checks green
   - stacked PRs are merged with merge commits
-  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605. The exception is cruise mode's gate with autopilot (ADR 0030, ADR 0031, R-11, R-12): it merges every reviewed PR except dependency files, ADRs and the architecture baseline, and the agents' own controls
+  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605. The exception is cruise mode's gate with autopilot (ADR 0030, ADR 0031, R-11, R-12): it merges every PR the review panel cleared (its `review-panel` commit status) except dependency, lock and install-config files, ADRs and the architecture baseline, and the agents' own controls, including the test socket guard and every `conftest.py` (ADR 0031 §3)
 - **Commit signing is not required** (user decision, 2026-09-27). Agents would need the owner's key, so signatures couldn't tell agent commits from human ones. GitHub signs the merge commits it creates. If releases are ever published for other users, release tags will be signed (THREAT_MODEL T-606).
 - GitHub secret scanning and push protection are enabled.
 
@@ -276,7 +276,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 
 ### 4.3 Threat model
 
-- Any PR touching a boundary, asset, store, network flow (including build-time flows), dependency or tax rule updates `THREAT_MODEL.md` in the same PR: statuses, evidence links, changelog. **In cruise mode** ([ADR 0030](adr/0030-cruise-mode.md)), a `/cruise` run's feature PRs leave all three to the run's milestone-closing PR, which the human merges.
+- Any PR touching a boundary, asset, store, network flow (including build-time flows), dependency or tax rule updates `THREAT_MODEL.md` in the same PR: statuses, evidence links, changelog. **In cruise mode** ([ADR 0030](adr/0030-cruise-mode.md)), a `/cruise` run's feature PRs leave all three to the run's milestone-closing PR, which merges through the gate like a slice (ADR 0031).
 - A threat moves to **Verified** only when a linked test would fail if the mitigation were removed.
 
 ## 5. Code standards
@@ -422,4 +422,4 @@ A change is done only when:
 | 2026-10-03 | 0.2.27 | Cruise mode (ADR 0030): a switchable faster process. It adds a lighter review-panel profile, gated automatic merges (`scripts/cruise_merge.py`), `/cruise` milestone loops, and threat-model and changelog updates in a milestone-closing PR (§4.3, §6, §8); `PROCESS_MODE` = `standard` restores the previous rules |
 | 2026-10-04 | 0.2.28 | §5.2: `ctypes` is its own capability in `scripts/check_architecture.py`, allowed only in `launcher.py` (for `prctl(PR_SET_DUMPABLE, 0)`, architecture §1); `storage/volume.py` no longer gets it with `subprocess` |
 | 2026-10-04 | 0.2.29 | §2.7: CI's `tests` job runs `make test` and `make lint` on every PR, on Linux and macOS, passing `DEPS_APPROVED=1` as decided in #44 (T-608) |
-| 2026-10-05 | 0.2.31 | Autopilot (ADR 0031): §6 the agent starts the review panel and the gate merges every reviewed PR except dependency files, ADRs and the architecture baseline, and the agents' own controls; the milestone-closing PR merges through the gate |
+| 2026-10-05 | 0.2.31 | Autopilot (ADR 0031): §6 the agent starts the review panel and the gate merges every PR the panel cleared except dependency and install files, ADRs and the architecture baseline, and the agents' own controls; §4.3 the milestone-closing PR merges through the gate. (0.2.30 is taken by the open PR #136.) |

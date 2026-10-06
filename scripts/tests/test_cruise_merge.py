@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,7 +13,6 @@ HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
 import cruise_merge  # noqa: E402
-import tripwire  # noqa: E402
 
 SHA = "a" * 40
 OWNER = "owner"
@@ -55,7 +55,7 @@ def good_facts() -> dict:
         "check_runs_total": len(runs),
         "binary_files": [],
         "changed_files": ["backend/coinacct/services/discovery.py", "backend/tests/unit/test_discovery.py"],
-        "dynamic_code": [],
+        "review_status": "success",
         "tripwire": [
             {"file": "backend/coinacct/services/discovery.py", "kind": "content",
              "detail": "dynamic code or deserialisation (line 3)"},
@@ -138,6 +138,30 @@ class DecideTests(unittest.TestCase):
             "an npmrc": lambda f: f["changed_files"].append("frontend/.npmrc"),
             "a pnpmfile": lambda f: f["changed_files"].append(".pnpmfile.cjs"),
             "an MCP config": lambda f: f["changed_files"].append(".mcp.json"),
+            "a nested MCP config": lambda f: f["changed_files"].append("frontend/.mcp.json"),
+            "agent instruction overrides": lambda f: f["changed_files"].append("AGENTS.override.md"),
+            "scoped agent instructions": lambda f: f["changed_files"].append("backend/AGENTS.md"),
+            "scoped claude instructions": lambda f: f["changed_files"].append("frontend/CLAUDE.md"),
+            "local claude instructions": lambda f: f["changed_files"].append("CLAUDE.local.md"),
+            "a nested skill": lambda f: f["changed_files"].append("backend/.claude/skills/x/SKILL.md"),
+            "codex config": lambda f: f["changed_files"].append(".codex/config.toml"),
+            "nested codex config": lambda f: f["changed_files"].append("e2e/.codex/config.toml"),
+            "root install config": lambda f: f["changed_files"].append("uv" + ".toml"),
+            "nested install config": lambda f: f["changed_files"].append("backend/uv" + ".toml"),
+            "python version pin": lambda f: f["changed_files"].append(".python-version"),
+            "node version pin": lambda f: f["changed_files"].append(".node-version"),
+            "a requirements variant": lambda f: f["changed_files"].append("requirements-dev.txt"),
+            "a constraints file": lambda f: f["changed_files"].append("backend/constraints.txt"),
+            "a pnpmfile variant": lambda f: f["changed_files"].append("e2e/.pnpmfile.js"),
+            "the conftest that installs the socket guard": lambda f: f["changed_files"].append(
+                "backend/tests/conftest.py"),
+            "a nested conftest": lambda f: f["changed_files"].append("backend/tests/unit/conftest.py"),
+            "a pytest.toml": lambda f: f["changed_files"].append("pytest.toml"),
+            "a hidden pytest.toml": lambda f: f["changed_files"].append(".pytest.toml"),
+            "the tests package init": lambda f: f["changed_files"].append("backend/tests/__init__.py"),
+            "not cleared by the panel": lambda f: f.update(review_status=None),
+            "the panel's status failed": lambda f: f.update(review_status="failure"),
+            "the panel's status pending": lambda f: f.update(review_status="pending"),
             "the socket guard": lambda f: f["changed_files"].append("backend/tests/socket_guard.py"),
             "a package shadowing the socket guard": lambda f: f["changed_files"].append(
                 "backend/tests/socket_guard/__init__.py"),
@@ -162,7 +186,7 @@ class DecideTests(unittest.TestCase):
             "backend/coinacct/doxx/rules.py", "backend/coinacct/chain/scan.py",
             "backend/coinacct/api/security.py", "backend/coinacct/launcher.py", "backend/coinacct/rpc.py",
             "backend/coinacct/storage/watchdog.py", "backend/coinacct/domain/secret.py",
-            "backend/tests/unit/conftest.py", "frontend/src/views/tax/Report.tsx", "frontend/vite.config.ts",
+            "frontend/src/views/tax/Report.tsx", "frontend/vite.config.ts",
             "e2e/specs/tax/export.spec.ts", "e2e/playwright.config.ts", "frontend/tsconfig.json",
             "docs/THREAT_MODEL.md", "docs/ENGINEERING.md", "PLAN.md", "docs/DEPENDENCIES.md",
             "docs/cruise-mode-notes.md", "frontend/src/logo.svg",
@@ -174,18 +198,13 @@ class DecideTests(unittest.TestCase):
         facts["pr"]["head"].update(ref="m0.3/launcher-serve")
         self.assertEqual(cruise_merge.decide(facts), [])
 
-    def test_dynamic_code_is_reported_not_blocking(self):
-        # ADR 0031: the Opus tripwire judges it; a Medium-or-above flag sends the PR to the human.
-        facts = good_facts()
-        facts["dynamic_code"].append(("backend/coinacct/x.py", 3))
-        self.assertEqual(cruise_merge.decide(facts), [])
-
     def test_only_structural_tripwire_flags_block(self):
         blocking = [
             {"file": "x", "kind": "symlink", "detail": "symbolic link added, changed or removed"},
             {"file": "x", "kind": "submodule", "detail": "git submodule (gitlink)"},
             {"file": "x", "kind": "executable", "detail": "file made executable"},
             {"file": "x", "kind": "unparsed", "detail": "could not parse this change"},
+            {"file": "x.py", "kind": "novel", "detail": "a kind added to the tripwire later"},
         ]
         for flag in blocking:
             with self.subTest(flag["kind"]):
@@ -198,9 +217,28 @@ class DecideTests(unittest.TestCase):
             {"file": "x.py", "kind": "content", "detail": "network use (line 2)"},
             {"file": "x.py", "kind": "content", "detail": "test weakening (line 2)"},
             {"file": "x.py", "kind": "content", "detail": "dynamic code or deserialisation (line 2)"},
-            {"file": "x.py", "kind": "novel", "detail": "a kind added to the tripwire later"},
         ]
         self.assertEqual(cruise_merge.blocking(reported), [])
+
+    def test_every_tripwire_kind_is_classified_on_purpose(self):
+        # A kind the tripwire emits must be either reported (judged by the Opus tripwire) or one the
+        # gate deliberately blocks; a new kind is caught here, and blocks until it is classified.
+        source = (HERE / "tripwire.py").read_text()
+        kinds = set(re.findall(r'"kind": "([a-z]+)"', source))
+        self.assertTrue(kinds)
+        deliberately_blocking = {"symlink", "submodule", "executable", "unparsed"}
+        self.assertEqual(kinds - set(cruise_merge.REPORTED_KINDS), deliberately_blocking)
+
+    def test_every_makefile_dependency_or_install_file_is_blocked(self):
+        # The Makefile's approval gate (ENGINEERING 2.4) treats "on main" as approved, so every file it
+        # guards must be one the gate never merges.
+        makefile = (HERE.parent / "Makefile").read_text()
+        globs = re.findall(r"':\(glob\)([^']+)'", makefile)
+        self.assertGreater(len(globs), 10)
+        for glob in globs:
+            path = glob.replace("*/", "backend/").replace("*", "x")
+            with self.subTest(glob):
+                self.assertTrue(cruise_merge.blocked_path(path), path)
 
     def test_reasons_never_quote_source_text(self):
         facts = good_facts()
@@ -209,7 +247,7 @@ class DecideTests(unittest.TestCase):
 
 
 class GitScanTests(unittest.TestCase):
-    """The gate's own git reads: unquoted NUL-separated paths, and the dynamic-call scan."""
+    """The gate's own git reads: unquoted NUL-separated paths."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -247,29 +285,6 @@ class GitScanTests(unittest.TestCase):
         changed = cruise_merge.git_z("diff", *cruise_merge.DIFF_OPTS, "--name-only", "-z", self.base, head)
         self.assertEqual(changed, ["docs/adr/0099-règles.md"])
         self.assertTrue(cruise_merge.blocked_path(changed[0]))
-
-    def test_dangerous_dynamic_calls_are_found_and_re_compile_is_not(self):
-        head = self.commit({
-            "b.py": "import re\nPAT = re.compile(r'x')\nQ = re.compile('abc')\nm = pattern.exec('s')\n",
-            "c.py": "z = 1\nexec(open('p.txt').read())\nm = __import__('o' + 's')\n",
-            "d.py": "f = getattr(os, 'sy' + 'stem')\ncode = compile(src, 'f', 'exec')\nb = __builtins__\n",
-            "e.js": "const cp = require('child_' + 'process')\n++n; eval(s)\nconst m = await import(name)\n",
-            "f.html": "<p>hi</p>\n<script>eval(location.hash)</script>\n",
-            "g.ts": "let x: Function\nconst y = new Function('return 1')\nwindow['fe' + 'tch'](u)\n",
-            "h.py": "lookup = getattr\nrun = ｅｘｅｃ\nf = op.attrgetter('system')\n",
-        })
-        names = ["b.py", "c.py", "d.py", "e.js", "f.html", "g.ts", "h.py"]
-        hits = cruise_merge.added_dynamic_code(self.base, head, names)
-        self.assertEqual(hits, [("c.py", 2), ("c.py", 3), ("d.py", 1), ("d.py", 2), ("d.py", 3),
-                                ("e.js", 1), ("e.js", 2), ("e.js", 3), ("f.html", 2), ("g.ts", 2), ("g.ts", 3),
-                                ("h.py", 1), ("h.py", 2), ("h.py", 3)])
-
-    def test_ordinary_python_is_not_flagged(self):
-        # Ruff-formatted multi-line imports, mapping access and vars(): not dynamic code in Python.
-        head = self.commit({
-            "i.py": "from a.b import (\n    c,\n)\nv = self[key]\nopts = vars(args)\nm = obj.exec_module\n",
-        })
-        self.assertEqual(cruise_merge.added_dynamic_code(self.base, head, ["i.py"]), [])
 
 
 class TokenFileTests(unittest.TestCase):

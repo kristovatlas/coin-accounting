@@ -101,17 +101,19 @@ It runs from a 10-minute check-in job in that Claude Code session. The job expir
 
 ## What merges automatically, and what comes to you
 
-**Merges automatically** (autopilot, ADR 0031), after a clean cruise review and green CI:
+**Merges automatically** (autopilot, ADR 0031), after a clean cruise review, an Opus tripwire with no flag of Medium or above, and green CI:
 - application code, including the security-critical modules (`api/`, the launcher, `storage/`, `rpc.py`, `config.py`) and the `tax/`, `doxx/` and `chain/` engines
-- tests, golden files, E2E specs and tool configuration (`conftest.py`, `vite.config.*`, …)
+- tests, golden files, E2E specs and build configuration (`vite.config.*`, …)
 - the living binding documents: `THREAT_MODEL.md`, `ENGINEERING.md`, `PLAN.md`, `DEPENDENCIES.md`
 - the milestone-closing PR
+- PRs outside a `/cruise` run: the review panel runs the gate itself
 
-The mechanical tripwire's flags are posted for the record. Only symlinks, submodules, executable bits and changes it can't parse block.
+The panel marks a commit it cleared with the commit status `review-panel`, and the gate refuses a commit without it. Every merge is listed in the run's tracking issue, or, outside a run, in the standing **"Autopilot merges"** issue. The mechanical tripwire's path, content and removed-line flags are posted for the record; symlinks, submodules, executable bits, changes it can't parse and any new kind of flag block.
 
 **Always comes to you,** whatever the mode:
-- dependency approvals, and any change to dependency manifests or lockfiles
+- dependency approvals, and any change to dependency manifests, lockfiles or install configuration (`uv.toml`, `.npmrc`, `.python-version`, …), in any directory
 - ADR-level decisions, ADRs, and `docs/architecture.md`
-- changes to the agents' own controls: `scripts/`, `.github/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`, the `Makefile`, `PROCESS_MODE`, this guide
+- changes to the agents' own controls: `scripts/`, `.github/`, the `Makefile`, `PROCESS_MODE`, this guide; agent instructions, skills and tool configuration in any directory (`.claude/`, `.codex/`, `AGENTS*.md`, `CLAUDE*.md`, `.mcp.json`); the test socket guard, every `conftest.py` and a `pytest.toml`
+- a change that weakens a control in a binding document (it needs an ADR)
 - a Critical security finding, or a committed secret or real user data, after round 2 (functional and High security P1s are fixed during the run)
 - any Opus tripwire flag of Medium or above, and anything else the gate refuses

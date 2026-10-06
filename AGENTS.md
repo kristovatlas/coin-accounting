@@ -45,7 +45,7 @@ If a request conflicts with these documents, stop and ask the human instead of w
 - **Cruise mode with autopilot** ([ADR 0030](docs/adr/0030-cruise-mode.md), [ADR 0031](docs/adr/0031-autopilot.md), guide [`docs/cruise-mode.md`](docs/cruise-mode.md)) is the one exception. While `PROCESS_MODE` on `main` is `cruise`, an agent working on the human's request:
   - opens ready (non-draft) PRs, starts the review panel on them itself, and merges every reviewed PR **only** by running `main`'s copy of `scripts/cruise_merge.py`
   - never merges any other way, and never reads, prints or copies the merge token
-  - sends to the human, as a draft, everything the gate refuses: dependency files, ADRs and the architecture baseline, and the agents' own controls (`scripts/`, `.github/`, `.claude/`, this file, the `Makefile`, the mode files). The same goes for a Critical security finding, a committed secret or real data, an Opus tripwire flag of Medium or above, and any ADR-level question.
+  - sends to the human, as a draft, everything the gate refuses (the full list is ADR 0031 §3): dependency, lock and install-config files, ADRs and the architecture baseline, and the agents' own controls (`scripts/`, `.github/`, agent instructions, skills and tool configuration in any directory, the `Makefile`, the mode files, the test socket guard and every `conftest.py`). The same goes for a Critical security finding, a committed secret or real data, an Opus tripwire flag of Medium or above, a change that weakens a control in a binding document, and any ADR-level question.
 
   With `PROCESS_MODE` set to `standard`, the rule above applies without exception.
 - End commit messages with a `Co-Authored-By` trailer for the agent.
@@ -58,7 +58,7 @@ If a request conflicts with these documents, stop and ask the human instead of w
 - Don't weaken a test to make it pass (anti-slop rules, ENGINEERING §3.5).
 
 ### Reviews
-- `/review-panel #N` runs the review panel in `.claude/skills/review-panel/SKILL.md` ([ADR 0020](docs/adr/0020-review-panel.md)). It reviews, fixes, files issues and runs the tripwire, then hands the PR on: to the gate in cruise mode, otherwise to the human. In cruise mode the agent starts it itself on every PR it opens, with the skill's cruise profile ([ADR 0030](docs/adr/0030-cruise-mode.md), [ADR 0031](docs/adr/0031-autopilot.md)); the human may still start it on any PR, with the standard profile.
+- `/review-panel #N` runs the review panel in `.claude/skills/review-panel/SKILL.md` ([ADR 0020](docs/adr/0020-review-panel.md)). It reviews, fixes, files issues and runs the tripwire, then hands the PR on: to the gate in cruise mode, otherwise to the human. In cruise mode the agent starts it itself on every PR it opens, with the skill's cruise profile, or the standard profile for a PR the gate would refuse anyway ([ADR 0030](docs/adr/0030-cruise-mode.md), [ADR 0031](docs/adr/0031-autopilot.md)); the human may still start it on any PR, with the standard profile.
 - When asked to run AI reviews, post each review as a PR comment.
 - Verify each finding before acting on it; reviewers can be wrong.
 - Afterwards, post a triage comment recording what was addressed, deferred or rejected, and why. Valid non-P1 findings of Low or higher become GitHub issues labelled `review-panel`; nits stay in the triage comment.

@@ -24,21 +24,24 @@ Option 2 (owner decision, 2026-10-05), named **autopilot**. It runs under `PROCE
 ### What changes
 
 1. **Agents start the review panel** on every PR they open. The owner no longer types `/review-panel`.
-2. **Every agent PR gets the cruise review profile** (ADR 0030 §1): two reviewers, or four for risky paths; at most two rounds; P1 means only a confirmed Critical/High finding, a broken or flaky test, a real leak, or wrong tax figures.
+2. **Every agent PR the gate can merge gets the cruise review profile** (ADR 0030 §1): two reviewers, or four for risky paths; at most two rounds; P1 means only a confirmed Critical/High finding, a broken or flaky test, a real leak, or wrong tax figures. An agent PR that touches a path in §3, which goes to the owner anyway, gets the standard profile, which is stricter. A PR the human starts the panel on also gets the standard profile.
 3. **The gate merges any reviewed PR from any branch of this repository**, except changes to these paths, which stay with the owner:
    - **Human decisions:**
-     - dependency manifests and lockfiles: `pyproject.toml`, `uv.lock`, `package.json`, `pnpm-lock.yaml`, `pnpm-lock.times.json`, `pnpm-workspace.yaml`, `.npmrc`, `.pnpmfile.*` (ENGINEERING §2.4: the owner approves the Socket verdict)
+     - dependency manifests, lockfiles and install configuration, in any directory: `pyproject.toml`, `uv.lock`, `uv.toml`, `package.json`, `pnpm-lock.yaml`, `pnpm-lock.times.json`, `pnpm-workspace.yaml`, `.npmrc`, `.pnpmfile.*`, `.python-version`, `.node-version`, `requirements*.txt`, `constraints*.txt` (ENGINEERING §2.4: the owner approves the Socket verdict). A gate test keeps this list in step with the Makefile's approval targets, which treat whatever is on `main` as approved.
      - ADRs (`docs/adr/`) and the architecture baseline (`docs/architecture.md`, hash-locked by ADR 0014)
    - **The agents' own controls,** so an agent can never loosen its own checks:
      - `scripts/` (the gate, the guard hook, the repository and lockfile checks, the toolchain lock)
      - `.github/` (CI)
-     - `.claude/` (skills and settings), `AGENTS.md`, `CLAUDE.md`, `.mcp.json`
+     - agent instructions, skills and tool configuration **in any directory**: `.claude/`, `.codex/` and similar tool directories, any `*agents*.md` or `*claude*.md` (including `AGENTS.override.md` and scoped files such as `backend/AGENTS.md`), any `SKILL.md`, `.mcp.json`
      - the `Makefile` (the install and approval targets)
      - `PROCESS_MODE`, `docs/cruise-mode.md`
-     - the test socket guard
-4. **Everything else merges automatically**, including the security-critical modules (`api/`, the launcher, `storage/`, `rpc.py`, `config.py`), the `tax/`, `doxx/` and `chain/` engines with their tests and golden files, the frontend, the E2E specs, tool configuration such as `conftest.py` or `vite.config.*`, and the living binding documents (`THREAT_MODEL.md`, `ENGINEERING.md`, `PLAN.md`, `DEPENDENCIES.md`).
-5. **The mechanical tripwire becomes informational.** Only structural flags block: symlinks, submodules, executable bits and changes it can't parse. Every other flag (paths, content such as "network use", "test weakening" or "dynamic code", removed lines) is posted for the record. The **Opus tripwire** still reviews the full change, and any flag it rates Medium or above sends the PR to the owner as a draft.
-6. **Still the owner's, whatever the path:**
+     - the test socket guard and what switches it on: `backend/tests/socket_guard.py`, `backend/tests/__init__.py`, every `conftest.py`, and a `pytest.toml` or `.pytest.toml`, which pytest would read before `pyproject.toml`
+4. **Everything else merges automatically**, including the security-critical modules (`api/`, the launcher, `storage/`, `rpc.py`, `config.py`), the `tax/`, `doxx/` and `chain/` engines with their tests and golden files, the frontend (SVG files included), the E2E specs, build configuration such as `vite.config.*`, and the living binding documents (`THREAT_MODEL.md`, `ENGINEERING.md`, `PLAN.md`, `DEPENDENCIES.md`). A change to a living binding document that **weakens a control** still needs an ADR and the owner (AGENTS.md); the panel treats one as a human item, and the gate can't tell, so this rests on the review (R-12).
+5. **The gate requires the panel's clearance.** The review panel sets a commit status `review-panel` = `success` on the exact SHA only after a clean round and an Opus tripwire with no flag of Medium or above. The gate refuses a commit without it. The owner's token can set that status too, so it doesn't stop a determined agent (R-9), but it stops a merge that no panel reviewed, from any branch.
+6. **The mechanical tripwire becomes informational** for its path, content, removed-line and deleted-file flags, which are posted for the record. Every other kind blocks: symlinks, submodules, executable bits, changes it can't parse, and any kind added later until it is classified on purpose (a gate test lists them). The gate's own dynamic-code scan is removed; the **Opus tripwire** reviews the full change, and any flag it rates Medium or above sends the PR to the owner as a draft.
+7. **The milestone-closing PR** of a `/cruise` run (THREAT_MODEL statuses, PLAN progress) merges through the gate like any other PR, with the cruise profile, unless it touches a path in §3.
+8. **PRs outside a `/cruise` run** follow the same path: the review panel runs the gate itself at its hand-off. Every merge the gate makes, in a run or not, is listed in a tracking issue: the run's, or the standing **"Autopilot merges"** issue.
+9. **Still the owner's, whatever the path:**
    - a Critical security finding, a committed secret or real user data (ADR 0030)
    - a question at the level of an ADR (ENGINEERING §4.1)
    - approving dependencies, which agents never do (AGENTS.md, unchanged)
@@ -46,12 +49,12 @@ Option 2 (owner decision, 2026-10-05), named **autopilot**. It runs under `PROCE
 
 ### What doesn't change
 
-- The gate's other conditions: the owner's PR at the exact reviewed SHA, containing the current `main`; CI green (`checks` and `tests` on Linux and macOS); classic branch protection; the merge token; the stop file.
+- The gate's other conditions: the owner's PR at the exact reviewed SHA, containing the current `main`; CI green (`checks` and `tests` on Linux and macOS); classic branch protection; the merge token; the stop file. Only text files of the listed types; ADR 0031 adds `.svg` and `.txt` to them.
 - Merging only through `main`'s copy of the gate, never `gh pr merge`.
 - The tests, lint, `make check` and the coverage floors, all enforced by CI on every PR.
 
 ### Consequences
 
 - Good: planned work lands without waiting on the owner; the owner's attention goes only to dependencies, ADR-level decisions, Critical findings, and changes to the agents' own controls.
-- Bad: **code in the security-critical modules and the tax engine now merges with AI review only.** A defect the reviewers and CI miss reaches `main` without a human look. That is accepted (THREAT_MODEL R-12). The owner sees every merge in the run's tracking issue, can revert any of them, and can switch back to `standard` at any time.
-- Neutral: the threat model's development-process threats (T-605, R-9, R-11) stay recorded, but the threat model's focus is the shipped app.
+- Bad: **code in the security-critical modules and the tax engine now merges with AI review only.** A defect the reviewers and CI miss reaches `main` without a human look. That is accepted (THREAT_MODEL R-12). The owner sees every merge in a tracking issue (§8), can revert any of them, and can switch back to `standard` at any time.
+- Neutral: the threat model's development-process threats (T-605, R-9, R-11) stay recorded, narrowed by R-12, but the threat model's focus is the shipped app.
