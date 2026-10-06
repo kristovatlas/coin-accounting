@@ -34,6 +34,7 @@ def call(  # noqa: PLR0913 - mirrors the parts of an HTTP request
     body: bytes = b"",
     json_body: Any = None,
     raw_headers: list[tuple[bytes, bytes]] | None = None,
+    chunks: list[bytes] | None = None,
 ) -> Reply:
     hdrs = [] if host is None else [(b"host", host.encode())]
     if json_body is not None:
@@ -56,14 +57,12 @@ def call(  # noqa: PLR0913 - mirrors the parts of an HTTP request
         "server": ("127.0.0.1", PORT),
     }
     sent: list[Message] = []
-    request_sent = False
+    pending = list(chunks) if chunks is not None else [body]
 
     async def receive() -> Message:
-        nonlocal request_sent
-        if not request_sent:
-            request_sent = True
-            return {"type": "http.request", "body": body, "more_body": False}
-        await asyncio.sleep(3600)
+        if pending:
+            chunk = pending.pop(0)
+            return {"type": "http.request", "body": chunk, "more_body": bool(pending)}
         return {"type": "http.disconnect"}
 
     async def send(message: Message) -> None:
