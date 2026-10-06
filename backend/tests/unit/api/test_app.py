@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -126,42 +127,30 @@ def test_every_response_has_the_security_headers(world: World, method: str, path
 
 
 def test_the_csp_is_the_strict_one_t104() -> None:
-    for directive in (
-        "default-src 'self'",
-        "script-src 'self'",
-        "connect-src 'self'",
-        "object-src 'none'",
-        "base-uri 'none'",
-        "form-action 'none'",
-        "frame-ancestors 'none'",
-    ):
-        assert directive in CSP
-    assert "unsafe-inline" not in CSP
-    assert "unsafe-eval" not in CSP
-
-
-def test_the_csp_is_exactly_the_threat_models_t104() -> None:
-    # Pinned in full, so a widened source (img-src *, style-src https:) fails here, not just a missing
-    # directive. Any change must update THREAT_MODEL T-104 too.
+    # Pinned in full and to THREAT_MODEL's T-104 text, so a widened source (img-src *, style-src https:)
+    # or a change to either side alone fails.
+    threat_model = (Path(__file__).parents[4] / "docs" / "THREAT_MODEL.md").read_text()
+    t104 = next(line for line in threat_model.splitlines() if line.startswith("| T-104 |"))
+    assert f"Strict CSP: `{CSP}`" in t104
     assert CSP == (
         "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
         "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     )
 
 
-def test_the_ui_cant_be_framed_t107(world: World) -> None:
-    headers = call(world.app, "GET", "/").headers
-    assert headers["x-frame-options"] == "DENY"
-    assert "frame-ancestors 'none'" in headers["content-security-policy"]
-
-
-def test_claiming_a_session_sets_no_cookie_t102(world: World) -> None:
-    reply = world.claim()
-    assert reply.status == 200
-    assert "set-cookie" not in reply.headers
-    status = call(world.app, "GET", "/api/status", headers=bearer(reply.json()["session"]))
-    assert status.status == 200
-    assert "set-cookie" not in status.headers
+def test_no_response_sets_a_cookie_t102(world: World) -> None:
+    claimed = world.claim()
+    assert claimed.status == 200
+    auth = bearer(claimed.json()["session"])
+    replies = [
+        claimed,
+        world.claim(),  # refused: already claimed
+        call(world.app, "GET", "/api/status", headers=auth),
+        call(world.app, "POST", "/api/quit", headers=auth, json_body={}),
+    ]
+    assert [r.status for r in replies] == [200, 409, 200, 202]
+    for reply in replies:
+        assert "set-cookie" not in reply.headers
 
 
 def test_there_are_no_docs_or_schema_pages_t106(world: World) -> None:

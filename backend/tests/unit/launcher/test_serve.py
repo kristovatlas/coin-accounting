@@ -336,7 +336,12 @@ def test_the_real_opener_passes_only_the_file_uri_t103(
         opened.append(url)
         return True
 
+    def no_other_way(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("open_in_browser must use webbrowser.open, so this test can stand in for it")
+
     monkeypatch.setattr("webbrowser.open", fake_open)
+    for name in ("open_new", "open_new_tab", "get"):
+        monkeypatch.setattr(f"webbrowser.{name}", no_other_way)  # never a real browser, even after a refactor
     path = tmp_path / f"{launcher.BOOTSTRAP_PREFIX}example.html"
     assert launcher.open_in_browser(path) is True
     assert opened == [path.as_uri()]
