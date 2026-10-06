@@ -68,7 +68,9 @@ DEFAULT_TOKEN_FILE = "~/.config/coin-accounting/cruise-merge-token"
 # Autopilot (ADR 0031): the gate refuses only what needs a human decision, and what controls the
 # agents themselves, so an agent can never loosen its own checks. Compared in lower case: macOS
 # checkouts are case-insensitive.
-BLOCKED_PREFIXES = (".github/", "scripts/", "docs/adr/")
+# e2e/harness/ holds the pinned-bitcoind check and the regtest node's P2P isolation, which the socket
+# guard can't see.
+BLOCKED_PREFIXES = (".github/", "scripts/", "docs/adr/", "e2e/harness/")
 BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md", "makefile", "docs/architecture.md",
                  # the test socket guard (ENGINEERING §3.2), and the package that would shadow it
                  "backend/tests/socket_guard.py", "backend/tests/__init__.py")
@@ -97,7 +99,10 @@ BLOCKED_NAME_PATTERNS = ("requirements*.txt", "constraints*.txt", ".pnpmfile.*",
                          # copied-in third-party code skips the dependency decision (ENGINEERING §2.4)
                          "*.min.*",
                          # agent instructions and skills, at any depth (AGENTS.override.md, backend/CLAUDE.md)
-                         "*agents*.md", "*claude*.md", "*gemini*.md", "skill.md", ".aider*")
+                         "*agent*.md", "*claude*.md", "*gemini*.md", "skill.md", ".aider*", "warp.md", "crush.md",
+                         "qwen.md",
+                         # a stub next to a module makes mypy check the stub instead of the real code
+                         "*.pyi")
 # Agent and editor tool configuration directories, at any depth (.vscode can hold MCP servers and tasks).
 BLOCKED_DIRS = (".claude", ".codex", ".agents", ".cursor", ".gemini", ".vscode", ".idea", ".windsurf",
                 ".clinerules", ".continue", ".roo", ".kiro", ".amazonq", ".devcontainer", ".zed", ".opencode",

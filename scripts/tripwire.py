@@ -78,7 +78,7 @@ ADDED_RULES = [
                                      r"\.codex|\.aws|/dev/mapper|/Volumes/)"),
     ("test weakening", r"(pytest\.mark\.(skip|xfail)|@skip|\.skip\(|\.only\(|pragma: no cover|noqa|"
                        r"type: ignore|--no-verify|fail-under|mutation|mypy:\s*(ignore-errors|disable-error-code)|"
-                       r"@ts-nocheck|@ts-ignore|eslint-disable|socket_guard)"),
+                       r"@ts-nocheck|@ts-ignore|eslint-disable|socket_guard|pytest_plugins|def pytest_\w+|hookimpl)"),
 ]
 REMOVED_RULES = [
     ("removed test or assertion", r"\b(assert|def test_|expect\(|it\(|test\(|pytest)"),
