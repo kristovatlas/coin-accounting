@@ -203,6 +203,22 @@ class CheckLockfilesTests(unittest.TestCase):
                 lock.write_text(good.replace(old, new, 1))
                 self.assertIn(message, self.errors())
 
+    def test_merge_keys_and_empty_packages_cannot_bypass_the_checks(self):
+        # PR #136 round 2: a merge key under importers/snapshots, or snapshots and importers with no
+        # packages at all, must not leave entries unchecked.
+        lock = self.repo / "pnpm-lock.yaml"
+        self.pnpm(times=PNPM_TIMES)
+        good = lock.read_text()
+        lock.write_text(good.replace("  react@19.3.0: {}\n", "  react@19.3.0:\n    <<: {dependencies: {x: 1.0.0}}\n", 1))
+        self.assertIn("unexpected line in a snapshot", self.errors())
+        lock.write_text(good.replace("  frontend:\n", "  frontend:\n    <<: {dependencies: {x: 1.0.0}}\n", 1))
+        self.assertIn("unexpected line in an importer", self.errors())
+        no_packages = good.split("\npackages:\n")[0] + "\nsnapshots:\n\n  react@19.3.0: {}\n"
+        lock.write_text(no_packages)
+        errors = self.errors()
+        self.assertIn("the snapshot react@19.3.0 has no entry in packages", errors)
+        self.assertIn("react@19.3.0 is referenced but has no entry in packages", errors)
+
     def test_escaped_or_double_quoted_scalars_fail(self):
         # PR #136 review: "li\\u006ek:../x" decodes to link:../x, which the raw-text source scan can't see.
         for spec in ('"li\\u006ek:../x"', '"file:../x.tgz"', "'a\\b'"):

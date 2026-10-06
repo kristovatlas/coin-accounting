@@ -40,7 +40,11 @@ Proposed: **1**. The owner decides between the options when approving PR #136.
   - `allowBuilds`: no install script runs (empty except the explicit `fsevents` deny above)
   - `blockExoticSubdeps`
   - the lockfile policy check: no explicit non-registry source, one sha512 integrity per package (the configured registry is pinned by the `.npmrc`/environment checks, #93 and #36)
-- **Residual risk:** the compiled Rust code isn't reviewed beyond its hashes and Socket's report. A compromised bundler could change the shipped bundle. The production-build E2E tests (ENGINEERING §3.1), run under the real CSP, and the review of the built output limit this. It is accepted as part of R-4.
+- **Residual risk:** the compiled code (Rust in `rolldown` and `lightningcss`; C++ in `fsevents`) isn't reviewed beyond its hashes and Socket's report. A compromised bundler could change the **shipped bundle**, which runs in the user's browser with the session token. That is a frontend supply-chain risk (THREAT_MODEL T-601, T-604, and the browser-side threats T-104 and T-106), not the backend in-process risk R-4 covers. It is limited by:
+  - the production-build E2E tests under the real CSP (ENGINEERING §3.1), which fail if the bundle reaches an external host (T-106)
+  - the reproducible-build comparison of the frontend bundle (ENGINEERING §2.7)
+
+  The bundle's content isn't otherwise reviewed. **The owner accepts this residual risk by accepting this ADR,** and it is recorded as a new accepted risk in THREAT_MODEL in the same PR that accepts the ADR.
 
 ### Consequences
 
