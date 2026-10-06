@@ -14,13 +14,15 @@ This file holds everything that happens before the web server starts:
 
 Then `serve` (§3, §4, §8.1):
 
-6. **Node checks** through `api.runtime` → `services/` → `chain/`, before anything listens. A node
-   problem means offline mode; the deferred storage policy (T-401) can still stop start-up here.
+6. **Node checks** through `api.runtime` → `services/` → `chain/`, with the dismount watchdog
+   (T-405) already running and before anything listens. A node problem means offline mode; the
+   deferred storage policy (T-401), or a volume lost meanwhile, can still stop start-up here.
 7. **Listen** on a socket bound to `127.0.0.1` with a port the OS picks (T-103), and run uvicorn
    in-process on it: no proxy headers, no `Server` header, no access log, no WebSockets.
-8. **Shutdown wiring:** SIGINT, SIGTERM, the dismount watchdog (T-405) and Quit all go to one
-   `Shutdown` coordinator, whose steps stop the server and the watchdog, remove the bootstrap file
-   and flush the logs. uvicorn's own signal handling is replaced, so a signal never skips them.
+8. **Shutdown wiring:** SIGINT, SIGTERM, the watchdog and Quit all go to one `Shutdown`
+   coordinator, whose steps stop the server (waiting for it, within the deadline) and the
+   watchdog, remove the bootstrap file, clear `<data>/tmp` and flush the logs. uvicorn's own signal
+   handling is replaced, so a signal never skips them; a second signal forces uvicorn's exit.
 9. **Launch:** write the bootstrap file (§4, T-110), delete it on claim or after 60 s, and open it
    in the default browser (or print its path with `--no-browser`, for the E2E harness).
 """
@@ -373,6 +375,22 @@ def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
         for path in launch_file:
             remove_file(path)
 
+    # The watchdog runs before the node checks (§8.1), so a volume lost while they run is noticed.
+    # Until the shutdown coordinator exists, what it reports is kept and refuses the start-up.
+    lost_lock = threading.Lock()
+    lost_early: list[str] = []
+    forward: list[Callable[[str], None]] = []
+
+    def on_lost(reason: str) -> None:
+        with lost_lock:
+            if not forward:
+                lost_early.append(reason)
+                return
+            request = forward[0]
+        request(reason)
+
+    watchdog = make_watchdog(data, on_lost)
+    watchdog.start()
     try:
         rt = build(
             port=port,
@@ -384,16 +402,22 @@ def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
         )
         # Only now, after the node checks and the storage policy (§8.1). From here a browser that is
         # quicker than uvicorn's start waits in the backlog instead of being refused.
+        with lost_lock:
+            forward.append(rt.shutdown.request)
+            lost = lost_early[0] if lost_early else watchdog.problem()
+        if lost is not None:
+            raise LaunchError(f"{lost}; nothing was started")
         sock.listen(LISTEN_BACKLOG)
     except runtime.StorageRefused as e:
+        watchdog.stop()
         sock.close()
         raise LaunchError(str(e)) from None
     except BaseException:
+        watchdog.stop()
         sock.close()
         raise
 
     server = make_server(rt.app)
-    watchdog = make_watchdog(data, rt.shutdown.request)
     server_stopped = threading.Event()
 
     def stop_server() -> None:
@@ -432,7 +456,6 @@ def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
             expiry = threading.Timer(max(0.0, rt.sessions.expires_at - time.monotonic()), remove_launch_file)
             expiry.daemon = True
             expiry.start()
-            watchdog.start()
             log.info("serving on 127.0.0.1:%d (%s)", port, "online" if rt.status.online else "offline mode")
             if prepared.open_browser:
                 threading.Thread(target=launch, name="launch-browser", daemon=True).start()

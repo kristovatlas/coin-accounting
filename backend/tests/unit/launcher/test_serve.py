@@ -269,14 +269,24 @@ def test_the_launch_file_is_removed_when_the_token_expires_t110(prepared: Prepar
 
 
 def test_the_launch_file_is_removed_when_start_up_fails_after_writing_it(prepared: Prepared) -> None:
-    class BrokenWatchdog(Watchdog):
-        def start(self) -> None:
-            raise RuntimeError("can't start the watchdog")
-
     h = Harness()
-    h.make_watchdog = BrokenWatchdog
-    with pytest.raises(RuntimeError, match="watchdog"):
-        h.serve(prepared)
+    written: list[bool] = []
+
+    def broken_announce(text: str) -> None:  # runs right after the launch file is written
+        written.append(bool(list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*"))))
+        raise RuntimeError("can't print the path")
+
+    h.data = prepared.data_dir.root
+    with pytest.raises(RuntimeError, match="print the path"):
+        launcher.serve(
+            prepared,
+            env={},
+            platform="linux",
+            build=h.build,
+            make_server=h.make_server,
+            announce=broken_announce,
+        )
+    assert written == [True]
     assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
     assert h.port is not None and not can_connect(h.port)
 
@@ -358,15 +368,72 @@ def test_the_temp_directory_is_cleared_at_shutdown(prepared: Prepared) -> None:
 
 
 def test_a_lost_volume_shuts_the_app_down_through_the_watchdog_t405(prepared: Prepared) -> None:
+    h = Harness()
+
     class LosingWatchdog(Watchdog):
         def problem(self) -> str | None:
-            return "the data directory is gone (volume dismounted?)"
+            # Lost once the server runs; until then the volume is fine.
+            if h.server is not None and h.server.started:
+                return "the data directory is gone (volume dismounted?)"
+            return None
 
-    h = Harness()
     h.make_watchdog = functools.partial(LosingWatchdog, interval=0.01)
     assert h.serve(prepared) == 0  # the fake server stops only when the shutdown steps stop it
     assert h.runtime is not None
     assert h.runtime.shutdown.reason == "the data directory is gone (volume dismounted?)"
+
+
+def test_a_volume_lost_during_the_node_checks_stops_start_up_t405(prepared: Prepared) -> None:
+    # The watchdog runs before the node checks (architecture §8.1). The volume goes missing while
+    # the (slow) checks run: nothing listens, no launch file is written, and start-up is refused.
+    h = Harness()
+    gone = threading.Event()
+    reported = threading.Event()
+
+    class Watching(Watchdog):
+        def problem(self) -> str | None:
+            return "the data directory is gone (volume dismounted?)" if gone.is_set() else None
+
+    def report_then(reason: str, on_lost: Any) -> None:
+        on_lost(reason)
+        reported.set()
+
+    def make(data: datadir.DataDir, on_lost: Callable[[str], None]) -> Watchdog:
+        return Watching(data, lambda reason: report_then(reason, on_lost), interval=0.01)
+
+    def slow_check(*args: Any, **kwargs: Any) -> NodeStatus:
+        gone.set()
+        assert reported.wait(WAIT)  # the watchdog noticed while the checks were still running
+        return ONLINE
+
+    h.make_watchdog = make
+    with pytest.raises(LaunchError, match="volume dismounted"):
+        launcher.serve(
+            prepared,
+            env={},
+            build=functools.partial(runtime.build, check=slow_check),
+            make_watchdog=h.make_watchdog,
+            announce=h.announced.append,
+        )
+    assert h.announced == []
+    assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
+
+
+def test_a_volume_found_lost_right_after_the_checks_stops_start_up(prepared: Prepared) -> None:
+    # Lost between two watchdog ticks: the synchronous check after the node checks catches it.
+    class LostNow(Watchdog):
+        def problem(self) -> str | None:
+            return "the data directory was replaced or remounted"
+
+    with pytest.raises(LaunchError, match="replaced or remounted"):
+        launcher.serve(
+            prepared,
+            env={},
+            build=functools.partial(runtime.build, check=lambda *a, **k: ONLINE),
+            make_watchdog=functools.partial(LostNow, interval=3600),
+            announce=lambda s: None,
+        )
+    assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
 
 
 def test_a_server_that_stops_by_itself_still_runs_the_shutdown_steps(prepared: Prepared) -> None:
