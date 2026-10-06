@@ -69,7 +69,7 @@ PANEL="$GIT_DIR_ABS/review-panel"; WT="$GIT_DIR_ABS/review-panel-wt"; umask 077
 }
 ```
 
-- **Stages:** `reviewing` → `validating` → `fixing` or `handing-off` → `handed-off`; `awaiting-human` when blocked.
+- **Stages:** `reviewing` → `validating` → `fixing` or `handing-off` → `handed-off`; `awaiting-human` when blocked; `cleared` for a `/cruise` run's slice the panel has cleared for the run's gate.
 - **Reviewer statuses:** `not-started`, `running`, `done`, `waiting-limit`, `failed`, `skipped-user`.
 
 ## Each invocation: one tick
@@ -425,7 +425,7 @@ Every other PR gets the standard profile: any PR the human runs `/review-panel` 
       3. Rewrite the diff file as the full `merge_base..head_sha` diff.
       4. Go to `handing-off`, where CI, the mechanical tripwire and the Opus tripwire run on that commit.
     - Only non-P1 findings become issues.
-- **A Critical security finding ends the cruise path,** in **any** round (not only after round 2), and so does any committed secret or real user data, whatever its rating: a fix commit can't take it out of history. At once:
+- **A Critical security finding ends the cruise path,** in **any** round (not only after round 2), and so does any committed secret or real user data, whatever its rating and whatever found it (a reviewer, the Opus tripwire, or the secret scan when posting): a fix commit can't take it out of history. At once:
   - add the label `autopilot-blocked` to the PR (create it if needed). The gate refuses any PR that carries it, so the block survives a lost state file or a new session. No agent ever removes it; only the human does.
   - record it in the state's `no_clearance` (a general description), and never set the `review-panel` status for this PR afterwards.
 
@@ -446,9 +446,9 @@ Every other PR gets the standard profile: any PR the human runs `/review-panel` 
   - **Before the tripwires, rewrite the diff file as the full `merge_base..final head_sha` diff.** The later rounds' diff files show only the fixes, and the Opus tripwire must see the whole change.
   - The mechanical tripwire and the Opus tripwire then run on the final SHA.
   - **Changes to the standard hand-off:**
-    - step 1 waits for all four `checks (…)` and `tests (…)` jobs, not only `checks`; its failure branches stay as they are.
+    - step 1 waits for all four `checks (…)` and `tests (…)` jobs, and for every other check-run on the head (Socket can land minutes later) to complete, since the gate refuses while any runs; its failure branches stay as they are.
     - step 7, on a PR the panel clears, is a short **record comment** (marker `…:record`) posted before the status is set: the SHA and compare link, the mechanical tripwire output verbatim, and the Opus tripwire's rated flags. A PR that goes to the human gets the full hand-off instead.
-    - step 8 keeps the cron job: the panel stays in `handing-off` until the gate exits 0 or 1. For a `/cruise` run's slice, the panel stops at clearance and deletes its cron job; the run owns Refresh and the gate.
+    - step 8 keeps the cron job: the panel stays in `handing-off` until the gate exits 0 or 1. For a `/cruise` run's slice, the panel stops at clearance in the stage `cleared` (no cron job; step 8's cron rule doesn't apply to it), and the run owns Refresh and the gate. A Refresh that ends in `fixing` puts the slice back in the run's step 3, with the panel's cron job restored.
   - **The human gets the PR as a draft instead** when `no_clearance` is set or the PR carries `autopilot-blocked`, when the panel has a human item open or `standing_items` isn't empty, or when the Opus tripwire raised a flag of Medium or above, or any "binding-document control", "third-party code" or "check suppression" flag. Post the standard hand-off, set `handed-off`, delete the cron job, and notify.
   - **Otherwise clear the commit for the gate:** set the commit status `review-panel` on the final SHA (`gh api -X POST repos/{owner}/{repo}/statuses/<sha> -f state=success -f context=review-panel -f description="cleared: round R; Opus tripwire below Medium"`). Never set it in any other case, except in **Refresh** below. The gate refuses a commit without it.
   - **Then the gate.** For a `/cruise` run's slice, the run takes over at its stage `slice` step 4. For any other PR, the panel runs the gate itself, exactly as the `/cruise` skill's Rules describe (three separate calls, `main`'s copy at `<git common dir>/cruise/gate.py`, written out literally; `--dry-run` first the very first time this repository's gate is used, recorded repository-wide by the file `$PANEL/gate-dry-run-done`):
@@ -456,12 +456,12 @@ Every other PR gets the standard profile: any PR the human runs `/review-panel` 
     - **Exit 0 (merged):** add the merge (PR, SHA, merge commit) to "Autopilot merges", through "Posting", and set `merge_recorded`. Then run **After the merge**. **After the merge** never cleans up while `merge_recorded` is false on an autopilot PR: it posts the record first, and retries on the next tick if posting fails.
     - **Exit 1 (refused):** convert the PR to a draft (`gh api graphql` with `convertPullRequestToDraft`), post the standard hand-off with the gate's reasons, set `handed-off`, delete the cron job, and notify.
     - **Exit 2 (couldn't check):** count it in the state's `gate_exit2`, and try again on the next tick. At 2, **withdraw the clearance** (below), convert the PR to a draft, go to `awaiting-human` (`blocker`) and notify.
-  - **Withdrawing a clearance.** Whenever a PR whose head the panel cleared leaves the cruise path without merging (the human's own `/review-panel`, exit 2 twice, the mode leaving `cruise`, a later human item), post `review-panel` = `failure` on that head (`-f description="withdrawn: <reason>"`), so no later gate call can merge it. The gate reads the owner's newest status.
+  - **Withdrawing a clearance.** Whenever a PR whose head the panel cleared is converted to a draft or handed to the human, **for any reason** (gate exit 1, exit 2 twice, a Refresh conflict or hand-off, the human's own `/review-panel`, the mode leaving `cruise`, a later human item, `/cruise stop`), post `review-panel` = `failure` on that head (`-f description="withdrawn: <reason>"`) first, so no later gate call can merge it. The gate reads the owner's newest status. An agent never marks a PR it handed to the human as ready again; only the human does.
 - **Refresh** (when `main` moved after the panel cleared the PR; used by the `/cruise` run too). No new review round:
   1. In `$WT/pr<N>-fix`, reset to `head_sha` and merge `origin/main`. If the merge has conflicts, the PR goes to the human as a draft.
   2. Record `pushed_sha`, then push. Set `head_sha` to the new commit and `merge_base` to the new merge base, then clear `pushed_sha`, so the pin check doesn't start a round.
   3. Rewrite the diff file as the full `merge_base..head_sha` diff.
   4. Wait for all four CI jobs on the new head.
   5. Run the mechanical tripwire and the Opus tripwire again on the new head.
-  6. The PR goes to the human as a draft if any of the four CI jobs didn't succeed (or to `fixing` when the PR caused it), if `--list-blocked` now prints a path or exits non-zero, if `no_clearance` is set, the PR carries `autopilot-blocked` or a human item is open, or if the Opus tripwire raised any flag that sends a PR to the human (above). Otherwise set the `review-panel` status on the new head, and run the gate.
+  6. The PR goes to the human as a draft if any of the four CI jobs didn't succeed (or to `fixing` when the PR caused it), if `--list-blocked` now prints a path or exits non-zero, if `no_clearance` is set, the PR carries `autopilot-blocked`, a human item is open or `standing_items` isn't empty, or if the Opus tripwire raised any flag that sends a PR to the human (above). Otherwise post a new **record comment** for the new head (as in the hand-off), then set the `review-panel` status on it, and run the gate.
 - **The profile is set when the panel's state is created,** and changes only to the standard profile (above). If `PROCESS_MODE` on `main` stops being `cruise` while a cruise-started panel is running, the panel stops reviewing, sets no `review-panel` status and withdraws any it had set; the PR goes to the human as a draft (through the run, which is stopping, when it is a slice).

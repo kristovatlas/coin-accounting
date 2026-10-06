@@ -190,6 +190,10 @@ class DecideTests(unittest.TestCase):
             "a chain module renamed away": lambda f: f["deleted_files"].append("backend/coinacct/chain/scan.py"),
             "the permanent block label": lambda f: f["pr"].update(labels=[{"name": "autopilot-blocked"}]),
             "socket config": lambda f: f["changed_files"].append("socket.yml"),
+            "an npm lockfile": lambda f: f["changed_files"].append("frontend/package-lock.json"),
+            "an npm shrinkwrap": lambda f: f["changed_files"].append("e2e/npm-shrinkwrap.json"),
+            "a nested pyproject": lambda f: f["changed_files"].append("backend/coinacct/pyproject.toml"),
+            "an edit to .gitignore": lambda f: f["changed_files"].append(".gitignore"),
             "the regtest harness": lambda f: f["changed_files"].append("e2e/harness/regtest.py"),
             "a type stub": lambda f: f["changed_files"].append("backend/coinacct/rpc.pyi"),
             "nested AGENT.md": lambda f: f["changed_files"].append("frontend/AGENT.md"),
@@ -310,9 +314,13 @@ class DecideTests(unittest.TestCase):
         globs = re.findall(r"':\(glob\)([^']+)'", makefile)
         self.assertGreater(len(globs), 10)
         for glob in globs:
-            path = glob.replace("*/", "backend/").replace("*", "x")
-            with self.subTest(glob):
-                self.assertTrue(cruise_merge.blocked_path(path), path)
+            name = glob.split("/")[-1].replace("*", "x")
+            # Nested, so the top-level allowlist can't be what blocks it: the name rules must.
+            for path in (f"backend/coinacct/{name}", f"frontend/{name}") if "/" not in glob.strip("*/") else (
+                glob.replace("*", "x"),
+            ):
+                with self.subTest(glob=glob, path=path):
+                    self.assertTrue(cruise_merge.blocked_path(path), path)
 
     def test_reasons_never_quote_source_text(self):
         facts = good_facts()

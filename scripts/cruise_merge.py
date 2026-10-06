@@ -80,6 +80,7 @@ BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md", "makefile", "docs/archit
 # precedence over pyproject.toml for a subtree: the pytest files that switch the socket guard on or
 # could skip it, and the lint, type-check and coverage settings (a ruff.toml beats pyproject.toml).
 BLOCKED_NAMES = ("pyproject.toml", "uv.lock", "uv.toml", "package.json", "pnpm-lock.yaml", "pnpm-lock.times.json",
+                 "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "bun.lock",
                  "pnpm-workspace.yaml", ".npmrc", ".python-version", ".node-version",
                  "conftest.py", "pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg",
                  "ruff.toml", ".ruff.toml", "mypy.ini", ".mypy.ini", ".coveragerc",
@@ -147,7 +148,7 @@ def shadows_a_tool(parts: list[str]) -> bool:
 
 
 def blocked_path(path: str) -> bool:
-    low = path.lower()
+    low = path.casefold()
     parts = low.split("/")
     name = parts[-1]
     return (
@@ -255,12 +256,12 @@ def decide(facts: dict) -> list[str]:
     reasons.extend(
         f"file deleted or renamed in a floored engine: {p}"
         for p in facts["deleted_files"]
-        if p.lower().startswith(FLOORED_DIRS)
+        if p.casefold().startswith(FLOORED_DIRS)
     )
     for p in facts["changed_files"]:
         if blocked_path(p):
             reasons.append(f"blocked path changed: {p}")
-        elif not p.lower().endswith(TEXT_SUFFIXES):
+        elif not p.casefold().endswith(TEXT_SUFFIXES):
             reasons.append(f"file type the gate doesn't scan: {p}")
     if facts["tripwire"] is None:
         reasons.append("the tripwire did not run")
@@ -427,9 +428,9 @@ def owner_review_status(statuses: list, owner: str) -> str | None:
 def refused_paths(changed: list[str], binary: list[str], deleted: list[str]) -> list[str]:
     """Every changed path the gate refuses on its own: blocked, binary, an unscanned type, or a deletion
     in a floored engine."""
-    out = [p for p in changed if blocked_path(p) or not p.lower().endswith(TEXT_SUFFIXES)]
+    out = [p for p in changed if blocked_path(p) or not p.casefold().endswith(TEXT_SUFFIXES)]
     out += [p for p in binary if p not in out]
-    out += [p for p in deleted if p.lower().startswith(FLOORED_DIRS) and p not in out]
+    out += [p for p in deleted if p.casefold().startswith(FLOORED_DIRS) and p not in out]
     return out
 
 

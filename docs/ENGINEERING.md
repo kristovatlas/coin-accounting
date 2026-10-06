@@ -1,6 +1,6 @@
 # Engineering Practices — Coin Accounting
 
-> **Binding once approved.** From the first line of code, these practices apply to every contributor, human or AI agent. Changing them requires a PR that edits this file and gets human approval. A change that weakens a control also needs an ADR and an update to [`THREAT_MODEL.md`](THREAT_MODEL.md).
+> **Binding once approved.** From the first line of code, these practices apply to every contributor, human or AI agent. Changing them requires a PR that edits this file and gets human approval; under cruise mode with autopilot ([ADR 0031](adr/0031-autopilot.md)), a change that keeps every control merges after the AI review panel instead. A change that weakens a control always needs an ADR, the human's approval and an update to [`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 | | |
 |---|---|
@@ -249,7 +249,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
 7. **Duplicate another test** without adding a distinct case.
 8. **Have unclear names.** Names must state the behaviour and, where relevant, the threat or rule ID in the form `t508`, e.g. `test_late_identification_is_flagged_not_overridden_t508`.
 
-**Test audits:** at each milestone close, and at least monthly while coding is active, a test-audit pass reviews the suite against these rules plus the mutation report. It deletes or strengthens weak tests, and its findings go into the milestone PR. An AI reviewer may do a first pass; a human approves the result.
+**Test audits:** at each milestone close, and at least monthly while coding is active, a test-audit pass reviews the suite against these rules plus the mutation report. It deletes or strengthens weak tests, and its findings go into the milestone PR. An AI reviewer may do a first pass; a human approves the result (under autopilot, a milestone-closing PR carrying the audit goes to the human, ADR 0031).
 
 ## 4. Design records
 

@@ -61,7 +61,8 @@ Shell variables don't survive between calls, so every call sets these again. `$C
   "gate_path": "/abs/path/.git/cruise/gate.py", "gate_dry_run_done": false,
   "stage": "slice|closing|done|stopped|awaiting-human",
   "slices": [{"id": 1, "title": "…", "depends_on": [], "branch": "cruise/m0.3-1-…", "pr": null,
-              "status": "todo|building|reviewing|merged|handed-to-human|blocked", "gate_exit2": 0}],
+              "status": "todo|building|reviewing|merged|handed-to-human|blocked", "gate_exit2": 0,
+              "merge_recorded": false}],
   "closing_pr": null, "decisions": [], "awaiting_reason": null
 }
 ```
@@ -116,11 +117,11 @@ Take the first slice whose dependencies are `merged` and whose status is `todo`,
 3. **Review** it with the review panel's **cruise profile**: follow `.claude/skills/review-panel/SKILL.md` inline for this PR, with its state file.
    - **If the slice's panel stops in `awaiting-human`** (a blocker, reviewer failures, or a P1 that needs a decision), don't wait on it: convert the PR to a draft, post the panel's reason, mark the slice `handed-to-human` (or `blocked` for an ADR-level question), notify, and take independent slices.
 4. **When the panel reaches the hand-off** (clean round, CI green, mechanical tripwire and Opus tripwire done):
-   - **The panel decides whether the PR goes to the human** (review-panel skill, cruise profile, Hand-off): a Critical finding, a committed secret or real data in any round, an open human item, or an Opus tripwire flag that sends a PR to the human. Decide from the panel's state, not from whether a status was ever set: run the gate only when the panel is in `handing-off` on the cruise profile and cleared the current head. Otherwise mark the slice `handed-to-human` and don't run the gate.
+   - **The panel decides whether the PR goes to the human** (review-panel skill, cruise profile, Hand-off): a Critical finding, a committed secret or real data in any round, an open human item, or an Opus tripwire flag that sends a PR to the human. Decide from the panel's state, not from whether a status was ever set: run the gate only when the panel is in `cleared` on the cruise profile for the current head. Otherwise mark the slice `handed-to-human` and don't run the gate.
    - **If `main` moved since the PR's last CI run** (the head doesn't contain `origin/main`), run the review panel's **Refresh** (cruise profile): it merges `origin/main` in, waits for CI, runs both tripwires again and sets the `review-panel` status on the new head only if they pass, or hands the PR to the human.
    - **Otherwise run the gate** on the head SHA (Rules):
      - **Exit 0 (merged):** add the merge to the tracking issue first, then mark the slice `merged` (with `merge_recorded`); if posting fails, mark it `merged` without `merge_recorded`, and reconciliation posts the record on a later tick before anything else. Then run the review panel's **After the merge** routine for the PR: it deletes the branch only at its final SHA and with no dependent PR, and cleans up the worktrees and files.
-     - **Exit 1 (refused):** convert the PR to a draft, post the standard hand-off with the gate's reasons, and mark the slice `handed-to-human`.
+     - **Exit 1 (refused):** withdraw the clearance (review-panel skill, "Withdrawing a clearance"), convert the PR to a draft, post the standard hand-off with the gate's reasons, and mark the slice `handed-to-human`. The same withdrawal comes first whenever a cleared slice goes to the human for any other reason (exit 2 twice, its panel stopping in `awaiting-human`).
      - **Exit 2 (couldn't check):** increment the slice's `gate_exit2`, and try again on the next tick. At 2, go to `awaiting-human`.
 5. **If later slices depend on a `handed-to-human` slice,** they wait; take independent slices meanwhile. If nothing is left to take, go to `awaiting-human` (reason: `merges`) and notify.
 6. **When every slice is `merged`,** go to `closing`.
@@ -134,7 +135,7 @@ Design questions below the ADR bar may be decided during the run. Record each in
    - one THREAT_MODEL changelog row, and an ENGINEERING row if needed
    - PLAN progress
    - DEPENDENCIES, if changed
-2. Review and merge it exactly like a slice (stage `slice`, steps 3 and 4): the review panel's cruise profile, then the gate (ADR 0031 §7). If it touches a path the gate refuses, it goes to the human as a draft instead. Stay in `closing` until it is merged or handed to the human.
+2. Review and merge it exactly like a slice (stage `slice`, steps 3 and 4): the review panel's cruise profile, then the gate (ADR 0031 §7). If it touches a path the gate refuses, it goes to the human as a draft instead. **If it carries the milestone's test-audit results** (ENGINEERING §3.5: "a human approves the result"), it also goes to the human as a draft, so the human approves the audit. Stay in `closing` until it is merged or handed to the human.
 3. Post a run summary in the tracking issue:
    - the merges
    - the PRs handed to the human, including the closing PR if it was
@@ -158,7 +159,7 @@ If there's no run state (for example, the mode isn't `cruise` on the very first 
 2. Delete the cron job.
 3. Post the run summary to the tracking issue.
 4. Notify.
-5. Convert every unmerged slice PR that is still ready to a draft (it now needs the human's review under the standard process), and list them in the tracking issue.
+5. Convert every unmerged slice PR that is still ready to a draft, withdrawing any clearance on it first (it now needs the human's review under the standard process), and list them in the tracking issue.
 6. Set `stopped`. A stopped run doesn't resume; start a new one with `/cruise <scope>`.
 
 Open PRs stay open, and the human decides about them.
