@@ -43,7 +43,7 @@ The app keeps **no chain index of its own**. Bitcoin Core's built-in indexes ans
 - **RPC access:**
   - A dedicated `rpcauth` user, restricted in Core by `rpcwhitelist=<user>:<methods>` to read-only methods. The app keeps its own allowlist too, as a second layer. The docs recommend a **generic username** (e.g. `ro-client`): see the canary note below.
   - Loopback only.
-  - **Canary:** at startup the app calls a harmless method that is *not* whitelisted (`uptime`). If the call succeeds, the server-side whitelist is missing, and the app refuses to run. Core logs every refused call to `debug.log` as a warning naming the RPC user, so this leaves a usage trace on the node (THREAT_MODEL T-209).
+  - **Canary:** at startup the app calls a harmless method that is *not* whitelisted (`uptime`). If the call succeeds, the server-side whitelist is missing, and the app disables all chain RPC and starts in offline mode (ADR 0004). Core logs every refused call to `debug.log` as a warning naming the RPC user, so this leaves a usage trace on the node (THREAT_MODEL T-209).
   - JSON-RPC request `id`s are plain counters, since `debug=rpc` logs them.
   - The app never uses the node wallet or the REST interface.
   - Parallel calls are capped below `rpcthreads`/`rpcworkqueue` (16/64 by default).
