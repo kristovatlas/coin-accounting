@@ -17,6 +17,7 @@ import json
 import subprocess
 import tempfile
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -48,10 +49,18 @@ def publish_time(command: list[str], name: str, version: str) -> str:
                              f"(exit {done.returncode}):\n{done.stderr.strip()[-2000:]}")
         out_file.seek(0)
         out = out_file.read().decode()
-    times = json.loads(out)
-    if not isinstance(times, dict) or not isinstance(times.get(version), str):
-        raise ValueError(f"the registry reported no publish time for {name}@{version}")
-    return times[version]
+    try:
+        times = json.loads(out)
+    except json.JSONDecodeError:
+        raise SystemExit(f"npm_publish_times: the lookup of {name}@{version} returned no JSON") from None
+    published = times.get(version) if isinstance(times, dict) else None
+    if not isinstance(published, str):
+        raise SystemExit(f"npm_publish_times: the registry reported no publish time for {name}@{version}")
+    try:
+        datetime.fromisoformat(published.replace("Z", "+00:00"))
+    except ValueError:
+        raise SystemExit(f"npm_publish_times: {name}@{version} has a malformed publish time") from None
+    return published
 
 
 def main(argv: list[str]) -> int:
@@ -59,7 +68,12 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     lockfile, times_file, command = Path(argv[0]), Path(argv[1]), argv[3:]
-    old = json.loads(times_file.read_text()) if times_file.exists() else {}
+    try:
+        old = json.loads(times_file.read_text()) if times_file.exists() else {}
+    except json.JSONDecodeError:
+        raise SystemExit(f"npm_publish_times: {times_file} is not valid JSON") from None
+    if not isinstance(old, dict):
+        raise SystemExit(f"npm_publish_times: {times_file} is not a JSON object")
     new = {}
     for name, version in packages(lockfile):
         key = f"{name}@{version}"

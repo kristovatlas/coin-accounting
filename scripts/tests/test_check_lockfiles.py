@@ -182,6 +182,47 @@ class CheckLockfilesTests(unittest.TestCase):
             "lockfileVersion: '9.0'\n\nsnapshots:\n\n  react@19.3.0:\n" + RES)
         self.assertIn("a resolution outside the packages section", self.errors())
 
+    def test_a_flow_style_section_cannot_hide_packages_or_settings(self):
+        # PR #136 review: `packages: {...}` left the package list empty, so no check ran at all.
+        evil = "{'evil@1.0.0': {resolution: {integrity: sha1-" + "A" * 27 + "=}}}"
+        for key, value in (("packages", evil), ("settings", "{autoInstallPeers: false}"),
+                           ("importers", "{}"), ("snapshots", "{}")):
+            with self.subTest(key=key):
+                (self.repo / "pnpm-lock.yaml").write_text(f"lockfileVersion: '9.0'\n\n{key}: {value}\n")
+                self.assertIn(f"the {key} section must be written as a block", self.errors())
+
+    def test_a_re_indented_packages_section_cannot_hide_entries(self):
+        # PR #136 review: package keys at 4 spaces (fields at 6) were never recorded.
+        body = "\n    evil@1.0.0:\n      resolution: {integrity: sha1-" + "A" * 27 + "=}\n"
+        (self.repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n\npackages:\n" + body)
+        self.assertIn("unexpected line in a package entry", self.errors())
+
+    def test_only_known_package_fields_are_allowed(self):
+        # `name:`/`version:` could make pnpm fetch something other than the key the times file checks.
+        for bad in ("    name: evil\n", "    version: 0.0.1\n", "    tarball: x\n", "    id: x\n",
+                    "    hasBin: {a: 1}\n", "    deprecated: |\n", "    peerDependencies: {a: 1}\n",
+                    "     engines: {node: '>=20'}\n", "      stray: 1\n"):
+            with self.subTest(bad=bad):
+                self.pnpm("\n  x@1.0.0:\n" + RES + bad, times={**PNPM_TIMES, "x@1.0.0": OLD})
+                self.assertIn("unexpected line in a package entry" if "stray" in bad or "     engines" in bad
+                              or "name" in bad or "version" in bad or "tarball" in bad or "id:" in bad
+                              else "must be", self.errors())
+
+    def test_peer_dependency_blocks_and_plain_fields_pass(self):
+        extra = ("\n  x@1.0.0:\n" + RES + "    hasBin: true\n    deprecated: use y instead\n"
+                 "    os: [linux]\n    cpu: [x64]\n    libc: [glibc]\n"
+                 "    peerDependencies:\n      react: ^19.0.0\n      '@types/node': '*'\n"
+                 "    peerDependenciesMeta:\n      '@types/node':\n        optional: true\n")
+        self.pnpm(extra, times={**PNPM_TIMES, "x@1.0.0": OLD})
+        self.assertEqual(check_lockfiles.check(self.repo, NOW), [])
+
+    def test_the_committed_lockfile_passes(self):
+        # The real pnpm 12 output must keep passing the stricter read (fails if the check is too strict).
+        repo = HERE.parent
+        if not (repo / "pnpm-lock.yaml").exists():
+            self.skipTest("no pnpm-lock.yaml in this checkout")
+        self.assertEqual([e for e in check_lockfiles.check_pnpm_lock(repo, NOW) if "less than 7 days" not in e], [])
+
     def test_a_duplicate_package_entry_fails(self):
         self.pnpm("\n  react@19.3.0:\n" + RES, times=PNPM_TIMES)
         self.assertIn("react@19.3.0 appears twice", self.errors())

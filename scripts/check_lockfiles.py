@@ -76,6 +76,14 @@ PNPM_TOP_KEYS = {"lockfileVersion", "settings", "importers", "packages", "snapsh
 PNPM_SETTINGS = {"  autoInstallPeers: true", "  excludeLinksFromLockfile: false"}
 PNPM_PACKAGE = re.compile(r"^  '?((?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*)@([0-9][0-9A-Za-z.+-]*)'?:$")
 PNPM_RESOLUTION = re.compile(r"^    resolution: \{integrity: sha512-[A-Za-z0-9+/]{86}==\}$")
+# Inside `packages`, every line has one of these shapes, exactly as pnpm 12 writes registry packages.
+# Anything else (other indentation, other fields such as `name:`/`version:`/`tarball:`, flow-style
+# collections where pnpm writes block style) fails closed, so no entry can be hidden from the check.
+PNPM_FIELD = re.compile(r"^    (resolution|engines|os|cpu|libc|hasBin|deprecated|peerDependencies|peerDependenciesMeta):"
+                        r"(?: (.*))?$")
+PNPM_FLOW_FIELDS = {"resolution", "engines", "os", "cpu", "libc"}  # pnpm writes these as one-line flow values
+PNPM_PEER = re.compile(r"^      '?(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*'?:(?: [^{\[].*)?$")
+PNPM_PEER_META = re.compile(r"^        optional: (?:true|false)$")
 # Anything that names a source other than the default registry. pnpm writes no URL at all for it.
 PNPM_FOREIGN = re.compile(r"://|\b(?:link|file|git|github|gitlab|bitbucket|workspace|catalog|npm|portal|patch):"
                           r"|\btarball\b|\bdirectory\b|\btype: |\brepo: |\bcommit: ")
@@ -204,6 +212,7 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
     section = None
     packages: dict[str, int] = {}  # "name@version" -> resolution lines seen
     current = None
+    field = None  # the open four-space field of the current package entry
     for n, line in enumerate(lines, 1):
         if not line:
             continue
@@ -211,7 +220,10 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
             key = line.split(":", 1)[0]
             if key not in PNPM_TOP_KEYS:
                 errors.append(f"{PNPM_LOCK}:{n}: top-level key {key!r} is not allowed")
-            section, current = key, None
+            elif n != 1 and line != f"{key}:":
+                # e.g. `packages: {...}`: a flow-style section would hide every entry from the check
+                errors.append(f"{PNPM_LOCK}:{n}: the {key} section must be written as a block (`{key}:` alone)")
+            section, current, field = key, None, None
             continue
         if section == "settings" and line not in PNPM_SETTINGS:
             errors.append(f"{PNPM_LOCK}:{n}: unexpected setting")
@@ -223,17 +235,39 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
             match = PNPM_PACKAGE.match(line)
             if match is None:
                 errors.append(f"{PNPM_LOCK}:{n}: unexpected package entry")
-                current = None
+                current, field = None, None
                 continue
-            current = f"{match.group(1)}@{match.group(2)}"
+            current, field = f"{match.group(1)}@{match.group(2)}", None
             if current in packages:
                 errors.append(f"{PNPM_LOCK}:{n}: {current} appears twice")
             packages[current] = 0
-        elif line.startswith("    resolution:"):
-            if current is None or not PNPM_RESOLUTION.match(line):
-                errors.append(f"{PNPM_LOCK}:{n}: a resolution must be exactly {{integrity: sha512-...}}")
-            elif current is not None:
-                packages[current] += 1
+        elif not line.startswith("      "):
+            match = PNPM_FIELD.match(line)
+            if current is None or match is None:
+                errors.append(f"{PNPM_LOCK}:{n}: unexpected line in a package entry (only "
+                              "resolution, engines, os, cpu, libc, hasBin, deprecated and peer dependencies)")
+                field = None
+                continue
+            field, value = match.group(1), match.group(2) or ""
+            if field == "resolution":
+                if PNPM_RESOLUTION.match(line):
+                    packages[current] += 1
+                else:
+                    errors.append(f"{PNPM_LOCK}:{n}: a resolution must be exactly {{integrity: sha512-...}}")
+            elif field in PNPM_FLOW_FIELDS:
+                if not (value.startswith(("{", "[")) and value.endswith(("}", "]"))):
+                    errors.append(f"{PNPM_LOCK}:{n}: {field} must be a one-line value")
+            elif field.startswith("peerDependencies"):
+                if value:
+                    errors.append(f"{PNPM_LOCK}:{n}: {field} must be written as a block")
+            elif not value or value.startswith(("{", "[", "|", ">")):
+                errors.append(f"{PNPM_LOCK}:{n}: {field} must be a plain one-line value")
+        elif field in ("peerDependencies", "peerDependenciesMeta") and PNPM_PEER.match(line):
+            pass
+        elif field == "peerDependenciesMeta" and PNPM_PEER_META.match(line):
+            pass
+        else:
+            errors.append(f"{PNPM_LOCK}:{n}: unexpected line in a package entry")
     for pkg, count in packages.items():
         if count != 1:
             errors.append(f"{PNPM_LOCK}: {pkg} must have exactly one registry resolution")
