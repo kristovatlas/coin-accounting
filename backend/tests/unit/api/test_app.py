@@ -122,6 +122,7 @@ def test_every_response_has_the_security_headers(world: World, method: str, path
     assert headers["x-content-type-options"] == "nosniff"
     assert headers["cross-origin-opener-policy"] == "same-origin"
     assert not any(name.startswith("access-control-") for name in headers)  # never CORS (T-102)
+    assert "set-cookie" not in headers  # no ambient credentials (T-102)
 
 
 def test_the_csp_is_the_strict_one_t104() -> None:
@@ -137,6 +138,30 @@ def test_the_csp_is_the_strict_one_t104() -> None:
         assert directive in CSP
     assert "unsafe-inline" not in CSP
     assert "unsafe-eval" not in CSP
+
+
+def test_the_csp_is_exactly_the_threat_models_t104() -> None:
+    # Pinned in full, so a widened source (img-src *, style-src https:) fails here, not just a missing
+    # directive. Any change must update THREAT_MODEL T-104 too.
+    assert CSP == (
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    )
+
+
+def test_the_ui_cant_be_framed_t107(world: World) -> None:
+    headers = call(world.app, "GET", "/").headers
+    assert headers["x-frame-options"] == "DENY"
+    assert "frame-ancestors 'none'" in headers["content-security-policy"]
+
+
+def test_claiming_a_session_sets_no_cookie_t102(world: World) -> None:
+    reply = world.claim()
+    assert reply.status == 200
+    assert "set-cookie" not in reply.headers
+    status = call(world.app, "GET", "/api/status", headers=bearer(reply.json()["session"]))
+    assert status.status == 200
+    assert "set-cookie" not in status.headers
 
 
 def test_there_are_no_docs_or_schema_pages_t106(world: World) -> None:

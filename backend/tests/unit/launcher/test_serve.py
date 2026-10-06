@@ -325,6 +325,25 @@ def test_the_browser_is_opened_with_the_file_path_only_once_the_server_runs(prep
     assert h.announced == []
 
 
+def test_the_real_opener_passes_only_the_file_uri_t103(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The token lives inside the 0600 file; the browser's argv (readable by other users) gets only
+    # the file's URI, never the http URL with the #bootstrap fragment.
+    opened: list[str] = []
+
+    def fake_open(url: str) -> bool:
+        opened.append(url)
+        return True
+
+    monkeypatch.setattr("webbrowser.open", fake_open)
+    path = tmp_path / f"{launcher.BOOTSTRAP_PREFIX}example.html"
+    assert launcher.open_in_browser(path) is True
+    assert opened == [path.as_uri()]
+    assert opened[0].startswith("file://")
+    assert "#" not in opened[0] and "bootstrap=" not in opened[0]
+
+
 def test_if_no_browser_opens_the_path_is_printed(prepared: Prepared) -> None:
     h = Harness()
     h.browser_result = False
