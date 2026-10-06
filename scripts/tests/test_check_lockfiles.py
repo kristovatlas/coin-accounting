@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +24,12 @@ NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
 HASH = "sha256:" + "a" * 64
 FILES = "https://files.pythonhosted.org/packages/ab/cd/" + "e" * 60 + "/"  # the real URL shape
 OLD = "2026-09-01T00:00:00Z"
+RES = "    resolution: {integrity: sha512-" + "A" * 86 + "==}\n"
+PNPM_BODY = ("importers:\n\n  frontend:\n    dependencies:\n      react:\n        specifier: ^19.3.0\n"
+             "        version: 19.3.0\n\npackages:\n\n  '@scope/pkg@1.0.0':\n" + RES
+             + "    engines: {node: '>=20'}\n\n  react@19.3.0:\n" + RES)
+PNPM_SNAPSHOTS = "\nsnapshots:\n\n  '@scope/pkg@1.0.0': {}\n\n  react@19.3.0: {}\n"
+PNPM_TIMES = {"@scope/pkg@1.0.0": OLD, "react@19.3.0": OLD}
 
 
 def wheel(name: str, uploaded: str = OLD, url: str | None = None, hash_: str = HASH) -> str:
@@ -100,9 +108,324 @@ class CheckLockfilesTests(unittest.TestCase):
         self.lock(self.pkg("sdistonly", wheels="[]"))
         self.assertIn("no wheels", self.errors())
 
-    def test_a_pnpm_lockfile_fails_closed_for_now(self):
-        (self.repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
-        self.assertIn("pnpm lockfile check is not implemented", self.errors())
+    # --- pnpm-lock.yaml (ENGINEERING §2.5) ---------------------------------------------------------
+
+    def pnpm(self, packages: str = "", times: dict | None = None, head: str = "lockfileVersion: '9.0'\n") -> None:
+        default = PNPM_BODY + packages + PNPM_SNAPSHOTS
+        (self.repo / "pnpm-lock.yaml").write_text(head + "\nsettings:\n  autoInstallPeers: true\n"
+                                                 "  excludeLinksFromLockfile: false\n\n" + default)
+        if times is not None:
+            (self.repo / "pnpm-lock.times.json").write_text(json.dumps(times))
+
+    def test_a_registry_pnpm_lockfile_with_old_packages_passes(self):
+        self.pnpm(times=PNPM_TIMES)
+        self.assertEqual(check_lockfiles.check(self.repo, NOW), [])
+
+    def test_a_package_younger_than_the_cooldown_fails_on_the_npm_side(self):
+        self.pnpm(times={**PNPM_TIMES, "react@19.3.0": "2026-09-28T00:00:00Z"})
+        self.assertIn("react@19.3.0 was published 2026-09-28, less than 7 days ago", self.errors())
+
+    def test_a_missing_publish_time_or_times_file_fails(self):
+        self.pnpm(times={"@scope/pkg@1.0.0": OLD})
+        self.assertIn("no publish time for react@19.3.0", self.errors())
+        (self.repo / "pnpm-lock.times.json").unlink()
+        self.assertIn("pnpm-lock.times.json is missing", self.errors())
+
+    def test_non_registry_sources_fail(self):
+        for bad in ("    resolution: {tarball: https://evil.example/x.tgz}\n",
+                    "    resolution: {type: git, repo: https://github.com/a/b, commit: abc}\n",
+                    "    resolution: {directory: ../x, type: directory}\n"):
+            with self.subTest(bad=bad):
+                self.pnpm("\n  evil@1.0.0:\n" + bad, times={**PNPM_TIMES, "evil@1.0.0": OLD})
+                errors = self.errors()
+                self.assertIn("a source other than the npm registry", errors)
+                self.assertIn("evil@1.0.0 must have exactly one registry resolution", errors)
+
+    def test_link_and_file_versions_in_importers_fail(self):
+        for spec in ("link:../x", "file:../x.tgz", "workspace:*", "npm:other@1", "github:a/b"):
+            with self.subTest(spec=spec):
+                (self.repo / "pnpm-lock.yaml").write_text(
+                    "lockfileVersion: '9.0'\n\nimporters:\n\n  frontend:\n    dependencies:\n"
+                    f"      x:\n        specifier: {spec}\n        version: {spec}\n")
+                self.assertIn("a source other than the npm registry", self.errors())
+
+    def test_a_weak_or_extra_integrity_fails(self):
+        for res in ("{integrity: sha1-" + "A" * 27 + "=}", "{integrity: sha512-short==}",
+                    "{integrity: sha512-" + "A" * 86 + "==, extra: 1}"):
+            with self.subTest(res=res):
+                self.pnpm("\n  x@1.0.0:\n    resolution: " + res + "\n", times={**PNPM_TIMES, "x@1.0.0": OLD})
+                self.assertIn("a resolution must be exactly {integrity: sha512-...}", self.errors())
+
+    def test_a_package_without_a_resolution_or_with_two_fails(self):
+        self.pnpm("\n  x@1.0.0:\n    engines: {node: '>=20'}\n", times={**PNPM_TIMES, "x@1.0.0": OLD})
+        self.assertIn("x@1.0.0 must have exactly one registry resolution", self.errors())
+        self.pnpm("\n  x@1.0.0:\n" + RES + RES, times={**PNPM_TIMES, "x@1.0.0": OLD})
+        self.assertIn("x@1.0.0 must have exactly one registry resolution", self.errors())
+
+    def test_unknown_top_level_keys_settings_and_versions_fail(self):
+        (self.repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n\noverrides:\n  x: 1.0.0\n")
+        self.assertIn("top-level key 'overrides' is not allowed", self.errors())
+        self.pnpm(times=PNPM_TIMES, head="lockfileVersion: '6.0'\n")
+        self.assertIn("lockfileVersion: '9.0'", self.errors())
+        (self.repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: false\n")
+        self.assertIn("unexpected setting", self.errors())
+
+    def test_a_second_document_anchors_tags_and_non_ascii_fail(self):
+        for extra in ("---\nlockfileVersion: '9.0'\n", "\n  x@1.0.0: &a\n", "\n  y@1.0.0: !!str\n"):
+            with self.subTest(extra=extra):
+                self.pnpm(extra, times=PNPM_TIMES)
+                self.assertIn("only one plain YAML document is allowed", self.errors())
+        (self.repo / "pnpm-lock.yaml").write_bytes("\ufefflockfileVersion: '9.0'\n".encode())
+        self.assertIn("non-ASCII content", self.errors())
+
+    def test_a_resolution_outside_packages_fails(self):
+        (self.repo / "pnpm-lock.yaml").write_text(
+            "lockfileVersion: '9.0'\n\nsnapshots:\n\n  react@19.3.0:\n" + RES)
+        self.assertIn("a resolution outside the packages section", self.errors())
+
+    def test_snapshots_and_importers_are_read_strictly_and_cross_checked(self):
+        # PR #136 round 2: pnpm merges a snapshot's fields into its package, so `version:` there
+        # would redirect the fetch; every reference must name a checked packages entry.
+        lock = (self.repo / "pnpm-lock.yaml")
+        self.pnpm(times=PNPM_TIMES)
+        good = lock.read_text()
+        for old, new, message in (
+            ("  react@19.3.0: {}\n", "  react@19.3.0:\n    version: 19.3.1\n", "unexpected line in a snapshot"),
+            ("  react@19.3.0: {}\n", "  react@19.3.0: {version: 6.6.6}\n", "unexpected snapshot entry"),
+            ("  react@19.3.0: {}\n", "  react@19.3.0:\n    name: evil\n", "unexpected line in a snapshot"),
+            ("  react@19.3.0: {}\n", "  react@19.3.0: {}\n\n  fresh@9.9.9: {}\n", "the snapshot fresh@9.9.9 has no entry in packages"),
+            ("  react@19.3.0: {}\n", "  react@19.3.0:\n    dependencies:\n      fresh: 9.9.9\n", "fresh@9.9.9 is referenced but has no entry"),
+            ("        version: 19.3.0\n", "        version: 19.3.1\n", "react@19.3.1 is referenced but has no entry"),
+            ("        version: 19.3.0\n", "        version: 19.3.0\n        resolved: x\n", "unexpected line in an importer"),
+            ("  '@scope/pkg@1.0.0': {}\n\n", "", "@scope/pkg@1.0.0 has no snapshot"),
+        ):
+            with self.subTest(new=new):
+                self.assertIn(old, good)
+                lock.write_text(good.replace(old, new, 1))
+                self.assertIn(message, self.errors())
+
+    def test_merge_keys_and_empty_packages_cannot_bypass_the_checks(self):
+        # PR #136 round 2: a merge key under importers/snapshots, or snapshots and importers with no
+        # packages at all, must not leave entries unchecked.
+        lock = self.repo / "pnpm-lock.yaml"
+        self.pnpm(times=PNPM_TIMES)
+        good = lock.read_text()
+        lock.write_text(good.replace("  react@19.3.0: {}\n", "  react@19.3.0:\n    <<: {dependencies: {x: 1.0.0}}\n", 1))
+        self.assertIn("unexpected line in a snapshot", self.errors())
+        lock.write_text(good.replace("  frontend:\n", "  frontend:\n    <<: {dependencies: {x: 1.0.0}}\n", 1))
+        self.assertIn("unexpected line in an importer", self.errors())
+        no_packages = good.split("\npackages:\n")[0] + "\nsnapshots:\n\n  react@19.3.0: {}\n"
+        lock.write_text(no_packages)
+        errors = self.errors()
+        self.assertIn("the snapshot react@19.3.0 has no entry in packages", errors)
+        self.assertIn("react@19.3.0 is referenced but has no entry in packages", errors)
+
+    def test_an_alias_to_another_package_fails(self):
+        # PR #136 round 3: `version: evil@1.0.0` would install evil as react.
+        lock = self.repo / "pnpm-lock.yaml"
+        extra = "\n  evil@1.0.0:\n" + RES
+        self.pnpm(extra, times={**PNPM_TIMES, "evil@1.0.0": OLD})
+        good = lock.read_text().replace("  react@19.3.0: {}\n", "  react@19.3.0: {}\n\n  evil@1.0.0: {}\n", 1)
+        lock.write_text(good.replace("        version: 19.3.0\n", "        version: evil@1.0.0\n", 1))
+        self.assertIn("unexpected line in an importer", self.errors())
+        lock.write_text(good.replace("  react@19.3.0: {}\n", "  react@19.3.0:\n    dependencies:\n      react: evil@1.0.0\n", 1))
+        self.assertIn("unexpected line in a snapshot", self.errors())
+
+    def test_open_flow_values_quotes_and_repeated_sections_fail(self):
+        # PR #136 round 3: a value left open could swallow the next line, so YAML and the check would
+        # disagree about which lines belong to which entry.
+        for bad, message in (("    engines: {node: [x]\n", "engines must be a one-line value"),
+                             ("    os: [linux, {a: 1}]\n", "os must be a one-line value"),
+                             ("    deprecated: 'open\n", "deprecated must be a plain one-line value")):
+            with self.subTest(bad=bad):
+                self.pnpm("\n  x@1.0.0:\n" + RES + bad, times={**PNPM_TIMES, "x@1.0.0": OLD})
+                self.assertIn(message, self.errors())
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        lock.write_text(lock.read_text() + "\nsettings:\n  autoInstallPeers: true\n")
+        self.assertIn("the settings section appears twice", self.errors())
+
+    def test_keys_and_items_are_quoted_all_or_nothing(self):
+        # PR #136 round 4: a quote opened or closed alone makes YAML read a different key, or run on into
+        # the following lines, so the check and pnpm would disagree about the entries.
+        cl = check_lockfiles
+        for pattern, good, bads in (
+            (cl.PNPM_PACKAGE, ["  react@19.3.0:", "  '@scope/pkg@1.0.0':", "  'react@19.3.0':"],
+             ["  react@19.3.0':", "  'react@19.3.0:", "  @scope/pkg@1.0.0:", "  '@jsr/std__x@1.0.0':"]),
+            (cl.PNPM_SNAPSHOT, ["  react@19.3.0: {}", "  '@scope/pkg@1.0.0(react@19.3.0)':"],
+             ["  react@19.3.0': {}", "  '@scope/pkg@1.0.0(react@19.3.0):"]),
+            (cl.PNPM_SNAPSHOT_DEP, ["      react: 19.3.0", "      '@scope/pkg': 1.0.0"],
+             ["      'react: 19.3.0", "      @scope/pkg: 1.0.0", "      '@jsr/x': 1.0.0"]),
+            (cl.PNPM_SNAPSHOT_PEER, ["      - react", "      - '@types/node'"],
+             ["      - '@types/node", "      - react'", "      - @types/node"]),
+            (cl.PNPM_IMPORTER_DEP, ["      react:", "      '@scope/pkg':"], ["      'react:", "      react':"]),
+            (cl.PNPM_PEER, ["      react: '>=18'", "      '@types/node': ^20"], ["      'react: '>=18'"]),
+        ):
+            for line in good:
+                with self.subTest(line=line):
+                    self.assertIsNotNone(pattern.match(line))
+            for line in bads:
+                with self.subTest(line=line):
+                    self.assertIsNone(pattern.match(line))
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        lock.write_text(lock.read_text().replace("  react@19.3.0: {}\n", "  react@19.3.0:\n    transitivePeerDependencies:\n"
+                                                 "      - 'x\n", 1))
+        self.assertIn("a single quote is left open", self.errors())
+
+    def test_a_quote_inside_a_plain_flow_item_cannot_open_a_scalar(self):
+        # PR #136 round 5 (#146): `[a'b, 'c]` has an even quote count, but YAML reads `a'b` as plain text
+        # and `'c]` as the start of a quoted scalar that runs on into the following lines.
+        cl = check_lockfiles
+        for field, good, bads in (
+            ("os", ["[linux]", "[darwin, linux]", "['x', y]", "[]", "['it''s']"],
+             ["[a'b, 'c]", "[x', 'y', z'w]", "[a b]", "['open]"]),
+            ("engines", ["{node: '>=20'}", "{node: ^10 || ^12 || >=14}", "{node: '>=8', npm: '>=7'}"],
+             ["{node: a'b, x: 'y}", "{node: >=20}", "{node: '>=20}", "{node: x, }", "{node: a: b}"]),
+            ("engines", ["{io.js: '>=1'}", "{Node_X: ^1}", "{'a b': '1'}", "{_runtime: ^1}", "{node/js: '1'}",
+                         "{node+alt: '1'}"], ["{'a: 1}", "{a'b: 1}", "{a b: 1}", "{-x: 1}"]),
+        ):
+            for value in good:
+                with self.subTest(field=field, value=value):
+                    self.assertIsNotNone(cl.PNPM_FLOW_VALUE[field].match(value))
+            for value in bads:
+                with self.subTest(field=field, value=value):
+                    self.assertIsNone(cl.PNPM_FLOW_VALUE[field].match(value))
+        for value in ("true", "'] #'", "Use x instead", "'it''s gone'", "don't use", "Don't use 'x' anymore",
+                      "x 'y' z", "See https://github.com/org/pkg#migration", "a:b"):
+            with self.subTest(value=value):
+                self.assertIsNotNone(cl.PNPM_PLAIN_VALUE.match(value))
+        for value in ("'a' b", "[x]", "> folded", "'open", "x # comment", "", "& anchor", "a: 'b", "a:", "x #"):
+            with self.subTest(value=value):
+                self.assertIsNone(cl.PNPM_PLAIN_VALUE.match(value))
+        for bad, message in (("    os: [a'b, 'c]\n", "os must be a one-line value"),
+                             ("    engines: {node: a'b, x: 'y}\n", "engines must be a one-line value"),
+                             ("    deprecated: 'a' b'c'\n", "deprecated must be a plain one-line value")):
+            with self.subTest(bad=bad):
+                self.pnpm("\n  x@1.0.0:\n" + RES + bad, times={**PNPM_TIMES, "x@1.0.0": OLD})
+                self.assertIn(message, self.errors())
+        # A deprecation message with an apostrophe, as pnpm writes it, passes (PR #147 review).
+        for good in ("    deprecated: Don't use this\n", "    deprecated: Don't use 'x' anymore\n",
+                     "    deprecated: See x.example/y#z\n",  # a URL scheme trips the source scan (#145)
+                     "    os: ['!win32']\n    engines: {node: '>=8', bun: '>=1'}\n",
+                     "    engines: {_runtime: ^1}\n"):
+            with self.subTest(good=good):
+                self.pnpm("\n  x@1.0.0:\n" + RES + good, times={**PNPM_TIMES, "x@1.0.0": OLD})
+                lock = self.repo / "pnpm-lock.yaml"
+                lock.write_text(lock.read_text() + "\n  x@1.0.0: {}\n")
+                self.assertEqual("", self.errors())
+
+    def test_the_odd_quote_exemption_stays_narrow(self):
+        # PR #147 round 2: only a 4-space deprecated/hasBin block plain value may have an odd quote count.
+        for bad in ("    deprecated: 'open\n", "    engines: {node: a'b}\n", "    deprecated: a: 'b\n",
+                    "    deprecated: x # don't\n"):
+            with self.subTest(bad=bad):
+                self.pnpm("\n  x@1.0.0:\n" + RES + bad, times={**PNPM_TIMES, "x@1.0.0": OLD})
+                self.assertIn("a single quote is left open", self.errors())
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        lock.write_text(lock.read_text().replace("  react@19.3.0: {}\n", "  react@19.3.0:\n    deprecated: x'\n", 1))
+        self.assertIn("unexpected line in a snapshot", self.errors())
+        self.pnpm("\n  x@1.0.0:\n" + RES + "    deprecated: Don't\n      use it\n", times={**PNPM_TIMES, "x@1.0.0": OLD})
+        self.assertIn("unexpected line in a package entry", self.errors())
+
+    def test_sections_out_of_order_fail(self):
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        text = lock.read_text()
+        importers = text[text.index("importers:"):text.index("packages:")]
+        lock.write_text(text.replace(importers, "", 1).replace("\nsnapshots:", "\n" + importers + "snapshots:", 1))
+        self.assertIn("the importers section is out of order", self.errors())
+
+    def test_jsr_sources_fail(self):
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        lock.write_text(lock.read_text().replace("specifier: ^19.3.0", "specifier: jsr:@std/x", 1))
+        self.assertIn("a source other than the npm registry", self.errors())
+
+    def test_indented_lines_under_lockfile_version_and_a_repeated_packages_section_fail(self):
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        text = lock.read_text()
+        lock.write_text(text.replace("lockfileVersion: '9.0'\n", "lockfileVersion: '9.0'\n  x: 1\n", 1))
+        self.assertIn("unexpected indented line under lockfileVersion", self.errors())
+        lock.write_text(text + "\npackages:\n")
+        self.assertIn("the packages section appears twice", self.errors())
+
+    def test_a_malformed_publish_time_makes_the_check_exit_1(self):
+        self.pnpm(times={**PNPM_TIMES, "react@19.3.0": "last tuesday"})
+        with redirect_stdout(io.StringIO()), unittest.mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(check_lockfiles.main([str(self.repo), "--now", "2026-10-01T00:00:00+00:00"]), 1)
+
+    def test_escaped_or_double_quoted_scalars_fail(self):
+        # PR #136 review: "li\\u006ek:../x" decodes to link:../x, which the raw-text source scan can't see.
+        for spec in ('"li\\u006ek:../x"', '"file:../x.tgz"', "'a\\b'"):
+            with self.subTest(spec=spec):
+                (self.repo / "pnpm-lock.yaml").write_text(
+                    "lockfileVersion: '9.0'\n\nimporters:\n\n  frontend:\n    dependencies:\n"
+                    f"      x:\n        specifier: ^1.0.0\n        version: {spec}\n")
+                self.assertIn("double quotes and backslashes are not allowed", self.errors())
+
+    def test_an_empty_lock_with_declared_js_dependencies_fails(self):
+        (self.repo / "frontend").mkdir()
+        (self.repo / "frontend" / "package.json").write_text('{"name": "f", "dependencies": {"react": "19.3.0"}}')
+        (self.repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n\nimporters:\n\npackages:\n\nsnapshots:\n")
+        self.assertIn("pnpm-lock.yaml has no packages, but frontend/package.json declare dependencies", self.errors())
+
+    def test_declared_js_dependencies_without_a_lockfile_fail(self):
+        (self.repo / "frontend").mkdir()
+        (self.repo / "frontend" / "package.json").write_text('{"name": "f", "dependencies": {"react": "19.3.0"}}')
+        self.assertIn("pnpm-lock.yaml is missing, but frontend/package.json declare dependencies", self.errors())
+        (self.repo / "frontend" / "package.json").write_text('{"name": "f", "dependencies": {}}')
+        self.assertEqual(check_lockfiles.check(self.repo, NOW), [])
+
+    def test_a_flow_style_section_cannot_hide_packages_or_settings(self):
+        # PR #136 review: `packages: {...}` left the package list empty, so no check ran at all.
+        evil = "{'evil@1.0.0': {resolution: {integrity: sha1-" + "A" * 27 + "=}}}"
+        for key, value in (("packages", evil), ("settings", "{autoInstallPeers: false}"),
+                           ("importers", "{}"), ("snapshots", "{}")):
+            with self.subTest(key=key):
+                (self.repo / "pnpm-lock.yaml").write_text(f"lockfileVersion: '9.0'\n\n{key}: {value}\n")
+                self.assertIn(f"the {key} section must be written as a block", self.errors())
+
+    def test_a_re_indented_packages_section_cannot_hide_entries(self):
+        # PR #136 review: package keys at 4 spaces (fields at 6) were never recorded.
+        body = "\n    evil@1.0.0:\n      resolution: {integrity: sha1-" + "A" * 27 + "=}\n"
+        (self.repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n\npackages:\n" + body)
+        self.assertIn("unexpected line in a package entry", self.errors())
+
+    def test_only_known_package_fields_are_allowed(self):
+        # `name:`/`version:` could make pnpm fetch something other than the key the times file checks.
+        for bad in ("    name: evil\n", "    version: 0.0.1\n", "    tarball: x\n", "    id: x\n",
+                    "    hasBin: {a: 1}\n", "    deprecated: |\n", "    peerDependencies: {a: 1}\n",
+                    "     engines: {node: '>=20'}\n", "      stray: 1\n"):
+            with self.subTest(bad=bad):
+                self.pnpm("\n  x@1.0.0:\n" + RES + bad, times={**PNPM_TIMES, "x@1.0.0": OLD})
+                self.assertIn("unexpected line in a package entry" if "stray" in bad or "     engines" in bad
+                              or "name" in bad or "version" in bad or "tarball" in bad or "id:" in bad
+                              else "must be", self.errors())
+
+    def test_peer_dependency_blocks_and_plain_fields_pass(self):
+        extra = ("\n  x@1.0.0:\n" + RES + "    hasBin: true\n    deprecated: use y instead\n"
+                 "    os: [linux]\n    cpu: [x64]\n    libc: [glibc]\n"
+                 "    peerDependencies:\n      react: ^19.0.0\n      '@types/node': '*'\n"
+                 "    peerDependenciesMeta:\n      '@types/node':\n        optional: true\n")
+        self.pnpm(extra, times={**PNPM_TIMES, "x@1.0.0": OLD})
+        with open(self.repo / "pnpm-lock.yaml", "a") as lock:
+            lock.write("\n  x@1.0.0:\n    dependencies:\n      react: 19.3.0\n    transitivePeerDependencies:\n"
+                       "      - '@types/node'\n")
+        self.assertEqual(check_lockfiles.check(self.repo, NOW), [])
+
+    def test_the_committed_lockfile_passes(self):
+        # The real pnpm 12 output must keep passing the stricter read (fails if the check is too strict).
+        repo = HERE.parent
+        if not (repo / "pnpm-lock.yaml").exists():
+            self.skipTest("no pnpm-lock.yaml in this checkout")
+        self.assertEqual([e for e in check_lockfiles.check_pnpm_lock(repo, NOW) if "less than 7 days" not in e], [])
+
+    def test_a_duplicate_package_entry_fails(self):
+        self.pnpm("\n  react@19.3.0:\n" + RES, times=PNPM_TIMES)
+        self.assertIn("react@19.3.0 appears twice", self.errors())
 
     def test_lifecycle_scripts_pnpmfile_and_config_dependencies_fail(self):
         (self.repo / "frontend").mkdir()
@@ -194,8 +517,8 @@ class CheckLockfilesTests(unittest.TestCase):
         (self.repo / "node_modules" / "x").mkdir(parents=True)
         (self.repo / "node_modules" / "x" / "pnpm-lock.yaml").write_text("")  # skipped: not ours
         found = self.errors()
-        for needle in (".PnpmFile.cjs: a .pnpmfile is not allowed", "frontend/pnpm-lock.yaml:", "pnpm-lock.main.yaml:",
-                       "e2e/PNPM-LOCK.YAML:"):
+        for needle in (".PnpmFile.cjs: a .pnpmfile is not allowed", "frontend/pnpm-lock.yaml: only pnpm-lock.yaml",
+                       "pnpm-lock.main.yaml:", "e2e/PNPM-LOCK.YAML:"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, found)
         self.assertNotIn("node_modules", found)
