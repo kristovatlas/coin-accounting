@@ -281,7 +281,8 @@ class CheckLockfilesTests(unittest.TestCase):
             ("os", ["[linux]", "[darwin, linux]", "['x', y]", "[]", "['it''s']"],
              ["[a'b, 'c]", "[x', 'y', z'w]", "[a b]", "['open]"]),
             ("engines", ["{node: '>=20'}", "{node: ^10 || ^12 || >=14}", "{node: '>=8', npm: '>=7'}"],
-             ["{node: a'b, x: 'y}", "{node: >=20}", "{node: '>=20}", "{node: x, }"]),
+             ["{node: a'b, x: 'y}", "{node: >=20}", "{node: '>=20}", "{node: x, }", "{node: a: b}"]),
+            ("engines", ["{io.js: '>=1'}", "{Node_X: ^1}", "{'a b': '1'}"], ["{'a: 1}", "{a'b: 1}"]),
         ):
             for value in good:
                 with self.subTest(field=field, value=value):
@@ -289,14 +290,26 @@ class CheckLockfilesTests(unittest.TestCase):
             for value in bads:
                 with self.subTest(field=field, value=value):
                     self.assertIsNone(cl.PNPM_FLOW_VALUE[field].match(value))
-        for value in ("true", "'] #'", "Use x instead", "'it''s gone'"):
+        for value in ("true", "'] #'", "Use x instead", "'it''s gone'", "don't use", "Don't use 'x' anymore",
+                      "x 'y' z"):
             with self.subTest(value=value):
                 self.assertIsNotNone(cl.PNPM_PLAIN_VALUE.match(value))
-        for value in ("don't use", "x 'y' z", "'a' b", "[x]", "> folded", "'open"):
+        for value in ("'a' b", "[x]", "> folded", "'open", "x # comment", "", "& anchor"):
             with self.subTest(value=value):
                 self.assertIsNone(cl.PNPM_PLAIN_VALUE.match(value))
-        self.pnpm("\n  x@1.0.0:\n" + RES + "    os: [a'b, 'c]\n", times={**PNPM_TIMES, "x@1.0.0": OLD})
-        self.assertIn("os must be a one-line value", self.errors())
+        for bad, message in (("    os: [a'b, 'c]\n", "os must be a one-line value"),
+                             ("    engines: {node: a'b, x: 'y}\n", "engines must be a one-line value"),
+                             ("    deprecated: 'a' b'c'\n", "deprecated must be a plain one-line value")):
+            with self.subTest(bad=bad):
+                self.pnpm("\n  x@1.0.0:\n" + RES + bad, times={**PNPM_TIMES, "x@1.0.0": OLD})
+                self.assertIn(message, self.errors())
+        # A deprecation message with an apostrophe, as pnpm writes it, passes (PR #147 review).
+        for good in ("    deprecated: Don't use this\n", "    deprecated: Don't use 'x' anymore\n"):
+            with self.subTest(good=good):
+                self.pnpm("\n  x@1.0.0:\n" + RES + good, times={**PNPM_TIMES, "x@1.0.0": OLD})
+                lock = self.repo / "pnpm-lock.yaml"
+                lock.write_text(lock.read_text() + "\n  x@1.0.0: {}\n")
+                self.assertEqual("", self.errors())
 
     def test_sections_out_of_order_fail(self):
         self.pnpm(times=PNPM_TIMES)
