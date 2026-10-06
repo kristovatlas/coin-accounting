@@ -118,3 +118,28 @@ def test_the_watchdog_asks_for_shutdown_before_it_logs_t405(
     finally:
         dog.stop()
     assert order == ["shutdown", "log"]
+
+
+def test_stop_doesnt_wait_on_a_thread_stuck_after_reporting_t405(data: Path, verified: DataDir) -> None:
+    # After reporting a loss, the thread may block writing its log line to the lost volume; a
+    # shutdown step must not wait on it.
+    reported = threading.Event()
+    stuck = threading.Event()
+
+    def on_lost(reason: str) -> None:
+        reported.set()
+        stuck.wait()  # stands in for a log write that never returns
+
+    dog = Watchdog(verified, on_lost, interval=0.01)
+    dog.start()
+    shutil.rmtree(data)
+    assert reported.wait(5)
+    done = threading.Event()
+
+    def stop() -> None:
+        dog.stop(timeout=0.1)
+        done.set()
+
+    threading.Thread(target=stop, daemon=True).start()
+    assert done.wait(5)
+    stuck.set()

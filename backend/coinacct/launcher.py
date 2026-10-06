@@ -14,15 +14,17 @@ This file holds everything that happens before the web server starts:
 
 Then `serve` (§3, §4, §8.1):
 
-6. **Node checks** through `api.runtime` → `services/` → `chain/`, with the dismount watchdog
-   (T-405) already running and before anything listens. A node problem means offline mode; the
-   deferred storage policy (T-401), or a volume lost meanwhile, can still stop start-up here.
+6. **Node checks** through `api.runtime` → `services/` → `chain/`, before anything listens. The
+   shutdown coordinator, its steps, the signal handlers and the dismount watchdog (T-405) already
+   exist, so a signal or a lost volume during the checks runs the steps and ends the process. A
+   node problem means offline mode; the deferred storage policy (T-401) can still stop start-up.
 7. **Listen** on a socket bound to `127.0.0.1` with a port the OS picks (T-103), and run uvicorn
    in-process on it: no proxy headers, no `Server` header, no access log, no WebSockets.
 8. **Shutdown wiring:** SIGINT, SIGTERM, the watchdog and Quit all go to one `Shutdown`
    coordinator, whose steps stop the server (waiting for it, within the deadline) and the
    watchdog, remove the bootstrap file, clear `<data>/tmp` and flush the logs. uvicorn's own signal
    handling is replaced, so a signal never skips them; a second signal forces uvicorn's exit.
+   The browser inherits the process environment, `TMPDIR` included (#139).
 9. **Launch:** write the bootstrap file (§4, T-110), delete it on claim or after 60 s, and open it
    in the default browser (or print its path with `--no-browser`, for the E2E harness).
 """
@@ -68,7 +70,7 @@ LISTEN_BACKLOG: Final = 64
 GRACEFUL_SECONDS: Final = 5  # uvicorn's wait for open requests at shutdown
 SERVER_STOP_SECONDS: Final = 10.0  # under services.lifecycle.DEADLINE_SECONDS (15)
 BROWSER_WAIT_SECONDS: Final = 30.0
-TEMP_ENV: Final = ("TMPDIR", "SQLITE_TMPDIR")
+LAUNCH_ERROR_EXIT: Final = 2
 
 
 class LaunchError(Exception):
@@ -299,19 +301,19 @@ def uvicorn_config(app: Any) -> uvicorn.Config:
 
 
 @contextmanager
-def shutdown_signals(
-    request: Callable[[str], None], server: Any, requested: Callable[[], bool]
-) -> Iterator[None]:
-    """SIGINT and SIGTERM ask the shutdown coordinator for the whole run, not just while uvicorn
-    serves. A second signal after shutdown started forces uvicorn's exit (its usual second Ctrl-C);
-    the coordinator's deadline still ends the process if that isn't enough."""
+def shutdown_signals(request: Callable[[str], None], force_exit: Callable[[], None]) -> Iterator[None]:
+    """SIGINT and SIGTERM ask the shutdown coordinator for the whole run, from before the node
+    checks to the end. A second signal after shutdown started also calls `force_exit` (uvicorn's
+    usual second Ctrl-C); the coordinator's deadline still ends the process if that isn't enough."""
     if threading.current_thread() is not threading.main_thread():
         yield
         return
+    seen: list[int] = []
 
     def handler(signum: int, frame: types.FrameType | None) -> None:
-        if requested():
-            server.force_exit = True
+        if seen:
+            force_exit()
+        seen.append(signum)
         request(f"received {signal.Signals(signum).name}")
 
     previous = {sig: signal.signal(sig, handler) for sig in (signal.SIGINT, signal.SIGTERM)}
@@ -337,20 +339,15 @@ def print_flushed(text: str) -> None:
     print(text, flush=True)  # noqa: T201 - the one line --no-browser promises
 
 
-_ENV_LOCK = threading.Lock()
-
-
 def open_in_browser(path: Path) -> bool:
-    """§4: the browser gets the file's path only; the token is inside the 0600 file. A browser
-    started here must not inherit the volume's temp directory (T-402: it would keep the volume busy,
-    and its files would be cleared under it at the next start), so those variables are left out of
-    its environment. Returns whether a browser was started."""
-    with _ENV_LOCK:
-        saved = {k: os.environ.pop(k) for k in TEMP_ENV if k in os.environ}
-        try:
-            return webbrowser.open(path.as_uri())
-        finally:
-            os.environ.update(saved)
+    """§4: the browser gets the file's path only; the token is inside the 0600 file. Returns whether
+    a browser was started. The browser inherits the process environment, `TMPDIR` included (#139)."""
+    return webbrowser.open(path.as_uri())
+
+
+def stderr_line(text: str) -> None:
+    with suppress(OSError):
+        os.write(2, f"coinacct: {text}\n".encode(errors="replace"))
 
 
 def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
@@ -359,98 +356,130 @@ def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
     env: Mapping[str, str],
     platform: str = sys.platform,
     build: Callable[..., runtime.Runtime] = runtime.build,
+    make_shutdown: Callable[[], Any] = runtime.new_shutdown,
     make_server: Callable[[Any], Any] = lambda app: Server(uvicorn_config(app)),
     make_watchdog: Callable[[datadir.DataDir, Callable[[str], None]], Watchdog] = Watchdog,
     open_browser: Callable[[Path], bool] = open_in_browser,
     announce: Callable[[str], None] = print_flushed,
+    exit_process: Callable[[int], object] = os._exit,
 ) -> int:
-    """Run the app until it shuts down. Returns the process exit code."""
+    """Run the app until it shuts down. Returns the process exit code.
+
+    The shutdown coordinator, its steps, the signal handlers and the watchdog all exist before the
+    node checks (§8.1), so a signal or a lost volume at any point after this starts the same ordered
+    shutdown, under the coordinator's deadline (T-405). One that comes while the node checks are
+    still running ends the process once the steps have run: nothing has been served or written, and
+    a check can wait on the node for a long time.
+    """
     data = prepared.data_dir
     sock = loopback_socket()
     port = sock.getsockname()[1]
     token = new_bootstrap_token()
     launch_file: list[Path] = []
+    servers: list[Any] = []
+    server_running = threading.Event()  # set just before uvicorn runs
+    server_stopped = threading.Event()  # set once it has returned
+    phase_lock = threading.Lock()
+    phase = ["checking"]  # "checking" until the node checks return, then "started"
+    shutdown = make_shutdown()
 
     def remove_launch_file() -> None:
         for path in launch_file:
             remove_file(path)
 
-    # The watchdog runs before the node checks (§8.1), so a volume lost while they run is noticed.
-    # Until the shutdown coordinator exists, what it reports is kept and refuses the start-up.
-    lost_lock = threading.Lock()
-    lost_early: list[str] = []
-    forward: list[Callable[[str], None]] = []
-
-    def on_lost(reason: str) -> None:
-        with lost_lock:
-            if not forward:
-                lost_early.append(reason)
-                return
-            request = forward[0]
-        request(reason)
-
-    watchdog = make_watchdog(data, on_lost)
-    watchdog.start()
-    try:
-        rt = build(
-            port=port,
-            bootstrap_token=token,
-            rpc=prepared.config.rpc,
-            volume=data.volume,
-            allow_unencrypted=prepared.needs_test_chain,
-            on_claimed=remove_launch_file,
-        )
-        # Only now, after the node checks and the storage policy (§8.1). From here a browser that is
-        # quicker than uvicorn's start waits in the backlog instead of being refused.
-        with lost_lock:
-            forward.append(rt.shutdown.request)
-            lost = lost_early[0] if lost_early else watchdog.problem()
-        if lost is not None:
-            raise LaunchError(f"{lost}; nothing was started")
-        sock.listen(LISTEN_BACKLOG)
-    except runtime.StorageRefused as e:
-        watchdog.stop()
-        sock.close()
-        raise LaunchError(str(e)) from None
-    except BaseException:
-        watchdog.stop()
-        sock.close()
-        raise
-
-    server = make_server(rt.app)
-    server_stopped = threading.Event()
-
     def stop_server() -> None:
-        server.should_exit = True
-        # Wait for uvicorn to finish, so later steps (closing the DB, from M2) never run under a
-        # request; within the coordinator's deadline, which ends the process if this doesn't.
-        if not server_stopped.wait(SERVER_STOP_SECONDS):
+        for server in servers:
+            server.should_exit = True
+        # A server about to start sees the request and doesn't (see below). One that runs is waited
+        # for, so later steps (closing the DB, from M2) never run under a request; within the
+        # coordinator's deadline, which ends the process if this doesn't.
+        if server_running.is_set() and not server_stopped.wait(SERVER_STOP_SECONDS):
             raise RuntimeError("the server didn't stop in time")
 
-    rt.shutdown.add_step("stop the server", stop_server)
-    rt.shutdown.add_step("stop the watchdog", watchdog.stop)
-    rt.shutdown.add_step("remove the launch file", remove_launch_file)
-    rt.shutdown.add_step("clear the temp directory", lambda: datadir.clear_tmp(data))  # §6
-    rt.shutdown.add_step("flush the logs", flush_logs)
+    def end_if_still_checking() -> None:
+        with phase_lock:
+            if phase[0] != "checking":
+                return
+            phase[0] = "ended"
+        stderr_line(f"{shutdown.reason}; stopped during start-up, nothing was started")
+        exit_process(LAUNCH_ERROR_EXIT)
+
+    def force_exit() -> None:
+        for server in servers:
+            server.force_exit = True
+
+    watchdog = make_watchdog(data, shutdown.request)
+    shutdown.add_step("stop the server", stop_server)
+    shutdown.add_step("stop the watchdog", watchdog.stop)
+    shutdown.add_step("remove the launch file", remove_launch_file)
+    shutdown.add_step("clear the temp directory", lambda: datadir.clear_tmp(data))  # §6
+    shutdown.add_step("flush the logs", flush_logs)
+    shutdown.add_step("end a start-up that was still checking", end_if_still_checking)
+
+    def refuse(why: str) -> LaunchError:
+        # Start-up stops here: run the steps (nothing is served yet), then report.
+        shutdown.request(why)
+        shutdown.wait(SERVER_STOP_SECONDS)
+        sock.close()
+        return LaunchError(f"{shutdown.reason}; nothing was started")
 
     def launch() -> None:
         # The browser opens once uvicorn is serving, never before (a console browser would block,
-        # and nothing would answer it).
+        # and nothing would answer it). If it never starts, the path is printed instead.
+        server = servers[0]
         for _ in range(int(BROWSER_WAIT_SECONDS / 0.05)):
-            if getattr(server, "started", False) or rt.shutdown.requested:
+            if getattr(server, "started", False) or shutdown.requested:
                 break
             threading.Event().wait(0.05)
-        if rt.shutdown.requested:
+        if shutdown.requested:
             return
-        try:
-            opened = open_browser(launch_file[0])
-        except Exception:
-            log.exception("opening the browser failed")
-            opened = False
+        opened = False
+        if getattr(server, "started", False):
+            try:
+                opened = open_browser(launch_file[0])
+            except Exception:
+                log.exception("opening the browser failed")
         if not opened:
             announce(f"coinacct: open this file in your browser: {launch_file[0]}")
 
-    with shutdown_signals(rt.shutdown.request, server, lambda: rt.shutdown.requested):
+    with shutdown_signals(shutdown.request, force_exit):
+        try:
+            watchdog.start()  # before the node checks (§8.1)
+            try:
+                rt = build(
+                    port=port,
+                    bootstrap_token=token,
+                    rpc=prepared.config.rpc,
+                    volume=data.volume,
+                    allow_unencrypted=prepared.needs_test_chain,
+                    on_claimed=remove_launch_file,
+                    shutdown=shutdown,
+                )
+            finally:
+                with phase_lock:
+                    ended = phase[0] == "ended"
+                    phase[0] = "started"
+            if ended:  # the last step has ended the process (or, in a test, recorded that it would)
+                sock.close()
+                raise LaunchError(f"{shutdown.reason}; nothing was started")
+            lost = watchdog.problem()  # lost between two watchdog ticks
+            if lost is not None:
+                raise refuse(lost)
+            if shutdown.requested:
+                raise refuse(shutdown.reason or "shutdown was requested")
+            # Only now, after the node checks and the storage policy (§8.1). From here a browser that
+            # is quicker than uvicorn's start waits in the backlog instead of being refused.
+            sock.listen(LISTEN_BACKLOG)
+            servers.append(make_server(rt.app))
+            if shutdown.requested:  # asked for while the server was being made
+                raise refuse(shutdown.reason or "shutdown was requested")
+        except runtime.StorageRefused as e:
+            raise refuse(str(e)) from None
+        except LaunchError:
+            raise
+        except BaseException:
+            refuse("start-up failed")
+            raise
         try:
             launch_file.append(write_bootstrap_file(bootstrap_dir(env, data, platform), port, token))
             expiry = threading.Timer(max(0.0, rt.sessions.expires_at - time.monotonic()), remove_launch_file)
@@ -461,13 +490,15 @@ def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
                 threading.Thread(target=launch, name="launch-browser", daemon=True).start()
             else:
                 announce(f"coinacct: launch file {launch_file[0]}")
-            server.run(sockets=[sock])
+            server_running.set()
+            if not shutdown.requested:  # set after server_running, so stop_server waits or we skip
+                servers[0].run(sockets=[sock])
         finally:
             server_stopped.set()
             sock.close()
             remove_launch_file()
-            rt.shutdown.request("the server stopped")  # a no-op if shutdown already started
-        clean = rt.shutdown.wait()
+            shutdown.request("the server stopped")  # a no-op if shutdown already started
+        clean = shutdown.wait()
     return 0 if clean else 1
 
 
@@ -477,7 +508,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return serve(prepared, env=os.environ)
     except LaunchError as e:
         sys.stderr.write(f"coinacct: {e}\n")
-        return 2
+        return LAUNCH_ERROR_EXIT
 
 
 if __name__ == "__main__":

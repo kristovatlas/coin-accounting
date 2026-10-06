@@ -19,9 +19,15 @@ from coinacct.services import startup
 from coinacct.services.lifecycle import Shutdown
 from coinacct.services.startup import NodeStatus, StorageRefused
 
-__all__ = ["Runtime", "StorageRefused", "build"]
+__all__ = ["Runtime", "StorageRefused", "build", "new_shutdown"]
 
 QUIT_REASON = "quit from the UI"
+
+
+def new_shutdown() -> Shutdown:
+    """The coordinator, for a launcher that needs it before the node checks run (§8.1): it passes
+    the same one to `build`."""
+    return Shutdown()
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,7 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
     on_claimed: Callable[[], None],
     check: Callable[..., NodeStatus] = startup.check_configured_node,
     ttl: float = BOOTSTRAP_TTL_SECONDS,
+    shutdown: Shutdown | None = None,
 ) -> Runtime:
     """`rpc` is `config.RpcConfig` and `volume` is `storage.volume.VolumeStatus`, passed as values
     (architecture §2: `api/` imports neither). Raises `StorageRefused` when the storage policy
@@ -59,7 +66,8 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
         volume=volume,
         allow_unencrypted=allow_unencrypted,
     )
-    shutdown = Shutdown()
+    if shutdown is None:
+        shutdown = Shutdown()
     # Created after the node checks, which can take seconds, so the token's 60 s start just before
     # the bootstrap file is written and the browser opened.
     sessions = Sessions(bootstrap_token, ttl=ttl, on_claimed=on_claimed)

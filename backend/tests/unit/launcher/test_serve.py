@@ -8,14 +8,12 @@ tests/integration/launcher.
 from __future__ import annotations
 
 import functools
-import os
 import re
 import signal
 import socket
 import stat
 import threading
 import time
-import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -94,6 +92,8 @@ class Harness:
         self.data: Path | None = None
         self.port: int | None = None
         self.make_watchdog: Callable[..., Watchdog] = Watchdog
+        self.exits: list[int] = []
+        self.opened_while_started: list[bool] = []
 
     def check(self, *args: Any, **kwargs: Any) -> NodeStatus:
         assert self.data is not None
@@ -113,7 +113,8 @@ class Harness:
         return self.server
 
     def open_browser(self, path: Path) -> bool:
-        assert self.server is not None and self.server.started  # never before the server runs
+        # Recorded, not asserted: launch() would swallow an assertion error from its thread.
+        self.opened_while_started.append(self.server is not None and self.server.started)
         self.opened.append(path)
         return self.browser_result
 
@@ -128,7 +129,16 @@ class Harness:
             make_watchdog=self.make_watchdog,
             open_browser=self.open_browser,
             announce=self.announced.append,
+            exit_process=self.exits.append,
         )
+
+
+def no_exit(code: int) -> None:
+    pytest.fail(f"the process would have been ended with {code}")
+
+
+def no_announcement(text: str) -> None:
+    pytest.fail(f"unexpected announcement: {text}")
 
 
 def can_connect(port: int) -> bool:
@@ -204,7 +214,11 @@ def test_a_storage_refusal_stops_start_up_before_anything_is_served_t401(prepare
 
     with pytest.raises(LaunchError, match="never accepted on mainnet"):
         launcher.serve(
-            prepared, env={}, build=functools.partial(runtime.build, check=refuse), announce=lambda s: None
+            prepared,
+            env={},
+            build=functools.partial(runtime.build, check=refuse),
+            announce=lambda s: None,
+            exit_process=no_exit,
         )
     assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
 
@@ -285,6 +299,7 @@ def test_the_launch_file_is_removed_when_start_up_fails_after_writing_it(prepare
             build=h.build,
             make_server=h.make_server,
             announce=broken_announce,
+            exit_process=no_exit,
         )
     assert written == [True]
     assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
@@ -303,6 +318,7 @@ def test_the_browser_is_opened_with_the_file_path_only_once_the_server_runs(prep
 
     h.during = wait_then_quit
     h.serve(with_browser(prepared))
+    assert h.opened_while_started == [True]  # never before the server runs
     assert len(h.opened) == 1
     assert h.opened[0].name.startswith(launcher.BOOTSTRAP_PREFIX)
     assert h.announced == []
@@ -319,21 +335,6 @@ def test_if_no_browser_opens_the_path_is_printed(prepared: Prepared) -> None:
     h.during = wait_then_quit
     h.serve(with_browser(prepared))
     assert h.announced[0].startswith("coinacct: open this file in your browser: ")
-
-
-def test_the_browser_doesnt_inherit_the_volumes_temp_directory_t402(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[str | None, str | None]] = []
-
-    def fake_open(url: str) -> bool:
-        seen.append((os.environ.get("TMPDIR"), os.environ.get("SQLITE_TMPDIR")))
-        return True
-
-    monkeypatch.setenv("TMPDIR", "/volume/data/tmp")
-    monkeypatch.setenv("SQLITE_TMPDIR", "/volume/data/tmp")
-    monkeypatch.setattr(webbrowser, "open", fake_open)
-    assert launcher.open_in_browser(Path("/volume/data/coinacct-bootstrap-x.html"))
-    assert seen == [(None, None)]
-    assert os.environ["TMPDIR"] == "/volume/data/tmp"  # put back for the app itself
 
 
 # --- Shutdown (§3, §6, T-405) -------------------------------------------------------------------
@@ -383,9 +384,10 @@ def test_a_lost_volume_shuts_the_app_down_through_the_watchdog_t405(prepared: Pr
     assert h.runtime.shutdown.reason == "the data directory is gone (volume dismounted?)"
 
 
-def test_a_volume_lost_during_the_node_checks_stops_start_up_t405(prepared: Prepared) -> None:
+def test_a_volume_lost_during_the_node_checks_ends_the_start_up_t405(prepared: Prepared) -> None:
     # The watchdog runs before the node checks (architecture §8.1). The volume goes missing while
-    # the (slow) checks run: nothing listens, no launch file is written, and start-up is refused.
+    # the (slow) checks run: the coordinator runs its steps at once, under its deadline, and its
+    # last step ends the process; nothing listens and no launch file is written.
     h = Harness()
     gone = threading.Event()
     reported = threading.Event()
@@ -404,6 +406,8 @@ def test_a_volume_lost_during_the_node_checks_stops_start_up_t405(prepared: Prep
     def slow_check(*args: Any, **kwargs: Any) -> NodeStatus:
         gone.set()
         assert reported.wait(WAIT)  # the watchdog noticed while the checks were still running
+        # The check is still "running": the process is ended without waiting for it.
+        assert wait_for(lambda: h.exits == [launcher.LAUNCH_ERROR_EXIT])
         return ONLINE
 
     h.make_watchdog = make
@@ -414,8 +418,69 @@ def test_a_volume_lost_during_the_node_checks_stops_start_up_t405(prepared: Prep
             build=functools.partial(runtime.build, check=slow_check),
             make_watchdog=h.make_watchdog,
             announce=h.announced.append,
+            exit_process=h.exits.append,
+        )
+    assert h.exits == [launcher.LAUNCH_ERROR_EXIT]
+    assert h.announced == []
+    assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_a_signal_during_the_node_checks_runs_the_steps_and_ends_the_start_up(
+    prepared: Prepared, signum: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The handlers are installed before the node checks: no KeyboardInterrupt, no default action.
+    exits: list[int] = []
+    cleared: list[bool] = []
+    real_clear = datadir.clear_tmp
+
+    def clear(data: datadir.DataDir) -> None:
+        cleared.append(True)
+        real_clear(data)
+
+    monkeypatch.setattr(datadir, "clear_tmp", clear)
+
+    def check_then_signal(*args: Any, **kwargs: Any) -> NodeStatus:
+        signal.raise_signal(signum)
+        assert wait_for(lambda: exits == [launcher.LAUNCH_ERROR_EXIT])
+        return ONLINE
+
+    before = signal.getsignal(signum)
+    with pytest.raises(LaunchError, match=signal.Signals(signum).name):
+        launcher.serve(
+            prepared,
+            env={},
+            build=functools.partial(runtime.build, check=check_then_signal),
+            announce=no_announcement,
+            exit_process=exits.append,
+        )
+    assert cleared == [True]  # the shutdown steps ran
+    assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
+    assert signal.getsignal(signum) == before
+
+
+def test_shutdown_asked_for_while_the_server_is_made_refuses_cleanly(prepared: Prepared) -> None:
+    # The steps are registered before anything can ask for shutdown, so a request at any point
+    # of start-up runs them; here it lands while the server is being made.
+    h = Harness()
+
+    def make_server(app: Any) -> FakeServer:
+        assert h.runtime is not None
+        h.runtime.shutdown.request("the data directory is gone (volume dismounted?)")
+        return h.make_server(app)
+
+    h.data = prepared.data_dir.root
+    with pytest.raises(LaunchError, match="volume dismounted"):
+        launcher.serve(
+            prepared,
+            env={},
+            build=h.build,
+            make_server=make_server,
+            announce=h.announced.append,
+            exit_process=no_exit,
         )
     assert h.announced == []
+    assert h.port is not None and not can_connect(h.port)
     assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
 
 
@@ -432,6 +497,7 @@ def test_a_volume_found_lost_right_after_the_checks_stops_start_up(prepared: Pre
             build=functools.partial(runtime.build, check=lambda *a, **k: ONLINE),
             make_watchdog=functools.partial(LostNow, interval=3600),
             announce=lambda s: None,
+            exit_process=no_exit,
         )
     assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
 
@@ -498,7 +564,11 @@ def test_signals_ask_the_coordinator_and_a_second_one_forces_the_exit(signum: in
 
     target = Target()
     before = signal.getsignal(signum)
-    with launcher.shutdown_signals(requests.append, target, lambda: bool(requests)):
+
+    def force() -> None:
+        target.force_exit = True
+
+    with launcher.shutdown_signals(requests.append, force):
         signal.raise_signal(signum)
         assert requests == [f"received {signal.Signals(signum).name}"]
         assert not target.force_exit

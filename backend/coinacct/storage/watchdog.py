@@ -21,6 +21,7 @@ from coinacct.storage.datadir import DataDir
 log = logging.getLogger(__name__)
 
 INTERVAL_SECONDS: Final = 2.0
+STOP_TIMEOUT_SECONDS: Final = 1.0
 
 
 class Watchdog:
@@ -52,10 +53,12 @@ class Watchdog:
         self._thread = threading.Thread(target=self._run, name="watchdog", daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = STOP_TIMEOUT_SECONDS) -> None:
+        """Bounded: after reporting a loss, the thread may be stuck writing its log line to the
+        lost volume, and a shutdown step must not wait on it (it is a daemon thread)."""
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
-            self._thread.join()
+            self._thread.join(timeout)
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval):
