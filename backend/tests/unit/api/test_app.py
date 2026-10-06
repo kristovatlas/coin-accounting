@@ -12,8 +12,8 @@ from collections.abc import Iterator
 import pytest
 
 from coinacct.api.app import create_app
-from coinacct.api.security import CSP, ASGIApp
-from coinacct.api.session import ALREADY_CLAIMED, Sessions
+from coinacct.api.security import CSP, MAX_BODY_BYTES, ASGIApp
+from coinacct.api.session import ALREADY_CLAIMED, MAX_LOGGED_REFUSALS, Sessions
 from coinacct.services.startup import NodeStatus
 
 from .asgi import HOST, PORT, Reply, call
@@ -196,7 +196,7 @@ def test_a_second_claim_is_refused_and_logged_t110(world: World, caplog: pytest.
         reply = world.claim()
     assert reply.status == 409
     assert reply.json() == {"error": ALREADY_CLAIMED}
-    assert "second claim" in caplog.text
+    assert "used again after the session was claimed (T-110)" in caplog.text
     assert world.claimed == 1
 
 
@@ -340,3 +340,153 @@ def test_lifespan_events_pass_through(world: World) -> None:
 
     asyncio.run(world.app({"type": "lifespan", "asgi": {"version": "3.0"}}, receive, send))  # type: ignore[arg-type]
     assert [m["type"] for m in sent] == ["lifespan.startup.complete", "lifespan.shutdown.complete"]
+
+
+# --- Request body size (architecture §1, T-103) -------------------------------------------------
+
+
+def test_a_declared_oversize_body_is_refused_before_the_app(world: World) -> None:
+    reply = call(
+        world.app,
+        "POST",
+        "/api/session",
+        headers={"Content-Type": "application/json", "Content-Length": str(MAX_BODY_BYTES + 1)},
+        body=b"{}",
+    )
+    assert reply.status == 413
+    assert reply.headers["content-security-policy"] == CSP
+    assert world.claimed == 0
+
+
+@pytest.mark.parametrize("length", ["-1", "abc", ""])
+def test_an_invalid_content_length_is_refused(world: World, length: str) -> None:
+    reply = call(
+        world.app,
+        "POST",
+        "/api/session",
+        headers={"Content-Type": "application/json", "Content-Length": length},
+        body=b"{}",
+    )
+    assert reply.status == 413
+
+
+def test_a_doubled_content_length_is_refused(world: World) -> None:
+    raw = [(b"content-length", b"2"), (b"content-length", b"2")]
+    reply = call(
+        world.app,
+        "POST",
+        "/api/session",
+        headers={"Content-Type": "application/json"},
+        raw_headers=raw,
+        body=b"{}",
+    )
+    assert reply.status == 413
+
+
+def test_a_chunked_body_over_the_limit_is_refused(world: World) -> None:
+    # No Content-Length: the limit is enforced as the body streams in.
+    chunk = b" " * 16384
+    reply = call(
+        world.app,
+        "POST",
+        "/api/session",
+        headers={"Content-Type": "application/json"},
+        chunks=[b'{"bootstrap": "x"'] + [chunk] * 5 + [b"}"],
+    )
+    assert reply.status == 413
+    assert world.claimed == 0
+
+
+def test_a_chunked_body_under_the_limit_reaches_the_app(world: World) -> None:
+    reply = call(
+        world.app,
+        "POST",
+        "/api/session",
+        headers={"Content-Type": "application/json"},
+        chunks=[b'{"bootstrap": ', b'"launch-token-for-tests"}'],
+    )
+    assert reply.status == 200
+    assert world.claimed == 1
+
+
+def test_a_body_at_the_limit_is_read_and_validated(world: World) -> None:
+    body = b'{"bootstrap": "' + b"x" * (MAX_BODY_BYTES - 17) + b'"}'
+    assert len(body) == MAX_BODY_BYTES
+    reply = call(world.app, "POST", "/api/session", headers={"Content-Type": "application/json"}, body=body)
+    assert reply.status == 422  # reached the app; too long for the field
+
+
+# --- Logging of refused claims (T-103, T-110) ---------------------------------------------------
+
+
+def test_refused_claims_are_logged_only_up_to_the_cap(world: World, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="coinacct.api.session"):
+        for _ in range(MAX_LOGGED_REFUSALS + 15):
+            assert world.claim("not-the-token").status == 401
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages.count("a claim with a wrong launch token was refused") == MAX_LOGGED_REFUSALS
+    assert messages[-1] == "further refused claims (wrong token) are counted but not logged"
+    assert len(messages) == MAX_LOGGED_REFUSALS + 1
+    assert world.sessions.refused == MAX_LOGGED_REFUSALS + 15
+    assert world.claim().status == 200  # the real token still works
+
+
+def test_a_probe_after_the_claim_is_not_reported_as_token_reuse(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    world.session()
+    with caplog.at_level(logging.WARNING, logger="coinacct.api.session"):
+        reply = world.claim("not-the-token")
+    assert reply.status == 409
+    assert "the session is already claimed" in caplog.text
+    assert "T-110" not in caplog.text
+
+
+def test_expires_at_is_on_the_sessions_clock() -> None:
+    clock = Clock()
+    sessions = Sessions(TOKEN, clock=clock, ttl=60.0)
+    assert sessions.expires_at == clock.now + 60.0
+
+
+def test_wrong_token_probes_cant_hide_a_token_reuse_t110(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A local process without the token uses up the wrong-token budget first; the reuse of the real
+    # token after the claim must still be logged.
+    for _ in range(MAX_LOGGED_REFUSALS + 5):
+        world.claim("not-the-token")
+    world.session()
+    for _ in range(MAX_LOGGED_REFUSALS + 5):
+        world.claim("still-not-the-token")
+    with caplog.at_level(logging.WARNING, logger="coinacct.api.session"):
+        assert world.claim().status == 409
+    assert "the launch token was used again after the session was claimed (T-110)" in caplog.text
+
+
+def test_an_expired_real_token_is_logged_even_after_many_probes_t110(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    for _ in range(MAX_LOGGED_REFUSALS + 5):
+        world.claim("not-the-token")
+    world.clock.now += 60.0
+    with caplog.at_level(logging.WARNING, logger="coinacct.api.session"):
+        assert world.claim().status == 410
+    assert "a claim of an expired launch token was refused (T-110)" in caplog.text
+
+
+def test_token_reuse_logging_is_capped_too(world: World, caplog: pytest.LogCaptureFixture) -> None:
+    world.session()
+    with caplog.at_level(logging.WARNING, logger="coinacct.api.session"):
+        for _ in range(MAX_LOGGED_REFUSALS + 5):
+            world.claim()
+    reuse = [r for r in caplog.records if "used again" in r.getMessage()]
+    assert len(reuse) == MAX_LOGGED_REFUSALS
+    assert (
+        caplog.records[-1].getMessage() == "further refused claims (token reuse) are counted but not logged"
+    )
+
+
+def test_a_token_that_cant_be_encoded_is_a_plain_mismatch() -> None:
+    sessions = Sessions(TOKEN)
+    assert sessions.claim("\ud800") is not None
+    assert sessions.claim("\ud800").name == "WRONG_TOKEN"  # type: ignore[union-attr]
