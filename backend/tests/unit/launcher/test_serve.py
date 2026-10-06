@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import re
+import shutil
 import signal
 import socket
 import stat
@@ -459,14 +460,16 @@ def test_a_signal_during_the_node_checks_runs_the_steps_and_ends_the_start_up(
     assert signal.getsignal(signum) == before
 
 
-def test_shutdown_asked_for_while_the_server_is_made_refuses_cleanly(prepared: Prepared) -> None:
-    # The steps are registered before anything can ask for shutdown, so a request at any point
-    # of start-up runs them; here it lands while the server is being made.
+def test_shutdown_asked_for_after_the_checks_ends_a_stalled_start_up_t405(prepared: Prepared) -> None:
+    # Between the node checks and uvicorn's start, the main thread can block (making the server,
+    # writing the launch file on a hung volume). A request then runs the steps, and the last step
+    # ends the process instead of leaving it running with no deadline.
     h = Harness()
 
     def make_server(app: Any) -> FakeServer:
         assert h.runtime is not None
         h.runtime.shutdown.request("the data directory is gone (volume dismounted?)")
+        assert wait_for(lambda: h.exits == [launcher.LAUNCH_ERROR_EXIT])  # "blocked" until ended
         return h.make_server(app)
 
     h.data = prepared.data_dir.root
@@ -477,11 +480,57 @@ def test_shutdown_asked_for_while_the_server_is_made_refuses_cleanly(prepared: P
             build=h.build,
             make_server=make_server,
             announce=h.announced.append,
-            exit_process=no_exit,
+            exit_process=h.exits.append,
         )
+    assert h.exits == [launcher.LAUNCH_ERROR_EXIT]
     assert h.announced == []
     assert h.port is not None and not can_connect(h.port)
     assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
+
+
+def test_a_stalled_launch_file_write_is_ended_too_t405(prepared: Prepared) -> None:
+    # The same window, later: the request lands while the launch file is announced.
+    h = Harness()
+
+    def stalled_announce(text: str) -> None:
+        assert h.runtime is not None
+        h.runtime.shutdown.request("received SIGTERM")
+        assert wait_for(lambda: h.exits == [launcher.LAUNCH_ERROR_EXIT])
+
+    h.data = prepared.data_dir.root
+    with pytest.raises(LaunchError, match="SIGTERM"):
+        launcher.serve(
+            prepared,
+            env={},
+            platform="linux",
+            build=h.build,
+            make_server=h.make_server,
+            announce=stalled_announce,
+            exit_process=h.exits.append,
+        )
+    assert h.exits == [launcher.LAUNCH_ERROR_EXIT]
+    assert h.server is not None and not h.server.started  # uvicorn never ran
+    assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
+
+
+def test_a_really_removed_data_directory_shuts_down_cleanly_and_says_why_t405(
+    prepared: Prepared, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # The real thing, not a patched problem(): the directory goes away while serving. The temp
+    # directory step leaves the path alone (it isn't the verified directory any more), every step
+    # succeeds, and the reason reaches stderr, since the log file was on the lost volume.
+    h = Harness()
+    h.make_watchdog = functools.partial(Watchdog, interval=0.01)
+
+    def remove(server: FakeServer) -> None:
+        shutil.rmtree(prepared.data_dir.root)
+
+    h.during = remove
+    assert h.serve(prepared) == 0
+    assert h.runtime is not None
+    assert h.runtime.shutdown.reason == "the data directory is gone (volume dismounted?)"
+    assert "shutting down: the data directory is gone" in capfd.readouterr().err
+    assert h.exits == []
 
 
 def test_a_volume_found_lost_right_after_the_checks_stops_start_up(prepared: Prepared) -> None:

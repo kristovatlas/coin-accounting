@@ -350,7 +350,7 @@ def stderr_line(text: str) -> None:
         os.write(2, f"coinacct: {text}\n".encode(errors="replace"))
 
 
-def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
+def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the tests
     prepared: Prepared,
     *,
     env: Mapping[str, str],
@@ -380,7 +380,9 @@ def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
     server_running = threading.Event()  # set just before uvicorn runs
     server_stopped = threading.Event()  # set once it has returned
     phase_lock = threading.Lock()
-    phase = ["checking"]  # "checking" until the node checks return, then "started"
+    # "starting" until uvicorn is about to run ("serving"), or until start-up decides to refuse
+    # ("refusing", reported by this thread). "ended" once the last shutdown step has ended a start-up.
+    phase = ["starting"]
     shutdown = make_shutdown()
 
     def remove_launch_file() -> None:
@@ -396,30 +398,50 @@ def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
         if server_running.is_set() and not server_stopped.wait(SERVER_STOP_SECONDS):
             raise RuntimeError("the server didn't stop in time")
 
-    def end_if_still_checking() -> None:
+    def end_a_stalled_start_up() -> None:
+        # Shutdown was asked for before uvicorn ran, and start-up hasn't taken over the report: the
+        # main thread may be blocked (a node check, a write to a hung volume), so end the process.
         with phase_lock:
-            if phase[0] != "checking":
+            if phase[0] != "starting":
                 return
             phase[0] = "ended"
-        stderr_line(f"{shutdown.reason}; stopped during start-up, nothing was started")
+        stderr_line("stopped during start-up, nothing was started")
         exit_process(LAUNCH_ERROR_EXIT)
+
+    def take_over(new: str) -> bool:
+        """Move out of "starting"; False if the last step has already ended the start-up."""
+        with phase_lock:
+            if phase[0] == "ended":
+                return False
+            if phase[0] == "starting":
+                phase[0] = new
+            return True
+
+    def clear_tmp_if_trusted() -> None:
+        # On a lost or replaced data directory, whatever is at that path isn't the verified one:
+        # don't touch it (the next start clears tmp).
+        if watchdog.problem() is None:
+            datadir.clear_tmp(data)
 
     def force_exit() -> None:
         for server in servers:
             server.force_exit = True
 
     watchdog = make_watchdog(data, shutdown.request)
+    shutdown.add_step("report the reason", lambda: stderr_line(f"shutting down: {shutdown.reason}"))
     shutdown.add_step("stop the server", stop_server)
     shutdown.add_step("stop the watchdog", watchdog.stop)
     shutdown.add_step("remove the launch file", remove_launch_file)
-    shutdown.add_step("clear the temp directory", lambda: datadir.clear_tmp(data))  # §6
+    shutdown.add_step("clear the temp directory", clear_tmp_if_trusted)  # §6
     shutdown.add_step("flush the logs", flush_logs)
-    shutdown.add_step("end a start-up that was still checking", end_if_still_checking)
+    shutdown.add_step("end a stalled start-up", end_a_stalled_start_up)
 
     def refuse(why: str) -> LaunchError:
-        # Start-up stops here: run the steps (nothing is served yet), then report.
+        # Start-up stops here: run the steps (nothing is served yet), then report. The coordinator's
+        # deadline bounds the wait.
+        take_over("refusing")
         shutdown.request(why)
-        shutdown.wait(SERVER_STOP_SECONDS)
+        shutdown.wait()
         sock.close()
         return LaunchError(f"{shutdown.reason}; nothing was started")
 
@@ -458,7 +480,6 @@ def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
             finally:
                 with phase_lock:
                     ended = phase[0] == "ended"
-                    phase[0] = "started"
             if ended:  # the last step has ended the process (or, in a test, recorded that it would)
                 sock.close()
                 raise LaunchError(f"{shutdown.reason}; nothing was started")
@@ -478,6 +499,7 @@ def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
         except LaunchError:
             raise
         except BaseException:
+            log.exception("start-up failed")
             refuse("start-up failed")
             raise
         try:
@@ -490,9 +512,14 @@ def serve(  # noqa: PLR0913, PLR0915 - the parts are injectable for the tests
                 threading.Thread(target=launch, name="launch-browser", daemon=True).start()
             else:
                 announce(f"coinacct: launch file {launch_file[0]}")
+            if not take_over("serving"):
+                raise LaunchError(f"{shutdown.reason}; nothing was started")
             server_running.set()
             if not shutdown.requested:  # set after server_running, so stop_server waits or we skip
                 servers[0].run(sockets=[sock])
+        except BaseException:
+            take_over("refusing")  # this thread reports it; the last step mustn't end the process
+            raise
         finally:
             server_stopped.set()
             sock.close()
