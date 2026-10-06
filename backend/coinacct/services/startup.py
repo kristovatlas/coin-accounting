@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from coinacct.chain import node_checks
+from coinacct.domain.secret import Secret
 from coinacct.storage import datadir
 from coinacct.storage.volume import VolumeStatus
 
@@ -65,3 +66,20 @@ def check_at_startup(
     if not reasons:
         log.info("node checks passed (chain %s); chain access is on", node_chain)
     return NodeStatus(online=not reasons, chain=node_chain, reasons=reasons)
+
+
+def check_configured_node(  # noqa: PLR0913 - the endpoint, its credentials and the storage policy inputs
+    host: str,
+    port: int,
+    user: str,
+    password: Secret,
+    *,
+    expected_chain: str | None,
+    volume: VolumeStatus,
+    allow_unencrypted: bool,
+) -> NodeStatus:
+    """`check_at_startup` against the configured node (the launcher passes the config as values)."""
+    client = node_checks.connect(host, port, user, password)
+    return check_at_startup(
+        client, expected_chain=expected_chain, volume=volume, allow_unencrypted=allow_unencrypted
+    )

@@ -16,7 +16,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final, Protocol
 
-from coinacct.rpc import RpcAuthError, RpcError, RpcForbiddenError
+from coinacct.domain.secret import Secret
+from coinacct.rpc import RpcAuthError, RpcClient, RpcError, RpcForbiddenError
 
 # Bitcoin Core 31.1 (ADR 0029; 31.0 was the first release with txospenderindex, ADR 0004).
 # getnetworkinfo reports the version as MMmmpp: 31.1.0 is 310100.
@@ -91,6 +92,12 @@ class NodeRpc(Protocol):
 
 class MalformedReplyError(ValueError):
     """A reply didn't have the expected shape."""
+
+
+def connect(host: str, port: int, user: str, password: Secret) -> NodeRpc:
+    """The node's RPC client. Only `chain/` reaches `rpc` (architecture §2), so the services that run
+    the checks get their client here; the endpoint was checked to be loopback by `config`."""
+    return RpcClient(host, port, user, password)
 
 
 def evaluate(facts: NodeFacts, expected_chain: str | None) -> list[Finding]:
