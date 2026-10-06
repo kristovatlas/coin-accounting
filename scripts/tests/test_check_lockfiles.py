@@ -182,6 +182,22 @@ class CheckLockfilesTests(unittest.TestCase):
             "lockfileVersion: '9.0'\n\nsnapshots:\n\n  react@19.3.0:\n" + RES)
         self.assertIn("a resolution outside the packages section", self.errors())
 
+    def test_escaped_or_double_quoted_scalars_fail(self):
+        # PR #136 review: "li\\u006ek:../x" decodes to link:../x, which the raw-text source scan can't see.
+        for spec in ('"li\\u006ek:../x"', '"file:../x.tgz"', "'a\\b'"):
+            with self.subTest(spec=spec):
+                (self.repo / "pnpm-lock.yaml").write_text(
+                    "lockfileVersion: '9.0'\n\nimporters:\n\n  frontend:\n    dependencies:\n"
+                    f"      x:\n        specifier: ^1.0.0\n        version: {spec}\n")
+                self.assertIn("double quotes and backslashes are not allowed", self.errors())
+
+    def test_declared_js_dependencies_without_a_lockfile_fail(self):
+        (self.repo / "frontend").mkdir()
+        (self.repo / "frontend" / "package.json").write_text('{"name": "f", "dependencies": {"react": "19.3.0"}}')
+        self.assertIn("pnpm-lock.yaml is missing, but frontend/package.json declare dependencies", self.errors())
+        (self.repo / "frontend" / "package.json").write_text('{"name": "f", "dependencies": {}}')
+        self.assertEqual(check_lockfiles.check(self.repo, NOW), [])
+
     def test_a_flow_style_section_cannot_hide_packages_or_settings(self):
         # PR #136 review: `packages: {...}` left the package list empty, so no check ran at all.
         evil = "{'evil@1.0.0': {resolution: {integrity: sha1-" + "A" * 27 + "=}}}"

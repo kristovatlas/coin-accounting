@@ -186,11 +186,34 @@ def check_uv_lock(repo: Path, now: datetime) -> list[str]:
     return errors
 
 
+JS_DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
+
+
+def js_manifests_with_dependencies(repo: Path) -> list[str]:
+    """The workspace manifests (the root, frontend/, e2e/) that declare any dependency."""
+    found = []
+    for rel in ("package.json", "frontend/package.json", "e2e/package.json"):
+        manifest = repo / rel
+        if not manifest.exists():
+            continue
+        try:
+            data = json.loads(manifest.read_text())
+        except json.JSONDecodeError:
+            found.append(rel)  # unreadable: treat as declaring dependencies, so it fails closed
+            continue
+        if isinstance(data, dict) and any(data.get(field) for field in JS_DEPENDENCY_FIELDS):
+            found.append(rel)
+    return found
+
+
 def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
     """ENGINEERING §2.5 for the npm side. A strict line-by-line read of the format pnpm 12 writes for
     registry packages: anything else fails closed, so nothing is skipped by a lenient parser."""
     path = repo / PNPM_LOCK
     if not path.exists():
+        declared = [m for m in js_manifests_with_dependencies(repo)]
+        if declared:
+            return [f"{PNPM_LOCK} is missing, but {', '.join(declared)} declare dependencies: run make propose-js"]
         return []
     raw = path.read_bytes()
     try:
@@ -209,6 +232,10 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
                           "aliases, tags or explicit keys)")
         if PNPM_FOREIGN.search(line):
             errors.append(f"{PNPM_LOCK}:{n}: a source other than the npm registry")
+        if '"' in line or "\\" in line:
+            # pnpm writes plain and single-quoted scalars only; a double-quoted one can hide a source
+            # behind escapes (`"li\\u006ek:../x"` decodes to `link:../x`) that the scan above can't see.
+            errors.append(f"{PNPM_LOCK}:{n}: double quotes and backslashes are not allowed")
     section = None
     packages: dict[str, int] = {}  # "name@version" -> resolution lines seen
     current = None
