@@ -184,6 +184,10 @@ COV_FLOOR_ALL := 85
 COV_FLOOR_STRICT := 95
 COV_STRICT_MODULES := chain tax doxx
 
+.PHONY: run
+run: require-toolchain ## Start the app. Usage: make run DATA_DIR=/path/on/your/encrypted/volume (or set COINACCT_DATA_DIR)
+	PYTHONPATH="$(ROOT)/backend" "$(ROOT)/.venv/bin/python" -m coinacct.launcher $${DATA_DIR:+--data-dir "$$DATA_DIR"}
+
 .PHONY: test
 test: require-toolchain ## Run the backend tests with coverage (socket guard on; floors per ENGINEERING §3.3; needs make test-tools)
 	@"$(SYS_PYTHON)" scripts/toolchain.py verify bitcoind >/dev/null || { echo "Run 'make test-tools' first: the integration tests need the pinned regtest bitcoind." >&2; exit 1; }
