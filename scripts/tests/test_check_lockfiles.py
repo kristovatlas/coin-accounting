@@ -27,7 +27,7 @@ RES = "    resolution: {integrity: sha512-" + "A" * 86 + "==}\n"
 PNPM_BODY = ("importers:\n\n  frontend:\n    dependencies:\n      react:\n        specifier: ^19.3.0\n"
              "        version: 19.3.0\n\npackages:\n\n  '@scope/pkg@1.0.0':\n" + RES
              + "    engines: {node: '>=20'}\n\n  react@19.3.0:\n" + RES)
-PNPM_SNAPSHOTS = "\nsnapshots:\n\n  react@19.3.0: {}\n"
+PNPM_SNAPSHOTS = "\nsnapshots:\n\n  '@scope/pkg@1.0.0': {}\n\n  react@19.3.0: {}\n"
 PNPM_TIMES = {"@scope/pkg@1.0.0": OLD, "react@19.3.0": OLD}
 
 
@@ -182,6 +182,27 @@ class CheckLockfilesTests(unittest.TestCase):
             "lockfileVersion: '9.0'\n\nsnapshots:\n\n  react@19.3.0:\n" + RES)
         self.assertIn("a resolution outside the packages section", self.errors())
 
+    def test_snapshots_and_importers_are_read_strictly_and_cross_checked(self):
+        # PR #136 round 2: pnpm merges a snapshot's fields into its package, so `version:` there
+        # would redirect the fetch; every reference must name a checked packages entry.
+        lock = (self.repo / "pnpm-lock.yaml")
+        self.pnpm(times=PNPM_TIMES)
+        good = lock.read_text()
+        for old, new, message in (
+            ("  react@19.3.0: {}\n", "  react@19.3.0:\n    version: 19.3.1\n", "unexpected line in a snapshot"),
+            ("  react@19.3.0: {}\n", "  react@19.3.0: {version: 6.6.6}\n", "unexpected snapshot entry"),
+            ("  react@19.3.0: {}\n", "  react@19.3.0:\n    name: evil\n", "unexpected line in a snapshot"),
+            ("  react@19.3.0: {}\n", "  react@19.3.0: {}\n\n  fresh@9.9.9: {}\n", "the snapshot fresh@9.9.9 has no entry in packages"),
+            ("  react@19.3.0: {}\n", "  react@19.3.0:\n    dependencies:\n      fresh: 9.9.9\n", "fresh@9.9.9 is referenced but has no entry"),
+            ("        version: 19.3.0\n", "        version: 19.3.1\n", "react@19.3.1 is referenced but has no entry"),
+            ("        version: 19.3.0\n", "        version: 19.3.0\n        resolved: x\n", "unexpected line in an importer"),
+            ("  '@scope/pkg@1.0.0': {}\n\n", "", "@scope/pkg@1.0.0 has no snapshot"),
+        ):
+            with self.subTest(new=new):
+                self.assertIn(old, good)
+                lock.write_text(good.replace(old, new, 1))
+                self.assertIn(message, self.errors())
+
     def test_escaped_or_double_quoted_scalars_fail(self):
         # PR #136 review: "li\\u006ek:../x" decodes to link:../x, which the raw-text source scan can't see.
         for spec in ('"li\\u006ek:../x"', '"file:../x.tgz"', "'a\\b'"):
@@ -230,6 +251,9 @@ class CheckLockfilesTests(unittest.TestCase):
                  "    peerDependencies:\n      react: ^19.0.0\n      '@types/node': '*'\n"
                  "    peerDependenciesMeta:\n      '@types/node':\n        optional: true\n")
         self.pnpm(extra, times={**PNPM_TIMES, "x@1.0.0": OLD})
+        with open(self.repo / "pnpm-lock.yaml", "a") as lock:
+            lock.write("\n  x@1.0.0:\n    dependencies:\n      react: 19.3.0\n    transitivePeerDependencies:\n"
+                       "      - '@types/node'\n")
         self.assertEqual(check_lockfiles.check(self.repo, NOW), [])
 
     def test_the_committed_lockfile_passes(self):

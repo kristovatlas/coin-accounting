@@ -84,6 +84,21 @@ PNPM_FIELD = re.compile(r"^    (resolution|engines|os|cpu|libc|hasBin|deprecated
 PNPM_FLOW_FIELDS = {"resolution", "engines", "os", "cpu", "libc"}  # pnpm writes these as one-line flow values
 PNPM_PEER = re.compile(r"^      '?(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*'?:(?: [^{\[].*)?$")
 PNPM_PEER_META = re.compile(r"^        optional: (?:true|false)$")
+# `snapshots` and `importers` are read just as strictly: a snapshot's fields are merged into its
+# package by pnpm, so a `name:`/`version:` there would redirect the fetch, and every reference must
+# name a checked `packages` entry.
+_NAME = r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*"
+_VER = r"[0-9][0-9A-Za-z.+-]*"
+_PEERS = r"(?:\([^\s'\"\\:]+\))*"
+PNPM_SNAPSHOT = re.compile(rf"^  '?({_NAME})@({_VER})({_PEERS})'?:(?: \{{\}})?$")
+PNPM_SNAPSHOT_FIELD = re.compile(r"^    (?:(dependencies|optionalDependencies|transitivePeerDependencies):|optional: true)$")
+PNPM_SNAPSHOT_DEP = re.compile(rf"^      '?({_NAME})'?: (?:({_NAME})@)?({_VER}){_PEERS}$")
+PNPM_SNAPSHOT_PEER = re.compile(rf"^      - '?{_NAME}'?$")
+PNPM_IMPORTER = re.compile(r"^  (?:\.|[a-z0-9][a-z0-9._-]*):(?: \{\})?$")
+PNPM_IMPORTER_GROUP = re.compile(r"^    (?:dependencies|devDependencies|optionalDependencies):$")
+PNPM_IMPORTER_DEP = re.compile(rf"^      '?({_NAME})'?:$")
+PNPM_IMPORTER_SPEC = re.compile(r"^        specifier: [^\s{\[|>].*$")
+PNPM_IMPORTER_VERSION = re.compile(rf"^        version: (?:({_NAME})@)?({_VER}){_PEERS}$")
 # Anything that names a source other than the default registry. pnpm writes no URL at all for it.
 PNPM_FOREIGN = re.compile(r"://|\b(?:link|file|git|github|gitlab|bitbucket|workspace|catalog|npm|portal|patch):"
                           r"|\btarball\b|\bdirectory\b|\btype: |\brepo: |\bcommit: ")
@@ -186,14 +201,64 @@ def check_uv_lock(repo: Path, now: datetime) -> list[str]:
     return errors
 
 
+def _snapshot_line(n: int, line: str, state: dict, references: list, snapshots: set) -> list[str]:
+    if not line.startswith("    "):
+        match = PNPM_SNAPSHOT.match(line)
+        if match is None:
+            state["key"] = None
+            return [f"{PNPM_LOCK}:{n}: unexpected snapshot entry"]
+        state["key"], state["field"] = f"{match.group(1)}@{match.group(2)}", None
+        snapshots.add(state["key"])
+        return []
+    if state["key"] is None:
+        return [f"{PNPM_LOCK}:{n}: unexpected line in a snapshot"]
+    if not line.startswith("      "):
+        match = PNPM_SNAPSHOT_FIELD.match(line)
+        state["field"] = match.group(1) if match else None
+        return [] if match else [f"{PNPM_LOCK}:{n}: unexpected line in a snapshot (only dependencies, "
+                                 "optionalDependencies, transitivePeerDependencies and optional: true)"]
+    if state["field"] in ("dependencies", "optionalDependencies"):
+        match = PNPM_SNAPSHOT_DEP.match(line)
+        if match:
+            references.append((n, f"{match.group(2) or match.group(1)}@{match.group(3)}"))
+            return []
+    elif state["field"] == "transitivePeerDependencies" and PNPM_SNAPSHOT_PEER.match(line):
+        return []
+    return [f"{PNPM_LOCK}:{n}: unexpected line in a snapshot"]
+
+
+def _importer_line(n: int, line: str, state: dict, references: list) -> list[str]:
+    if not line.startswith("    "):
+        ok = PNPM_IMPORTER.match(line) is not None
+        state.update(importer=ok, group=False, dep=None)
+        return [] if ok else [f"{PNPM_LOCK}:{n}: unexpected importer"]
+    if not line.startswith("      "):
+        ok = state["importer"] and PNPM_IMPORTER_GROUP.match(line) is not None
+        state.update(group=ok, dep=None)
+        return [] if ok else [f"{PNPM_LOCK}:{n}: unexpected line in an importer"]
+    if not line.startswith("        "):
+        match = PNPM_IMPORTER_DEP.match(line) if state["group"] else None
+        state["dep"] = match.group(1) if match else None
+        return [] if match else [f"{PNPM_LOCK}:{n}: unexpected line in an importer"]
+    if state["dep"] is not None:
+        if PNPM_IMPORTER_SPEC.match(line):
+            return []
+        match = PNPM_IMPORTER_VERSION.match(line)
+        if match:
+            references.append((n, f"{match.group(1) or state['dep']}@{match.group(2)}"))
+            return []
+    return [f"{PNPM_LOCK}:{n}: unexpected line in an importer"]
+
+
 JS_DEPENDENCY_FIELDS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
 
 
 def js_manifests_with_dependencies(repo: Path) -> list[str]:
-    """The workspace manifests (the root, frontend/, e2e/) that declare any dependency."""
+    """The manifests (the root and every top-level directory, as check_js_side reads them) that declare
+    any dependency."""
     found = []
-    for rel in ("package.json", "frontend/package.json", "e2e/package.json"):
-        manifest = repo / rel
+    for manifest in [repo / "package.json", *sorted(repo.glob("*/package.json"))]:
+        rel = manifest.relative_to(repo).as_posix()
         if not manifest.exists():
             continue
         try:
@@ -240,6 +305,10 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
     packages: dict[str, int] = {}  # "name@version" -> resolution lines seen
     current = None
     field = None  # the open four-space field of the current package entry
+    snapshots: set[str] = set()  # "name@version" of every snapshot (peer suffix removed)
+    references: list[tuple[int, str]] = []  # (line, "name@version") from snapshot deps and importers
+    snap_state: dict[str, object] = {"key": None, "field": None}
+    imp_state: dict[str, object] = {"importer": False, "group": False, "dep": None}
     for n, line in enumerate(lines, 1):
         if not line:
             continue
@@ -257,6 +326,10 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
         if section != "packages":
             if line.lstrip().startswith("resolution:"):
                 errors.append(f"{PNPM_LOCK}:{n}: a resolution outside the packages section")
+            elif section == "snapshots":
+                errors += _snapshot_line(n, line, snap_state, references, snapshots)
+            elif section == "importers":
+                errors += _importer_line(n, line, imp_state, references)
             continue
         if not line.startswith("    "):
             match = PNPM_PACKAGE.match(line)
@@ -298,6 +371,13 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
     for pkg, count in packages.items():
         if count != 1:
             errors.append(f"{PNPM_LOCK}: {pkg} must have exactly one registry resolution")
+    for pkg in sorted(snapshots - packages.keys()):
+        errors.append(f"{PNPM_LOCK}: the snapshot {pkg} has no entry in packages")
+    for pkg in sorted(packages.keys() - snapshots):
+        errors.append(f"{PNPM_LOCK}: {pkg} has no snapshot")
+    for n, ref in references:
+        if ref not in packages:
+            errors.append(f"{PNPM_LOCK}:{n}: {ref} is referenced but has no entry in packages")
     errors += check_pnpm_times(repo, packages, now)
     return errors
 

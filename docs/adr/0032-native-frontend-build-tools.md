@@ -15,7 +15,9 @@ The frontend stack proposed in PR #136 (M0.3 H3) brings native code through **Vi
 - **`lightningcss` 1.33.0** minifies the CSS. It is written in Rust and ships one prebuilt binary per platform (`lightningcss-*`, 11 platforms).
 - **`fsevents` 2.3.3** is the macOS file-watching binding, used by Vite's dev server on macOS only.
 
-These run on the development machine and in CI at build time. They are not part of the shipped app, but the bundler **writes the shipped bundle**, so DEPENDENCIES.md vets it like runtime code. pnpm installs only the binary for the current platform. The `allowBuilds: {}` setting means none of them runs an install script.
+These run on the development machine and in CI at build time. They are not part of the shipped app, but the bundler **writes the shipped bundle**, so DEPENDENCIES.md vets it like runtime code. pnpm installs only the binary for the current platform.
+
+**Install scripts:** `rolldown` and `lightningcss` ship prebuilt binaries and have no install script. **`fsevents` 2.3.3 ships a `binding.gyp`, which gives it an implicit `node-gyp rebuild` install step** (the npm registry flags it as having an install script). It is skipped on Linux (`os: [darwin]`). On macOS, `allowBuilds: {}` with `strictDepBuilds: true` makes pnpm refuse to install until that build is either allowed or explicitly denied. The package also ships a prebuilt `fsevents.node`, so denying the build should still leave it working (to be confirmed on macOS before approval).
 
 Every mainstream bundler has native code now: Vite 7 and earlier used `esbuild` (a Go binary per platform), and Rollup 4 ships Rust bindings. A pure-JavaScript bundler means an older or heavier tool, such as webpack, or Rollup 4's WebAssembly build.
 
@@ -30,19 +32,20 @@ Every mainstream bundler has native code now: Vite 7 and earlier used `esbuild` 
 Proposed: **1**. The owner decides between the options when approving PR #136.
 
 - **Allowed:** the prebuilt native binaries of `rolldown` (with its `@rolldown/binding-*` packages), `lightningcss` (with its `lightningcss-*` packages) and `fsevents`, at the versions pinned in `pnpm-lock.yaml`. They are **development and build dependencies only**: they run on the developer machine and in CI, and they are never part of the shipped app.
+- **`fsevents`' build step is denied, not allowed** (proposed): add an explicit deny for `fsevents` to `allowBuilds` in `pnpm-workspace.yaml` (the exact syntax for the pinned pnpm to be confirmed), so no install-time compile runs and macOS installs aren't blocked. Allowing the build instead would be install-time code execution, which this ADR does not cover. **The owner decides this together with the rest of the ADR**, and confirms a macOS install before approving.
 - **Not allowed by this ADR:** any other native JavaScript package, including TypeScript 7's native compiler (DEPENDENCIES.md pins TypeScript 6.0.3, the last pure-JavaScript release). Each needs its own ADR.
 - **Unchanged controls:**
   - `make propose-js` resolves only, and the owner approves the Socket report and the lockfile diff (§2.4)
   - the 7-day cooldown
-  - `allowBuilds: {}`: no install scripts
+  - `allowBuilds`: no install script runs (empty except the explicit `fsevents` deny above)
   - `blockExoticSubdeps`
-  - the lockfile policy check: registry-only sources and one sha512 integrity per package
+  - the lockfile policy check: no explicit non-registry source, one sha512 integrity per package (the configured registry is pinned by the `.npmrc`/environment checks, #93 and #36)
 - **Residual risk:** the compiled Rust code isn't reviewed beyond its hashes and Socket's report. A compromised bundler could change the shipped bundle. The production-build E2E tests (ENGINEERING §3.1), run under the real CSP, and the review of the built output limit this. It is accepted as part of R-4.
 
 ### Consequences
 
 - Good: the standard, fast Vite build, and the E2E tests on the production build.
-- Bad: compiled code from two projects runs at build time and writes the shipped bundle. Socket and human review see less of it than of JavaScript.
+- Bad: compiled code from three projects (Rolldown, Lightning CSS, fsevents) runs at build time and writes the shipped bundle. Socket and human review see less of it than of JavaScript.
 - Neutral: `fsevents` matters only on macOS. pnpm installs one platform binary per package, so the other platforms' entries are only in the lockfile.
 
 ## References
