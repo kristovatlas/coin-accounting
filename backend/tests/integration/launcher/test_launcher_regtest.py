@@ -13,8 +13,10 @@ import json
 import re
 import select
 import signal
+import socket
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -213,3 +215,20 @@ def test_the_log_is_written_to_the_data_volume(app: App, data: Path) -> None:
     text = "".join(p.read_text() for p in logs)
     assert "serving on 127.0.0.1:" in text
     assert app.token not in text  # T-403/T-110: the launch token is never logged
+
+
+def test_a_stalled_request_cant_keep_the_app_running_after_shutdown_t405(app: App) -> None:
+    # A local client sends headers promising a body and never sends it. Shutdown must still finish:
+    # uvicorn gives up on unfinished requests, and the coordinator's deadline backs that up.
+    stalled = socket.create_connection(("127.0.0.1", app.port), timeout=30)
+    try:
+        stalled.sendall(
+            f"POST /api/session HTTP/1.1\r\nHost: 127.0.0.1:{app.port}\r\n"
+            "Content-Type: application/json\r\nContent-Length: 1000\r\n\r\n{".encode()
+        )
+        started = time.monotonic()
+        app.proc.send_signal(signal.SIGTERM)
+        assert app.wait() == 0, app.stderr()
+        assert time.monotonic() - started < 15
+    finally:
+        stalled.close()
