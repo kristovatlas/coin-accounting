@@ -59,6 +59,15 @@ class TripwireTests(unittest.TestCase):
         self.commit()
         self.assertEqual(self.details(), [])
 
+    def test_check_suppressions_and_test_hooks_are_flagged_as_test_weakening(self):
+        lines = ["# mypy: ignore-errors", "# mypy: disable-error-code=arg-type", "// @ts-nocheck",
+                 "// @ts-ignore", "/* eslint-disable */", "socket_guard.BLOCKED.clear()",
+                 "pytest_plugins = ['x']", "def pytest_runtest_makereport(item, call):", "@pytest.hookimpl"]
+        self.write("backend/tests/unit/tax/test_engine.py", "\n".join(lines) + "\n")
+        self.commit()
+        flagged = [d for f, d in self.details() if d.startswith("test weakening")]
+        self.assertEqual(len(flagged), len(lines))
+
     def test_malicious_looking_test_is_flagged(self):
         self.write("backend/tests/unit/tax/test_engine.py",
                    "import subprocess\nimport urllib.request\n"
