@@ -99,15 +99,19 @@ PNPM_FLOW_FIELDS = {"resolution", "engines", "os", "cpu", "libc"}  # pnpm writes
 _FLOW_QUOTED = r"'(?:[^']|'')*'"
 _FLOW_ITEM = rf"(?:[A-Za-z0-9][A-Za-z0-9._-]*|{_FLOW_QUOTED})"
 _FLOW_PLAIN = r"[^\s,'{}\[\]#&*!|>%@`?:-][^,'{}\[\]#:]*"  # no `:` either: `a: b` is a nested key
-_FLOW_PAIR = rf"{_FLOW_ITEM}: (?:{_FLOW_PLAIN}|{_FLOW_QUOTED})"  # any engine name npm allows
+# An engine name: any plain YAML token with no quote, space, `:`, `#` or flow indicator, or one whole
+# quoted scalar.
+_ENGINE_NAME = rf"(?:[^\s,'{{}}\[\]#&*!|>%@`?:\"-][^\s,'{{}}\[\]#:\"]*|{_FLOW_QUOTED})"
+_FLOW_PAIR = rf"{_ENGINE_NAME}: (?:{_FLOW_PLAIN}|{_FLOW_QUOTED})"
 _FLOW_LIST = re.compile(rf"^\[(?:{_FLOW_ITEM}(?:, {_FLOW_ITEM})*)?\]$")
 PNPM_FLOW_VALUE = {"engines": re.compile(rf"^\{{(?:{_FLOW_PAIR}(?:, {_FLOW_PAIR})*)?\}}$"),
                    "os": _FLOW_LIST, "cpu": _FLOW_LIST, "libc": _FLOW_LIST}
 # A plain one-line value (`deprecated`, `hasBin`): either one whole quoted scalar, or a block plain
 # scalar. In block context a quote after the first character is literal text and the scalar ends
 # at the end of the line (later, deeper lines are rejected as unexpected), so `Don't use it` is
-# safe; `#` is excluded so no comment can follow.
-_BLOCK_PLAIN = r"[^\s'{\[|>#&*!%@`?:,-][^#]*"
+# safe. A `#` after a space would start a comment and `: ` a nested mapping, so neither may appear;
+# a `#` right after another character is text (`https://x.example/y#z`).
+_BLOCK_PLAIN = r"[^\s'{\[|>#&*!%@`?:,-](?:[^#:\s]|\s(?!#)|:(?!\s|$)|(?<=\S)#)*"
 PNPM_PLAIN_VALUE = re.compile(rf"^(?:{_FLOW_QUOTED}|{_BLOCK_PLAIN})$")
 PNPM_BLOCK_PLAIN_LINE = re.compile(rf"^    (?:deprecated|hasBin): {_BLOCK_PLAIN}$")
 PNPM_PEER = re.compile(rf"^      {_OPEN}{_CLOSE}:(?: [^{{\[|>'][^']*|(?: '[^']*'))?$")

@@ -282,7 +282,8 @@ class CheckLockfilesTests(unittest.TestCase):
              ["[a'b, 'c]", "[x', 'y', z'w]", "[a b]", "['open]"]),
             ("engines", ["{node: '>=20'}", "{node: ^10 || ^12 || >=14}", "{node: '>=8', npm: '>=7'}"],
              ["{node: a'b, x: 'y}", "{node: >=20}", "{node: '>=20}", "{node: x, }", "{node: a: b}"]),
-            ("engines", ["{io.js: '>=1'}", "{Node_X: ^1}", "{'a b': '1'}"], ["{'a: 1}", "{a'b: 1}"]),
+            ("engines", ["{io.js: '>=1'}", "{Node_X: ^1}", "{'a b': '1'}", "{_runtime: ^1}", "{node/js: '1'}",
+                         "{node+alt: '1'}"], ["{'a: 1}", "{a'b: 1}", "{a b: 1}", "{-x: 1}"]),
         ):
             for value in good:
                 with self.subTest(field=field, value=value):
@@ -291,10 +292,10 @@ class CheckLockfilesTests(unittest.TestCase):
                 with self.subTest(field=field, value=value):
                     self.assertIsNone(cl.PNPM_FLOW_VALUE[field].match(value))
         for value in ("true", "'] #'", "Use x instead", "'it''s gone'", "don't use", "Don't use 'x' anymore",
-                      "x 'y' z"):
+                      "x 'y' z", "See https://github.com/org/pkg#migration", "a:b"):
             with self.subTest(value=value):
                 self.assertIsNotNone(cl.PNPM_PLAIN_VALUE.match(value))
-        for value in ("'a' b", "[x]", "> folded", "'open", "x # comment", "", "& anchor"):
+        for value in ("'a' b", "[x]", "> folded", "'open", "x # comment", "", "& anchor", "a: 'b", "a:", "x #"):
             with self.subTest(value=value):
                 self.assertIsNone(cl.PNPM_PLAIN_VALUE.match(value))
         for bad, message in (("    os: [a'b, 'c]\n", "os must be a one-line value"),
@@ -304,12 +305,29 @@ class CheckLockfilesTests(unittest.TestCase):
                 self.pnpm("\n  x@1.0.0:\n" + RES + bad, times={**PNPM_TIMES, "x@1.0.0": OLD})
                 self.assertIn(message, self.errors())
         # A deprecation message with an apostrophe, as pnpm writes it, passes (PR #147 review).
-        for good in ("    deprecated: Don't use this\n", "    deprecated: Don't use 'x' anymore\n"):
+        for good in ("    deprecated: Don't use this\n", "    deprecated: Don't use 'x' anymore\n",
+                     "    deprecated: See x.example/y#z\n",  # a URL scheme trips the source scan (#145)
+                     "    os: ['!win32']\n    engines: {node: '>=8', bun: '>=1'}\n",
+                     "    engines: {_runtime: ^1}\n"):
             with self.subTest(good=good):
                 self.pnpm("\n  x@1.0.0:\n" + RES + good, times={**PNPM_TIMES, "x@1.0.0": OLD})
                 lock = self.repo / "pnpm-lock.yaml"
                 lock.write_text(lock.read_text() + "\n  x@1.0.0: {}\n")
                 self.assertEqual("", self.errors())
+
+    def test_the_odd_quote_exemption_stays_narrow(self):
+        # PR #147 round 2: only a 4-space deprecated/hasBin block plain value may have an odd quote count.
+        for bad in ("    deprecated: 'open\n", "    engines: {node: a'b}\n", "    deprecated: a: 'b\n",
+                    "    deprecated: x # don't\n"):
+            with self.subTest(bad=bad):
+                self.pnpm("\n  x@1.0.0:\n" + RES + bad, times={**PNPM_TIMES, "x@1.0.0": OLD})
+                self.assertIn("a single quote is left open", self.errors())
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        lock.write_text(lock.read_text().replace("  react@19.3.0: {}\n", "  react@19.3.0:\n    deprecated: x'\n", 1))
+        self.assertIn("unexpected line in a snapshot", self.errors())
+        self.pnpm("\n  x@1.0.0:\n" + RES + "    deprecated: Don't\n      use it\n", times={**PNPM_TIMES, "x@1.0.0": OLD})
+        self.assertIn("unexpected line in a package entry", self.errors())
 
     def test_sections_out_of_order_fail(self):
         self.pnpm(times=PNPM_TIMES)
