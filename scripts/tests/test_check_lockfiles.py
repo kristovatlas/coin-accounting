@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -219,6 +220,36 @@ class CheckLockfilesTests(unittest.TestCase):
         self.assertIn("the snapshot react@19.3.0 has no entry in packages", errors)
         self.assertIn("react@19.3.0 is referenced but has no entry in packages", errors)
 
+    def test_an_alias_to_another_package_fails(self):
+        # PR #136 round 3: `version: evil@1.0.0` would install evil as react.
+        lock = self.repo / "pnpm-lock.yaml"
+        extra = "\n  evil@1.0.0:\n" + RES
+        self.pnpm(extra, times={**PNPM_TIMES, "evil@1.0.0": OLD})
+        good = lock.read_text().replace("  react@19.3.0: {}\n", "  react@19.3.0: {}\n\n  evil@1.0.0: {}\n", 1)
+        lock.write_text(good.replace("        version: 19.3.0\n", "        version: evil@1.0.0\n", 1))
+        self.assertIn("unexpected line in an importer", self.errors())
+        lock.write_text(good.replace("  react@19.3.0: {}\n", "  react@19.3.0:\n    dependencies:\n      react: evil@1.0.0\n", 1))
+        self.assertIn("unexpected line in a snapshot", self.errors())
+
+    def test_open_flow_values_quotes_and_repeated_sections_fail(self):
+        # PR #136 round 3: a value left open could swallow the next line, so YAML and the check would
+        # disagree about which lines belong to which entry.
+        for bad, message in (("    engines: {node: [x]\n", "engines must be a one-line value"),
+                             ("    os: [linux, {a: 1}]\n", "os must be a one-line value"),
+                             ("    deprecated: 'open\n", "deprecated must be a plain one-line value")):
+            with self.subTest(bad=bad):
+                self.pnpm("\n  x@1.0.0:\n" + RES + bad, times={**PNPM_TIMES, "x@1.0.0": OLD})
+                self.assertIn(message, self.errors())
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        lock.write_text(lock.read_text() + "\nsettings:\n  autoInstallPeers: true\n")
+        self.assertIn("the settings section appears twice", self.errors())
+
+    def test_a_malformed_publish_time_makes_the_check_exit_1(self):
+        self.pnpm(times={**PNPM_TIMES, "react@19.3.0": "last tuesday"})
+        with redirect_stdout(io.StringIO()), unittest.mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(check_lockfiles.main([str(self.repo), "--now", "2026-10-01T00:00:00+00:00"]), 1)
+
     def test_escaped_or_double_quoted_scalars_fail(self):
         # PR #136 review: "li\\u006ek:../x" decodes to link:../x, which the raw-text source scan can't see.
         for spec in ('"li\\u006ek:../x"', '"file:../x.tgz"', "'a\\b'"):
@@ -227,6 +258,12 @@ class CheckLockfilesTests(unittest.TestCase):
                     "lockfileVersion: '9.0'\n\nimporters:\n\n  frontend:\n    dependencies:\n"
                     f"      x:\n        specifier: ^1.0.0\n        version: {spec}\n")
                 self.assertIn("double quotes and backslashes are not allowed", self.errors())
+
+    def test_an_empty_lock_with_declared_js_dependencies_fails(self):
+        (self.repo / "frontend").mkdir()
+        (self.repo / "frontend" / "package.json").write_text('{"name": "f", "dependencies": {"react": "19.3.0"}}')
+        (self.repo / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n\nimporters:\n\npackages:\n\nsnapshots:\n")
+        self.assertIn("pnpm-lock.yaml has no packages, but frontend/package.json declare dependencies", self.errors())
 
     def test_declared_js_dependencies_without_a_lockfile_fail(self):
         (self.repo / "frontend").mkdir()

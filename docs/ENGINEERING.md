@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | Version | 0.2.32 |
-| Last updated | 2026-10-05 |
+| Last updated | 2026-10-06 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -132,11 +132,11 @@ Third-party code is never copied into the repository (a vendored package, a mini
 
 The cooldown only applies when versions are *resolved*. A hand-edited or bot-generated lockfile could still bring in a fresh or off-registry package. So a required CI check (`scripts/check-lockfiles`, added in M0.2 together with the first lockfile) verifies, for **every** entry in `pnpm-lock.yaml` and `uv.lock`:
 
-- the source is `registry.npmjs.org` or `files.pythonhosted.org`, with no git, URL, tarball or path sources, direct or transitive
+- the source is the configured npm registry (pinning it to `registry.npmjs.org` is #36 and #93) or `files.pythonhosted.org`, with no git, URL, tarball or path sources, direct or transitive
 - an integrity hash is present
 - the version was published **≥ 7 days** ago (npm registry `time`; `upload-time` in `uv.lock`), unless it has a recorded, unexpired exception (§2.6)
 - our `package.json` files have no lifecycle scripts, and there is no `.pnpmfile.*` and no `configDependencies`
-- the pnpm lockfile is parsed in full. pnpm 12 can write multi-document lockfiles, and scanners that read only the first document report zero dependencies **(verify at setup that the Socket App and Dependabot handle this)**
+- the pnpm lockfile is read in full, as one document: a second document fails the check (some scanners read only the first, which would hide entries from them)
 
 **Status (M0.2):** `scripts/check_lockfiles.py` runs in `make check` and CI, on the pinned Python once it verifies, otherwise the host's (3.11+), and its tests run on that interpreter too. It checks every `uv.lock` entry: source, a file URL of exactly PyPI's shape (`https://files.pythonhosted.org/packages/xx/yy/<60 hex>/<file>`, so no query, fragment, `%`-escape, backslash or dot segment), a file name from that URL matching the entry's name and version, sha256 and age. Declared Python dependencies without a `uv.lock` fail. It also checks our `package.json` files (lifecycle scripts, `configDependencies` and `packageManager`, including escaped keys) and `pnpm-workspace.yaml`:
 - no `configDependencies` and no backslashes
@@ -148,9 +148,12 @@ The cooldown only applies when versions are *resolved*. A hand-edited or bot-gen
 A `.pnpmfile.*` in any letter case anywhere in the tree fails. **`pnpm-lock.yaml`** (M0.3) is the only pnpm lockfile allowed; any other `pnpm-lock*.yaml`, in any letter case and anywhere, fails. It is read in full and strictly, line by line, with no YAML library:
 - lockfile version `9.0`, one document, ASCII only, no tabs, and none of the YAML constructs above
 - only the top-level keys pnpm writes for registry packages (`lockfileVersion`, `settings`, `importers`, `packages`, `snapshots`), and only its two default settings
-- no URL, git, tarball, `link:`, `file:`, `workspace:`, `npm:` alias or directory source anywhere in the file, direct or transitive
-- every `packages` entry has exactly one resolution, of exactly the form `{integrity: sha512-…}`, which pnpm writes only for the default registry; no resolution anywhere else
-- every package's publish time, read from **`pnpm-lock.times.json`**, is at least 7 days old. `make propose-js` records those times with the pinned pnpm under `sfw` (`scripts/npm_publish_times.py`), so `make check` stays offline. **Known limit, accepted by the owner (2026-10-05), as for `uv.lock`:** a hand-edited times file could back-date a package; every lockfile change still needs the owner's approval with the Socket report (§2.4). The `scripts/check-lockfiles` wrapper and the Makefile (its `SYS_PYTHON`, which also runs every toolchain verification) find the host `python3` on `PATH` skipping `.toolchain/bin` and the pinned binary, so the pinned Python never verifies itself; it runs only after that host interpreter has verified it. There are no cooldown exceptions yet, so the check allows none: recording one (§2.6) means extending the check in the same PR. **Known limit, accepted by the owner (PR #63):** the age check trusts the `upload-time` recorded in `uv.lock`, so a hand-edited lockfile could back-date a package. Every lockfile change still needs the owner's approval with the Socket report (§2.4).
+- no URL, git, tarball, `link:`, `file:`, `workspace:` or directory source anywhere in the file, and no alias (a version naming another package), direct or transitive
+- every `packages`, `snapshots` and `importers` line has one of the shapes pnpm 12 writes, every snapshot and importer reference names a checked `packages` entry, and every `packages` entry has a snapshot
+- every `packages` entry has exactly one resolution, of exactly the form `{integrity: sha512-…}`, meaning the configured registry; no resolution anywhere else
+- every package's publish time, read from **`pnpm-lock.times.json`**, is at least 7 days old. `make propose-js` records those times with the pinned pnpm under `sfw` (`scripts/npm_publish_times.py`), so `make check` stays offline. **Known limit, accepted by the owner (2026-10-05), as for `uv.lock`:** a hand-edited times file could back-date a package; every lockfile change still needs the owner's approval with the Socket report (§2.4).
+
+The `scripts/check-lockfiles` wrapper and the Makefile (its `SYS_PYTHON`, which also runs every toolchain verification) find the host `python3` on `PATH` skipping `.toolchain/bin` and the pinned binary, so the pinned Python never verifies itself; it runs only after that host interpreter has verified it. There are no cooldown exceptions yet, so the check allows none: recording one (§2.6) means extending the check in the same PR. **Known limit, accepted by the owner (PR #63):** the age check trusts the `upload-time` recorded in `uv.lock`, so a hand-edited lockfile could back-date a package. Every lockfile change still needs the owner's approval with the Socket report (§2.4).
 
 ### 2.6 Updating dependencies
 

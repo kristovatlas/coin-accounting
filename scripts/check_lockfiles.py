@@ -82,7 +82,10 @@ PNPM_RESOLUTION = re.compile(r"^    resolution: \{integrity: sha512-[A-Za-z0-9+/
 PNPM_FIELD = re.compile(r"^    (resolution|engines|os|cpu|libc|hasBin|deprecated|peerDependencies|peerDependenciesMeta):"
                         r"(?: (.*))?$")
 PNPM_FLOW_FIELDS = {"resolution", "engines", "os", "cpu", "libc"}  # pnpm writes these as one-line flow values
-PNPM_PEER = re.compile(r"^      '?(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*'?:(?: [^{\[].*)?$")
+# One closed, non-nested flow collection per line, so no value can stay open and swallow the next line.
+PNPM_FLOW_VALUE = {"engines": re.compile(r"^\{[^{}\[\]]*\}$"), "os": re.compile(r"^\[[^{}\[\]]*\]$"),
+                   "cpu": re.compile(r"^\[[^{}\[\]]*\]$"), "libc": re.compile(r"^\[[^{}\[\]]*\]$")}
+PNPM_PEER = re.compile(r"^      '?(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*'?:(?: [^{\[|>'][^']*|(?: '[^']*'))?$")
 PNPM_PEER_META = re.compile(r"^        optional: (?:true|false)$")
 # `snapshots` and `importers` are read just as strictly: a snapshot's fields are merged into its
 # package by pnpm, so a `name:`/`version:` there would redirect the fetch, and every reference must
@@ -92,13 +95,15 @@ _VER = r"[0-9][0-9A-Za-z.+-]*"
 _PEERS = r"(?:\([^\s'\"\\:]+\))*"
 PNPM_SNAPSHOT = re.compile(rf"^  '?({_NAME})@({_VER})({_PEERS})'?:(?: \{{\}})?$")
 PNPM_SNAPSHOT_FIELD = re.compile(r"^    (?:(dependencies|optionalDependencies|transitivePeerDependencies):|optional: true)$")
-PNPM_SNAPSHOT_DEP = re.compile(rf"^      '?({_NAME})'?: (?:({_NAME})@)?({_VER}){_PEERS}$")
+# No `name@version` values: that is an npm alias, which would install another package under this
+# dependency's name. The committed lockfile has none; one needs an explicit decision.
+PNPM_SNAPSHOT_DEP = re.compile(rf"^      '?({_NAME})'?: ()({_VER}){_PEERS}$")
 PNPM_SNAPSHOT_PEER = re.compile(rf"^      - '?{_NAME}'?$")
 PNPM_IMPORTER = re.compile(r"^  (?:\.|[a-z0-9][a-z0-9._-]*):(?: \{\})?$")
 PNPM_IMPORTER_GROUP = re.compile(r"^    (?:dependencies|devDependencies|optionalDependencies):$")
 PNPM_IMPORTER_DEP = re.compile(rf"^      '?({_NAME})'?:$")
-PNPM_IMPORTER_SPEC = re.compile(r"^        specifier: [^\s{\[|>].*$")
-PNPM_IMPORTER_VERSION = re.compile(rf"^        version: (?:({_NAME})@)?({_VER}){_PEERS}$")
+PNPM_IMPORTER_SPEC = re.compile(r"^        specifier: (?:[^\s{\[|>'][^']*|'[^']*')$")
+PNPM_IMPORTER_VERSION = re.compile(rf"^        version: ()({_VER}){_PEERS}$")
 # Anything that names a source other than the default registry. pnpm writes no URL at all for it.
 PNPM_FOREIGN = re.compile(r"://|\b(?:link|file|git|github|gitlab|bitbucket|workspace|catalog|npm|portal|patch):"
                           r"|\btarball\b|\bdirectory\b|\btype: |\brepo: |\bcommit: ")
@@ -302,6 +307,7 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
             # behind escapes (`"li\\u006ek:../x"` decodes to `link:../x`) that the scan above can't see.
             errors.append(f"{PNPM_LOCK}:{n}: double quotes and backslashes are not allowed")
     section = None
+    seen_sections: set[str] = set()
     packages: dict[str, int] = {}  # "name@version" -> resolution lines seen
     current = None
     field = None  # the open four-space field of the current package entry
@@ -316,13 +322,19 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
             key = line.split(":", 1)[0]
             if key not in PNPM_TOP_KEYS:
                 errors.append(f"{PNPM_LOCK}:{n}: top-level key {key!r} is not allowed")
+            elif key in seen_sections:
+                errors.append(f"{PNPM_LOCK}:{n}: the {key} section appears twice")
             elif n != 1 and line != f"{key}:":
                 # e.g. `packages: {...}`: a flow-style section would hide every entry from the check
                 errors.append(f"{PNPM_LOCK}:{n}: the {key} section must be written as a block (`{key}:` alone)")
+            seen_sections.add(key)
             section, current, field = key, None, None
             continue
         if section == "settings" and line not in PNPM_SETTINGS:
             errors.append(f"{PNPM_LOCK}:{n}: unexpected setting")
+        if section not in ("settings", "importers", "packages", "snapshots"):
+            errors.append(f"{PNPM_LOCK}:{n}: unexpected indented line under {section}")
+            continue
         if section != "packages":
             if line.lstrip().startswith("resolution:"):
                 errors.append(f"{PNPM_LOCK}:{n}: a resolution outside the packages section")
@@ -355,12 +367,12 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
                 else:
                     errors.append(f"{PNPM_LOCK}:{n}: a resolution must be exactly {{integrity: sha512-...}}")
             elif field in PNPM_FLOW_FIELDS:
-                if not (value.startswith(("{", "[")) and value.endswith(("}", "]"))):
+                if not PNPM_FLOW_VALUE[field].match(value) or value.count("'") % 2:
                     errors.append(f"{PNPM_LOCK}:{n}: {field} must be a one-line value")
             elif field.startswith("peerDependencies"):
                 if value:
                     errors.append(f"{PNPM_LOCK}:{n}: {field} must be written as a block")
-            elif not value or value.startswith(("{", "[", "|", ">")):
+            elif not value or value.startswith(("{", "[", "|", ">")) or value.count("'") % 2:
                 errors.append(f"{PNPM_LOCK}:{n}: {field} must be a plain one-line value")
         elif field in ("peerDependencies", "peerDependenciesMeta") and PNPM_PEER.match(line):
             pass
@@ -368,6 +380,9 @@ def check_pnpm_lock(repo: Path, now: datetime) -> list[str]:
             pass
         else:
             errors.append(f"{PNPM_LOCK}:{n}: unexpected line in a package entry")
+    if not packages and js_manifests_with_dependencies(repo):
+        errors.append(f"{PNPM_LOCK} has no packages, but {', '.join(js_manifests_with_dependencies(repo))} "
+                      "declare dependencies: run make propose-js")
     for pkg, count in packages.items():
         if count != 1:
             errors.append(f"{PNPM_LOCK}: {pkg} must have exactly one registry resolution")

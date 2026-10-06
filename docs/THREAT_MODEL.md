@@ -5,8 +5,8 @@
 
 | | |
 |---|---|
-| Version | 0.7.36 (M0 in progress) |
-| Last updated | 2026-10-05 |
+| Version | 0.7.37 (M0 in progress) |
+| Last updated | 2026-10-06 |
 | Scope | v1: Bitcoin (Bitcoin Core) only, on Linux and macOS — see [`PLAN.md`](../PLAN.md) |
 | Focus | Protecting the app and the user's data once it's built. The agent-process risks (AI agents, reviews, merging: T-605, R-9, R-11, R-12) are accepted by the owner (ADR 0031) and don't add steps to planned work. The supply-chain mitigations (T-601–T-604, T-606, T-608) still apply in full, and dependency approval stays with the owner |
 | Method | Data-flow diagram → trust boundaries → STRIDE per boundary, plus privacy (linkability/disclosure) and integrity-of-tax-output threats |
@@ -393,3 +393,4 @@ This applies to almost any project that vets its dependencies.
 | 2026-10-04 | 0.7.34 | R-10: another local user impersonating the node on the loopback RPC port is an accepted risk (single-user machine; #107). The minimum Core version is 31.1 (ADR 0029) |
 | 2026-10-04 | 0.7.35 | T-601, T-602, T-604 (ADR 0028, proposed): FastAPI 0.141.1 and uvicorn 0.53.0 proposed as the first runtime dependencies, with `pydantic-core` as allowed native code. FastAPI 0.142.x is avoided for now because it requires `opentelemetry-api` (T-604). Every new wheel was checked against its hash for `.pth` files and install scripts. Statuses unchanged |
 | 2026-10-05 | 0.7.36 | Autopilot (ADR 0031): new accepted risk R-12 (security-critical and tax/doxx/chain code merges after AI review only; the gate still refuses dependency and install files and the agents' own controls in any directory, and needs the panel's commit status), T-605 and R-9 updated, R-11 marked as narrowed by R-12; a Focus row: the threat model protects the shipped app, and development-process risks are recorded and accepted rather than gating planned work |
+| 2026-10-06 | 0.7.37 | T-601/T-602: the pnpm half of the lockfile policy check lands with the first JavaScript dependencies (PR #136): a strict read of every line of `pnpm-lock.yaml` (registry-only sources, no aliases, one sha512 integrity per package, snapshot and importer references cross-checked) and the 7-day cooldown from `pnpm-lock.times.json`. Accepted limit, as for `uv.lock`: a hand-edited times file could back-date a package; every lockfile change still needs the owner's approval with the Socket report. Native build tools: ADR 0032 (proposed) |

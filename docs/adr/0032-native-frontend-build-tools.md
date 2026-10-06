@@ -17,7 +17,7 @@ The frontend stack proposed in PR #136 (M0.3 H3) brings native code through **Vi
 
 These run on the development machine and in CI at build time. They are not part of the shipped app, but the bundler **writes the shipped bundle**, so DEPENDENCIES.md vets it like runtime code. pnpm installs only the binary for the current platform.
 
-**Install scripts:** `rolldown` and `lightningcss` ship prebuilt binaries and have no install script. **`fsevents` 2.3.3 ships a `binding.gyp`, which gives it an implicit `node-gyp rebuild` install step** (the npm registry flags it as having an install script). It is skipped on Linux (`os: [darwin]`). On macOS, `allowBuilds: {}` with `strictDepBuilds: true` makes pnpm refuse to install until that build is either allowed or explicitly denied. The package also ships a prebuilt `fsevents.node`, so denying the build should still leave it working (to be confirmed on macOS before approval).
+**Install scripts:** none of the three runs one under the current settings. CI's macOS `tests` job on PR #136 (commit `9a45192`) ran `make bootstrap`, which installs the frozen lockfile with `allowBuilds: {}` and `strictDepBuilds: true`. pnpm 12.5.1 verified all 48 entries and installed them without refusing any build, so it doesn't treat `fsevents` 2.3.3 (which ships a prebuilt `fsevents.node`) as needing one.
 
 Every mainstream bundler has native code now: Vite 7 and earlier used `esbuild` (a Go binary per platform), and Rollup 4 ships Rust bindings. A pure-JavaScript bundler means an older or heavier tool, such as webpack, or Rollup 4's WebAssembly build.
 
@@ -32,19 +32,19 @@ Every mainstream bundler has native code now: Vite 7 and earlier used `esbuild` 
 Proposed: **1**. The owner decides between the options when approving PR #136.
 
 - **Allowed:** the prebuilt native binaries of `rolldown` (with its `@rolldown/binding-*` packages), `lightningcss` (with its `lightningcss-*` packages) and `fsevents`, at the versions pinned in `pnpm-lock.yaml`. They are **development and build dependencies only**: they run on the developer machine and in CI, and they are never part of the shipped app.
-- **`fsevents`' build step is denied, not allowed** (proposed): add an explicit deny for `fsevents` to `allowBuilds` in `pnpm-workspace.yaml` (the exact syntax for the pinned pnpm to be confirmed), so no install-time compile runs and macOS installs aren't blocked. Allowing the build instead would be install-time code execution, which this ADR does not cover. **The owner decides this together with the rest of the ADR**, and confirms a macOS install before approving.
 - **Not allowed by this ADR:** any other native JavaScript package, including TypeScript 7's native compiler (DEPENDENCIES.md pins TypeScript 6.0.3, the last pure-JavaScript release). Each needs its own ADR.
 - **Unchanged controls:**
   - `make propose-js` resolves only, and the owner approves the Socket report and the lockfile diff (§2.4)
   - the 7-day cooldown
-  - `allowBuilds`: no install script runs (empty except the explicit `fsevents` deny above)
+  - `allowBuilds: {}` with `strictDepBuilds: true`: no install script runs, and any package that needs one fails the install
   - `blockExoticSubdeps`
-  - the lockfile policy check: no explicit non-registry source, one sha512 integrity per package (the configured registry is pinned by the `.npmrc`/environment checks, #93 and #36)
-- **Residual risk:** the compiled code (Rust in `rolldown` and `lightningcss`; C++ in `fsevents`) isn't reviewed beyond its hashes and Socket's report. A compromised bundler could change the **shipped bundle**, which runs in the user's browser with the session token. That is a frontend supply-chain risk (THREAT_MODEL T-601, T-604, and the browser-side threats T-104 and T-106), not the backend in-process risk R-4 covers. It is limited by:
+  - the lockfile policy check: no explicit non-registry source, one sha512 integrity per package (which registry a bare integrity resolution means is the configured one; pinning it to registry.npmjs.org is not yet enforced: #36, #93)
+- **Residual risk:** the compiled code (Rust in `rolldown` and `lightningcss`; C++ in `fsevents`) isn't reviewed beyond its hashes and Socket's report. A compromised bundler could change the **shipped bundle**, which runs in the user's browser with the session token. That is a frontend supply-chain risk (THREAT_MODEL T-601, T-604, and the browser-side threats T-104 and T-106), not the backend in-process risk R-4 covers. It is limited only by:
   - the production-build E2E tests under the real CSP (ENGINEERING §3.1), which fail if the bundle reaches an external host (T-106)
-  - the reproducible-build comparison of the frontend bundle (ENGINEERING §2.7)
+  - the pinned hashes and the Socket report
 
-  The bundle's content isn't otherwise reviewed. **The owner accepts this residual risk by accepting this ADR,** and it is recorded as a new accepted risk in THREAT_MODEL in the same PR that accepts the ADR.
+  **Not mitigated:** tampering inside the app's own origin (altered values shown to the user, or the session token used against the same-origin API). The reproducible-build comparison (ENGINEERING §2.7) builds twice with the same binaries, so it catches nondeterminism, not a malicious bundler. A cross-check (building with another platform's binary, or against a pure-JavaScript build) is possible future work.
+- **Build-time execution:** the binaries also run with the developer's and CI's privileges at build time (the checkout, git credentials, whatever a CI job holds). That is the same exposure as Vite's own JavaScript, which runs there too, and it is covered by T-601 and the existing supply-chain controls. **The owner accepts this residual risk by accepting this ADR,** and it is recorded as a new accepted risk in THREAT_MODEL in the same PR that accepts the ADR.
 
 ### Consequences
 
