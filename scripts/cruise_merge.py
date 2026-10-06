@@ -6,6 +6,7 @@ reason and exits 1, and the PR goes to the human as in standard mode. Always run
 copy (`git show origin/main:scripts/cruise_merge.py`), never a PR's, as with the tripwire.
 
     cruise_merge.py N SHA [--dry-run]
+    cruise_merge.py --list-blocked MERGE_BASE SHA   (the changed paths the gate would refuse)
 
 The caller updates `origin/main` and the PR head first, in a separate step; the gate itself
 never downloads anything.
@@ -71,16 +72,21 @@ BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md", "makefile", "docs/archit
                  "backend/tests/socket_guard.py", "backend/tests/__init__.py")
 # Anywhere. Dependency manifests, lockfiles and install configuration: new dependencies, and what
 # installs them, are the owner's decision (ENGINEERING §2.4; the Makefile's DEP_FILES and
-# INSTALL_CONFIG, kept in sync by a test). Plus the pytest files that switch the socket guard on or
-# could skip it (conftest.py, a pytest.toml that would take precedence over pyproject.toml).
+# INSTALL_CONFIG, kept in sync by a test). Plus the files that configure CI's checks and could take
+# precedence over pyproject.toml for a subtree: the pytest files that switch the socket guard on or
+# could skip it, and the lint, type-check and coverage settings (a ruff.toml beats pyproject.toml).
 BLOCKED_NAMES = ("pyproject.toml", "uv.lock", "uv.toml", "package.json", "pnpm-lock.yaml", "pnpm-lock.times.json",
                  "pnpm-workspace.yaml", ".npmrc", ".python-version", ".node-version",
-                 "conftest.py", "pytest.toml", ".pytest.toml", ".mcp.json")
+                 "conftest.py", "pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg",
+                 "ruff.toml", ".ruff.toml", "mypy.ini", ".mypy.ini", ".coveragerc",
+                 ".mcp.json", ".cursorrules", ".windsurfrules")
 BLOCKED_NAME_PATTERNS = ("requirements*.txt", "constraints*.txt", ".pnpmfile.*",
+                         # frontend lint and coverage settings
+                         "eslint.config.*", ".eslintrc*", "vitest.config.*", "vitest.workspace.*",
                          # agent instructions and skills, at any depth (AGENTS.override.md, backend/CLAUDE.md)
-                         "*agents*.md", "*claude*.md", "skill.md")
-# Agent tool configuration directories, at any depth.
-BLOCKED_DIRS = (".claude", ".codex", ".agents", ".cursor", ".gemini")
+                         "*agents*.md", "*claude*.md", "*gemini*.md", "skill.md", ".aider*")
+# Agent and editor tool configuration directories, at any depth (.vscode can hold MCP servers and tasks).
+BLOCKED_DIRS = (".claude", ".codex", ".agents", ".cursor", ".gemini", ".vscode", ".idea")
 # Every changed file must have one of these suffixes: no binaries, no unscanned file types.
 TEXT_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".json", ".toml", ".yml", ".yaml",
                  ".css", ".html", ".htm", ".md", ".csv", ".svg", ".txt")
@@ -341,12 +347,31 @@ def merge(name: str, n: int, sha: str) -> None:
     )  # fmt: skip
 
 
+def list_blocked(merge_base: str, sha: str) -> list[str]:
+    """The changed paths the gate would refuse, so the review panel picks the profile from the gate's own
+    list rather than by eye (ADR 0031 §2)."""
+    changed = git_z("diff", *DIFF_OPTS, "--name-only", "-z", merge_base, sha)
+    return [p for p in changed if blocked_path(p)]
+
+
 def main(argv: list[str] | None = None) -> int:
+    args_in = sys.argv[1:] if argv is None else argv
+    if args_in[:1] == ["--list-blocked"]:
+        if len(args_in) != 3:
+            print("usage: cruise_merge.py --list-blocked MERGE_BASE SHA", file=sys.stderr)
+            return 2
+        try:
+            for p in list_blocked(args_in[1], args_in[2]):
+                print(p)
+        except Exception as e:
+            print(f"cruise_merge: could not list ({type(e).__name__})", file=sys.stderr)
+            return 2
+        return 0
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pr", type=int)
     parser.add_argument("sha")
     parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(args_in)
     if len(args.sha) != 40 or any(c not in "0123456789abcdef" for c in args.sha):
         print("cruise_merge: SHA must be a full 40-character commit id", file=sys.stderr)
         return 2

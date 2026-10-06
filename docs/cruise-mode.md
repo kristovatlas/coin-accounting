@@ -88,7 +88,7 @@ It runs from a 10-minute check-in job in that Claude Code session. The job expir
    - No ADR is needed: ADR 0030 defines both values.
    - From then on, the review panel runs its standard profile, nothing merges automatically, and `/cruise` refuses to start.
 2. **Review or undo what cruise mode merged.**
-   - Each run's tracking issue lists the starting SHA and every PR it merged. Every automatic merge commit's title ends in "(cruise mode, ADR 0030)", so `git log --merges --fixed-strings --grep "(cruise mode, ADR 0030)"` finds them.
+   - Each run's tracking issue lists the starting SHA and every PR it merged. Every automatic merge commit's title ends in "(autopilot, ADR 0031)" (before autopilot, "(cruise mode, ADR 0030)"), so `git log --merges -E --grep "\((autopilot, ADR 0031|cruise mode, ADR 0030)\)"` finds them.
    - To see what each merge changed: `git diff <merge-sha>^1 <merge-sha>`, for the merge SHAs listed in the run's tracking issue. A plain `git diff <start-sha> main` would also include other PRs merged in the meantime.
    - To undo one merge, use a PR containing `git revert -m 1 <merge-sha>`. To undo a run, revert its merges newest first.
 3. **Catch up the paperwork.** If a run stopped before its milestone-closing PR, ask for one, or write it yourself. It brings THREAT_MODEL evidence and the changelog up to date.
@@ -108,12 +108,12 @@ It runs from a 10-minute check-in job in that Claude Code session. The job expir
 - the milestone-closing PR
 - PRs outside a `/cruise` run: the review panel runs the gate itself
 
-The panel marks a commit it cleared with the commit status `review-panel`, and the gate refuses a commit without it. Every merge is listed in the run's tracking issue, or, outside a run, in the standing **"Autopilot merges"** issue. The mechanical tripwire's path, content and removed-line flags are posted for the record; symlinks, submodules, executable bits, changes it can't parse and any new kind of flag block.
+The panel marks a commit it cleared with the commit status `review-panel`, and the gate refuses a commit without it. Every merge is listed in the run's tracking issue, or, outside a run, in the standing **"Autopilot merges"** issue. The mechanical tripwire's path, content, removed-line and deleted-file flags are posted for the record; symlinks, submodules, executable bits, changes it can't parse and any new kind of flag block.
 
 **Always comes to you,** whatever the mode:
 - dependency approvals, and any change to dependency manifests, lockfiles or install configuration (`uv.toml`, `.npmrc`, `.python-version`, …), in any directory
 - ADR-level decisions, ADRs, and `docs/architecture.md`
-- changes to the agents' own controls: `scripts/`, `.github/`, the `Makefile`, `PROCESS_MODE`, this guide; agent instructions, skills and tool configuration in any directory (`.claude/`, `.codex/`, `AGENTS*.md`, `CLAUDE*.md`, `.mcp.json`); the test socket guard, every `conftest.py` and a `pytest.toml`
+- changes to the agents' own controls: `scripts/`, `.github/`, the `Makefile`, `PROCESS_MODE`, this guide; agent instructions, skills and tool configuration in any directory (`.claude/`, `.codex/`, `AGENTS*.md`, `CLAUDE*.md`, `.mcp.json`); the test socket guard, every `conftest.py` and a `pytest.toml`/`pytest.ini`; the lint, type-check and coverage settings (`ruff.toml`, `mypy.ini`, `.coveragerc`, `eslint.config.*`, `vitest.config.*`); other agents' and editors' configuration (`GEMINI.md`, `.vscode/`, …)
 - a change that weakens a control in a binding document (it needs an ADR)
 - a Critical security finding, or a committed secret or real user data, after round 2 (functional and High security P1s are fixed during the run)
 - any Opus tripwire flag of Medium or above, and anything else the gate refuses

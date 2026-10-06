@@ -64,6 +64,7 @@ PANEL="$GIT_DIR_ABS/review-panel"; WT="$GIT_DIR_ABS/review-panel-wt"; umask 077
   "posted": {"<marker>": "<comment or issue id>"},
   "p1_fixes": [], "human_items": [],
   "awaiting_reason": "p1-decision|round-limit|blocker|reviewer-failures",
+  "started_by": "human|cruise", "no_clearance": null, "gate_exit2": 0, "gate_dry_run_done": false,
   "history": []
 }
 ```
@@ -360,6 +361,8 @@ cd "$WT/prN-review" && ( echo "$BASHPID" > "$P-a$A.pid"
 > - obfuscation: encoded blobs, dynamic imports or `eval`, string-built names, and code that behaves differently in CI or on a given machine
 > - reads of credentials, home directories or data volumes
 > - changes to dependencies, lockfiles, CI, scripts or agent instructions that don't match the PR's stated purpose
+> - edits to a binding document (`ENGINEERING.md`, `THREAT_MODEL.md`, `PLAN.md`, `DEPENDENCIES.md`) that remove, relax or reword a control, or change a threat's status or mitigation without the code to back it; label these "binding-document control"
+> - new files that shadow a module the checks rely on (a standard-library name, a `.pyi` stub next to a `.py`)
 >
 > Answer "no flags" or a list of flags. **Don't judge code quality.** When unsure, flag it.
 
@@ -397,10 +400,11 @@ PR #N Review (round R):
 
 Applies only when **all three** of these hold. Everything above holds except what this section overrides.
 - `PROCESS_MODE` on `origin/main` is `cruise` (ADR 0030). Read it at the start of every round, not from the PR branch.
-- The PR was opened by the agent for the human's request: a `/cruise` run's slice or human item, or any other PR the agent opened (autopilot, ADR 0031).
+- The PR was opened by the agent for the human's request: a `/cruise` run's slice, its closing PR, or any other PR the agent opened (autopilot, ADR 0031). "Opened by the agent" means its number was recorded when this session or run opened it (in `run.json`, or in `$PANEL/agent-prs.txt`); a PR not recorded there, even a ready one of the owner's, gets the standard profile.
+- No path in the round-1 diff is one the gate refuses: run `main`'s copy of the gate with `--list-blocked "$merge_base" "$head_sha"`, and use the standard profile if it prints anything.
 - The panel's state records `"started_by": "cruise"`. It is set once, when the agent creates the state, and never changed. A panel the human starts with `/review-panel #N` records `"human"`.
 
-Every other PR gets the standard profile: any PR the human runs `/review-panel` on, even one the agent opened, and an agent PR that touches a path the gate refuses (ADR 0031 §3), which goes to the human anyway. Decide this when the state is created, from the round-1 diff. If a later fix round adds such a path, the profile stays, and the gate refuses the PR at the hand-off.
+Every other PR gets the standard profile: any PR the human runs `/review-panel` on, even one the agent opened, and an agent PR that touches a path the gate refuses (ADR 0031 §3), which goes to the human anyway. Decide this when the state is created, from the round-1 diff. If a later fix round adds such a path, switch to the standard profile and start a round over the full diff.
 
 - **Reviewers by risk.** Run the mechanical tripwire on `merge_base..head_sha` at the start of round 1.
   - **All four reviewers** if it raised any `path` flag, or the diff touches any `tax`, `doxx` or `chain` path under `backend/`.
@@ -414,7 +418,7 @@ Every other PR gets the standard profile: any PR the human runs `/review-panel` 
       2. Re-read the PR, and refresh `merge_base`.
       3. Rewrite the diff file as the full `merge_base..head_sha` diff.
       4. Go to `handing-off`, where CI, the mechanical tripwire and the Opus tripwire run on that commit.
-    - **A Critical security finding ends the cruise path,** and so does any committed secret or real user data, whatever its rating: a fix commit can't take it out of history. The PR goes to the human as a draft, with the finding stated in general terms, and the human is notified (through the `/cruise` run, when the PR is one of its slices).
+    - **A Critical security finding ends the cruise path,** in **any** round, and so does any committed secret or real user data, whatever its rating: a fix commit can't take it out of history. Record it at once in the state's `no_clearance` (a general description), and never set the `review-panel` status for this PR afterwards, even after a later clean round. The PR goes to the human as a draft, with the finding stated in general terms, and the human is notified (through the `/cruise` run, when the PR is one of its slices).
     - Only non-P1 findings become issues.
 - **Severity.** A **P1** is only:
   - a Critical/High finding the orchestrator has confirmed
@@ -422,7 +426,7 @@ Every other PR gets the standard profile: any PR the human runs `/review-panel` 
   - a real leak of secrets or user data
   - wrong tax figures
 
-  On its own, none of these is a P1: a mismatch with a binding document, a gap in a best-effort control (such as log redaction), or a Medium. They become issues. The ADR 0023 downgrades still apply.
+  On its own, none of these is a P1: a mismatch with a binding document, a gap in a best-effort control (such as log redaction), or a Medium. They become issues. The ADR 0023 downgrades still apply. **The exception:** a confirmed change that weakens a control in a binding document is a **human item** (it needs an ADR, AGENTS.md), and the PR goes to the human as a draft.
 - **Records.**
   - **One comment per round** (marker `…:round`). It holds the triage, followed by each reviewer's report in a `<details>` block, with security reports reduced as usual. The post-round-2 fixes are listed in a final `…:fixes` comment.
   - **One follow-up issue per PR** (marker `…:issue`): comment on it in later rounds, don't open new ones. Nits stay in the round comment.
@@ -431,10 +435,19 @@ Every other PR gets the standard profile: any PR the human runs `/review-panel` 
 - **Hand-off.**
   - **Before the tripwires, rewrite the diff file as the full `merge_base..final head_sha` diff.** The later rounds' diff files show only the fixes, and the Opus tripwire must see the whole change.
   - The mechanical tripwire and the Opus tripwire then run on the final SHA.
-  - **The human gets the PR as a draft instead** when the panel ended on a Critical security finding, a committed secret or real user data, or when the Opus tripwire raised a flag of Medium or above. Post the standard hand-off, and notify.
-  - **Otherwise clear the commit for the gate:** set the commit status `review-panel` on the final SHA (`gh api -X POST repos/{owner}/{repo}/statuses/<sha> -f state=success -f context=review-panel -f description="clean round R; Opus tripwire below Medium"`). Never set it in any other case. The gate refuses a commit without it.
+  - **This replaces the standard hand-off's steps 1, 7 and 8:** wait for all four `checks (…)` and `tests (…)` jobs, not only `checks`. The panel stays in `handing-off`, with its cron job, until the gate exits 0 or 1.
+  - **The human gets the PR as a draft instead** when `no_clearance` is set, when the panel has a human item open, or when the Opus tripwire raised a flag of Medium or above, or any "binding-document control" flag. Post the standard hand-off, set `handed-off`, delete the cron job, and notify.
+  - **Otherwise clear the commit for the gate:** set the commit status `review-panel` on the final SHA (`gh api -X POST repos/{owner}/{repo}/statuses/<sha> -f state=success -f context=review-panel -f description="cleared: round R; Opus tripwire below Medium"`). Never set it in any other case, except in **Refresh** below. The gate refuses a commit without it.
   - **Then the gate.** For a `/cruise` run's slice, the run takes over at its stage `slice` step 4. For any other PR, the panel runs the gate itself, exactly as the `/cruise` skill's Rules describe (three separate calls, `main`'s copy at `<git common dir>/cruise/gate.py`, written out literally; `--dry-run` first the very first time this repository's gate is used):
+    - **Before the gate,** if the head doesn't contain the current `main`, run **Refresh** first.
     - **Exit 0 (merged):** add the merge (PR, SHA, merge commit) to the standing tracking issue **"Autopilot merges"** (label `cruise`; create it if it doesn't exist), through "Posting". Then run **After the merge**.
-    - **Exit 1 (refused):** convert the PR to a draft (`gh api graphql` with `convertPullRequestToDraft`), post the standard hand-off with the gate's reasons, set `handed-off`, and notify.
+    - **Exit 1 (refused):** convert the PR to a draft (`gh api graphql` with `convertPullRequestToDraft`), post the standard hand-off with the gate's reasons, set `handed-off`, delete the cron job, and notify.
     - **Exit 2 (couldn't check):** count it in the state's `gate_exit2`, and try again on the next tick. At 2, go to `awaiting-human` (`blocker`) and notify.
-- **The profile is fixed when the panel's state is created.** If `PROCESS_MODE` on `main` stops being `cruise` while a cruise-started panel is running, the panel stops reviewing and sets no `review-panel` status; the PR goes to the human as a draft (through the run, which is stopping, when it is a slice).
+- **Refresh** (when `main` moved after the panel cleared the PR; used by the `/cruise` run too). No new review round:
+  1. In `$WT/pr<N>-fix`, reset to `head_sha` and merge `origin/main`. If the merge has conflicts, the PR goes to the human as a draft.
+  2. Record `pushed_sha`, then push. Set `head_sha` to the new commit and `merge_base` to the new merge base, then clear `pushed_sha`, so the pin check doesn't start a round.
+  3. Rewrite the diff file as the full `merge_base..head_sha` diff.
+  4. Wait for all four CI jobs on the new head.
+  5. Run the mechanical tripwire and the Opus tripwire again on the new head.
+  6. If `--list-blocked` now prints a path, or the Opus tripwire raised a Medium-or-above or "binding-document control" flag, the PR goes to the human as a draft. Otherwise set the `review-panel` status on the new head, and run the gate.
+- **The profile is set when the panel's state is created,** and changes only to the standard profile (above). If `PROCESS_MODE` on `main` stops being `cruise` while a cruise-started panel is running, the panel stops reviewing and sets no `review-panel` status; the PR goes to the human as a draft (through the run, which is stopping, when it is a slice).

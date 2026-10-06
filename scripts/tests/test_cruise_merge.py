@@ -159,6 +159,21 @@ class DecideTests(unittest.TestCase):
             "a pytest.toml": lambda f: f["changed_files"].append("pytest.toml"),
             "a hidden pytest.toml": lambda f: f["changed_files"].append(".pytest.toml"),
             "the tests package init": lambda f: f["changed_files"].append("backend/tests/__init__.py"),
+            "a ruff config": lambda f: f["changed_files"].append("ruff.toml"),
+            "a nested hidden ruff config": lambda f: f["changed_files"].append("backend/coinacct/.ruff.toml"),
+            "a pytest.ini": lambda f: f["changed_files"].append("backend/tests/pytest.ini"),
+            "a tox.ini": lambda f: f["changed_files"].append("tox.ini"),
+            "a setup.cfg": lambda f: f["changed_files"].append("setup.cfg"),
+            "a coveragerc": lambda f: f["changed_files"].append(".coveragerc"),
+            "a mypy.ini": lambda f: f["changed_files"].append("mypy.ini"),
+            "an eslint config": lambda f: f["changed_files"].append("frontend/eslint.config.js"),
+            "an old eslintrc": lambda f: f["changed_files"].append("frontend/.eslintrc.json"),
+            "a vitest config": lambda f: f["changed_files"].append("frontend/vitest.config.ts"),
+            "gemini instructions": lambda f: f["changed_files"].append("GEMINI.md"),
+            "vscode MCP servers": lambda f: f["changed_files"].append(".vscode/mcp.json"),
+            "vscode tasks": lambda f: f["changed_files"].append(".vscode/tasks.json"),
+            "cursor rules": lambda f: f["changed_files"].append(".cursorrules"),
+            "aider config": lambda f: f["changed_files"].append(".aider.conf.yml"),
             "not cleared by the panel": lambda f: f.update(review_status=None),
             "the panel's status failed": lambda f: f.update(review_status="failure"),
             "the panel's status pending": lambda f: f.update(review_status="pending"),
@@ -279,6 +294,10 @@ class GitScanTests(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "change")
         return self.git("rev-parse", "HEAD").strip()
+
+    def test_list_blocked_names_only_the_refused_paths(self):
+        head = self.commit({"backend/coinacct/x.py": "y = 1\n", "backend/tests/conftest.py": "z = 1\n"})
+        self.assertEqual(cruise_merge.list_blocked(self.base, head), ["backend/tests/conftest.py"])
 
     def test_a_non_ascii_path_comes_back_unquoted_and_is_blocked(self):
         head = self.commit({"docs/adr/0099-règles.md": "y = 2\n"})

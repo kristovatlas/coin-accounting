@@ -326,7 +326,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
   - commit to `main` directly or merge PRs unless the human explicitly says so (§2.7). The one exception is cruise mode, through `main`'s copy of `scripts/cruise_merge.py` only (ADR 0030)
   - add MCP servers or tools that fetch and run packages
 - **Transparency.** Agent-authored commits carry a `Co-Authored-By` trailer. PR descriptions state what was verified (commands run, tests added) and what wasn't.
-- **Review.** Every agent PR gets human review, except a cruise slice that the gate merges (ADR 0030). Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
+- **Review.** Every agent PR gets human review, except one the gate merges in cruise mode with autopilot (ADR 0030, ADR 0031), in a `/cruise` run or not. Independent AI reviews (e.g. a second model) are encouraged for design docs and security-relevant code. Their findings are verified before being acted on, not applied blindly. Review output and the triage decisions are posted as PR comments, as a record.
   - **The review panel** (`/review-panel #N`, [ADR 0020](adr/0020-review-panel.md)) does the AI review:
     - Rounds of four reviews (Opus 5.5 and Codex gpt-5.6-sol, security and functional) find issues, and the panel fixes valid P1s and files issues for the rest.
     - When a round is clean and CI is green, the **tripwire** checks the final commit: a mechanical scan (`scripts/tripwire.py`, from `main`'s copy) plus a separate Opus check for malicious patterns. Examples: process or network use in tests, weakened or deleted guards and tests, new hosts, obfuscated code, dependency or agent-instruction changes. It is a heuristic that points the human's attention, not a guarantee.
@@ -339,7 +339,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
       - later rounds review only the fix, with at most 2 rounds
       - a P1 is only a confirmed Critical/High, a broken or flaky test, a real leak, or wrong tax figures
       - one comment per round
-    - **`/cruise <scope>`** works through a PLAN scope. With autopilot (ADR 0031) the agent starts the panel on every PR it opens, and the mechanical gate `scripts/cruise_merge.py` (`main`'s copy, with a separate repository-scoped token) merges every reviewed PR except dependency files, ADRs and the architecture baseline, and the agents' own controls. Those, and anything else the gate refuses, go to the human as a draft.
+    - **`/cruise <scope>`** works through a PLAN scope. With autopilot (ADR 0031) the agent starts the panel on every PR it opens, and the mechanical gate `scripts/cruise_merge.py` (`main`'s copy, with a separate repository-scoped token) merges every PR the review panel cleared except dependency files, ADRs and the architecture baseline, and the agents' own controls. Those, and anything else the gate refuses, go to the human as a draft.
     - **Docs:** each run ends with a milestone-closing PR, merged through the gate, holding the threat-model and changelog updates.
 
 ## 7. Workflow
@@ -347,7 +347,7 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
 - **Branches:** `main` is always releasable. Work happens on short-lived branches (`<type>/<topic>`, e.g. `feat/scan-jobs`, `docs/adr-0003`).
 - **PRs:**
   - small and focused
-  - opened as **drafts** for human review on GitHub. The exception is cruise mode: a `/cruise` run opens its slices ready for review, and the gate merges only non-draft PRs (ADR 0030)
+  - opened as **drafts** for human review on GitHub. The exception is cruise mode with autopilot: the agent opens every PR it means the gate to merge ready for review, in a `/cruise` run or not, and the gate merges only non-draft PRs (ADR 0030, ADR 0031). A PR the gate would refuse is still opened as a draft
   - stacked PRs are allowed and merged with merge commits
   - each PR description lists the affected threat IDs and ADRs
 - **Commits:** imperative subject ≤ 72 chars; the body explains *why*.
