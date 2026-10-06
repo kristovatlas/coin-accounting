@@ -287,7 +287,7 @@ The practices live in [`docs/ENGINEERING.md`](docs/ENGINEERING.md), and that fil
 - **AI agents:**
   - no real data
   - they propose dependencies but never approve them
-  - only the human merges (procedural)
+  - only the human merges (procedural), except through cruise mode's gate with autopilot (ADR 0030, ADR 0031)
 - **Commit signing is not required.**
 
 ### P0.3 `docs/architecture.md` — architecture (human-reviewed, stays binding)
