@@ -1,8 +1,8 @@
 # Cruise mode: operator guide
 
-Cruise mode ([ADR 0030](adr/0030-cruise-mode.md)) is the faster way of developing this project:
-- a lighter review panel
-- automatic merges behind a mechanical gate, for PRs outside the risky paths
+Cruise mode ([ADR 0030](adr/0030-cruise-mode.md)), with autopilot ([ADR 0031](adr/0031-autopilot.md)), is the faster way of developing this project:
+- a lighter review panel, which the agent starts itself on every PR it opens
+- automatic merges behind a mechanical gate, for every reviewed PR except human decisions and the agents' own controls
 - an agent loop that works through a whole milestone section
 
 The standard process ([ADR 0018](adr/0018-repository-governance.md), [0020](adr/0020-review-panel.md), [0023](adr/0023-review-panel-refinements.md)) stays defined, and one file switches between the two.
@@ -41,14 +41,14 @@ The gate and the skills read the value **from `origin/main`**, never from a PR b
    The run always writes `main`'s copy of `scripts/cruise_merge.py` to that path, and calls it with the path written out. Other code could write to that path too; that's within R-9 (agents aren't sandboxed). Don't keep broader rules such as `Bash(python3 *)` or `Bash(gh pr *)`: they would allow merging without the gate. Remove the rule to make every merge need your approval again.
 4. **Required: protect `main`.** GitHub → Settings → Branches → **Add classic branch protection rule** for `main` (the gate reads the classic rules; a ruleset isn't visible to it):
    - require a pull request before merging
-   - require status checks to pass: `checks (ubuntu-latest)` and `checks (macos-latest)`. **Add `tests (ubuntu-latest)` and `tests (macos-latest)` only once the CI tests PR (#44) is merged**: before that, they never report, and nothing could merge, your own PRs included
+   - require status checks to pass: `checks (ubuntu-latest)`, `checks (macos-latest)`, `tests (ubuntu-latest)` and `tests (macos-latest)`
    - leave "Require approvals" **off** (0 approvals): the token can't approve its own PR
    - leave "Allow deletions" and "Allow force pushes" **off**
    - require branches to be up to date before merging
    - **do not allow bypassing the above settings** (it applies to administrators, so your token can't skip it)
 
-   This stops the token from pushing to `main` directly. The gate refuses until all of this is in place, including the two `tests` checks, so it merges nothing before #44.
-5. **CI must run the tests.** The `tests (…)` jobs, which run `make test` and `make lint` on both platforms, come from CI's `tests` job (#44). Until it's merged, the gate refuses every PR, and runs hand every slice to you as a draft: still reviewed, but not merged automatically.
+   This stops the token from pushing to `main` directly. The gate refuses until all of this is in place, including the two `tests` checks.
+5. **CI must run the tests.** The `tests (…)` jobs, which run `make test` and `make lint` on both platforms, come from CI's `tests` job (#120).
 6. **Optional: notifications.** Put a hard-to-guess ntfy topic in `~/.config/coin-accounting/ntfy-topic` (mode 600; runs keep it off the command line). Without it, runs don't notify. The topic is never committed: ntfy topics work like shared secrets.
 
 ## Starting a run
@@ -67,7 +67,7 @@ The argument is a scope from `PLAN.md`: a milestone (`M1`), a section of one (`M
    - opens a ready (non-draft) PR
    - reviews it with the cruise panel profile (at most 2 rounds)
    - runs the gate. **Merged:** it continues. **Refused:** the PR becomes a draft for you, and the loop continues with work that doesn't depend on it.
-4. ends with a **milestone-closing PR**, which you merge. It holds the THREAT_MODEL statuses, evidence and changelog row, the ENGINEERING row if needed, PLAN and DEPENDENCIES.
+4. ends with a **milestone-closing PR**, which merges through the gate like any other (autopilot). It holds the THREAT_MODEL statuses, evidence and changelog row, the ENGINEERING row if needed, PLAN and DEPENDENCIES.
 
 It runs from a 10-minute check-in job in that Claude Code session. The job expires after 7 days, or when the session ends, and `/cruise <scope>` resumes it from its saved state. It sends an ntfy notification whenever it needs you, and when it finishes.
 
@@ -99,13 +99,19 @@ It runs from a 10-minute check-in job in that Claude Code session. The job expir
    - the cruise profile in the review-panel skill
    - this guide
 
-## What always comes to you
+## What merges automatically, and what comes to you
 
-Whatever the mode:
-- dependency approvals
-- ADR-level decisions
-- changes to agent instructions, CI, scripts, dependency files, security-critical modules (the tripwire's list) or binding documents
-- any PR the gate refuses
-- a Critical security finding, or a committed secret or real user data, after round 2 (functional and High security P1s are fixed during the run)
-- any Opus tripwire flag of Medium or above, and anything else the gate refuses (ADR 0030 lists the conditions)
+**Merges automatically** (autopilot, ADR 0031), after a clean cruise review and green CI:
+- application code, including the security-critical modules (`api/`, the launcher, `storage/`, `rpc.py`, `config.py`) and the `tax/`, `doxx/` and `chain/` engines
+- tests, golden files, E2E specs and tool configuration (`conftest.py`, `vite.config.*`, …)
+- the living binding documents: `THREAT_MODEL.md`, `ENGINEERING.md`, `PLAN.md`, `DEPENDENCIES.md`
 - the milestone-closing PR
+
+The mechanical tripwire's flags are posted for the record. Only symlinks, submodules, executable bits and changes it can't parse block.
+
+**Always comes to you,** whatever the mode:
+- dependency approvals, and any change to dependency manifests or lockfiles
+- ADR-level decisions, ADRs, and `docs/architecture.md`
+- changes to the agents' own controls: `scripts/`, `.github/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`, the `Makefile`, `PROCESS_MODE`, this guide
+- a Critical security finding, or a committed secret or real user data, after round 2 (functional and High security P1s are fixed during the run)
+- any Opus tripwire flag of Medium or above, and anything else the gate refuses

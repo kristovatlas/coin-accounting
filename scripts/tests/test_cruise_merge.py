@@ -91,7 +91,6 @@ class DecideTests(unittest.TestCase):
                 require_code_owner_reviews=True),
             "main deletable": lambda f: f["protection"].update(allow_deletions={"enabled": True}),
             "main force-pushable": lambda f: f["protection"].update(allow_force_pushes={"enabled": True}),
-            "not a cruise branch": lambda f: f["pr"]["head"].update(ref="feat/something"),
             "closed": lambda f: f["pr"].update(state="closed"),
             "draft": lambda f: f["pr"].update(draft=True),
             "draft unknown": lambda f: f["pr"].pop("draft"),
@@ -114,40 +113,37 @@ class DecideTests(unittest.TestCase):
             "Socket failed": lambda f: f["check_runs"][4].update(conclusion="failure"),
             "check-runs incomplete": lambda f: f.update(check_runs_total=101),
             "binary file": lambda f: f["binary_files"].append("backend/coinacct/fast.cpython-313-x86_64-linux-gnu.so"),
-            "tax engine": lambda f: f["changed_files"].append("backend/coinacct/tax/engine.py"),
-            "tax tests": lambda f: f["changed_files"].append("backend/tests/unit/tax/test_lots.py"),
-            "tax-named module": lambda f: f["changed_files"].append("backend/coinacct/services/tax.py"),
-            "tax-named test": lambda f: f["changed_files"].append("backend/tests/unit/test_tax_lots.py"),
-            "doxx-named golden file": lambda f: f["changed_files"].append("backend/tests/golden/doxx-2024.csv"),
-            "rpc package shadowing rpc.py": lambda f: f["changed_files"].append("backend/coinacct/rpc/__init__.py"),
-            "secret wrapper": lambda f: f["changed_files"].append("backend/coinacct/domain/secret.py"),
-            "socket guard": lambda f: f["changed_files"].append("backend/tests/socket_guard.py"),
-            "package shadowing the socket guard": lambda f: f["changed_files"].append(
-                "backend/tests/socket_guard/__init__.py"),
-            "package shadowing secret.py": lambda f: f["changed_files"].append(
-                "backend/coinacct/domain/secret/__init__.py"),
-            "package shadowing stub_http.py": lambda f: f["changed_files"].append("backend/tests/stub_http/x.py"),
-            "multi-dot tax golden file": lambda f: f["changed_files"].append("backend/tests/golden/report.tax.csv"),
-            "multi-dot doxx file": lambda f: f["changed_files"].append("backend/tests/golden/v2.doxx.json"),
-            "multi-dot chain file": lambda f: f["changed_files"].append("backend/coinacct/services/scan.chain.py"),
-            "e2e tax golden file": lambda f: f["changed_files"].append("e2e/golden/form8949-2024.tax.csv"),
-            "e2e tax spec": lambda f: f["changed_files"].append("e2e/specs/tax/export.spec.ts"),
-            "tax golden file": lambda f: f["changed_files"].append("backend/tests/integration/tax/golden/8949.csv"),
-            "tax in upper case": lambda f: f["changed_files"].append("backend/coinacct/Tax/engine.py"),
-            "tax with a non-ASCII name": lambda f: f["changed_files"].append("backend/coinacct/tax/règles.py"),
-            "unscanned file type": lambda f: f["changed_files"].append("backend/coinacct/payload.txt"),
+            "unscanned file type": lambda f: f["changed_files"].append("backend/coinacct/payload.bin"),
             "no suffix": lambda f: f["changed_files"].append("backend/coinacct/runme"),
-            "dynamic code": lambda f: f["dynamic_code"].append(("backend/coinacct/x.py", 3)),
-            "doxx engine": lambda f: f["changed_files"].append("backend/coinacct/doxx/rules.py"),
-            "chain module": lambda f: f["changed_files"].append("backend/coinacct/chain/scan.py"),
             "mode switch": lambda f: f["changed_files"].append("PROCESS_MODE"),
             "mode switch, lower case": lambda f: f["changed_files"].append("process_mode"),
-            "root pytest.toml": lambda f: f["changed_files"].append("pytest.toml"),
-            "nested ruff.toml": lambda f: f["changed_files"].append("backend/ruff.toml"),
-            "a conftest": lambda f: f["changed_files"].append("backend/tests/unit/conftest.py"),
-            "an eslint config": lambda f: f["changed_files"].append("frontend/eslint.config.js"),
-            "pyproject": lambda f: f["changed_files"].append("pyproject.toml"),
             "cruise guide": lambda f: f["changed_files"].append("docs/cruise-mode.md"),
+            "the gate itself": lambda f: f["changed_files"].append("scripts/cruise_merge.py"),
+            "the agent guard": lambda f: f["changed_files"].append("scripts/agent_guard.py"),
+            "the toolchain lock": lambda f: f["changed_files"].append("scripts/toolchain.lock"),
+            "a skill": lambda f: f["changed_files"].append(".claude/skills/cruise/SKILL.md"),
+            "agent settings": lambda f: f["changed_files"].append(".claude/settings.json"),
+            "agent instructions": lambda f: f["changed_files"].append("AGENTS.md"),
+            "claude instructions": lambda f: f["changed_files"].append("CLAUDE.md"),
+            "a CI workflow": lambda f: f["changed_files"].append(".github/workflows/ci.yml"),
+            "the Makefile": lambda f: f["changed_files"].append("Makefile"),
+            "a new ADR": lambda f: f["changed_files"].append("docs/adr/0032-x.md"),
+            "the architecture baseline": lambda f: f["changed_files"].append("docs/architecture.md"),
+            "pyproject": lambda f: f["changed_files"].append("pyproject.toml"),
+            "uv lockfile": lambda f: f["changed_files"].append("uv.lock"),
+            "a package.json": lambda f: f["changed_files"].append("frontend/package.json"),
+            "the pnpm lockfile": lambda f: f["changed_files"].append("pnpm-lock.yaml"),
+            "npm publish times": lambda f: f["changed_files"].append("pnpm-lock.times.json"),
+            "pnpm workspace": lambda f: f["changed_files"].append("pnpm-workspace.yaml"),
+            "an npmrc": lambda f: f["changed_files"].append("frontend/.npmrc"),
+            "a pnpmfile": lambda f: f["changed_files"].append(".pnpmfile.cjs"),
+            "an MCP config": lambda f: f["changed_files"].append(".mcp.json"),
+            "the socket guard": lambda f: f["changed_files"].append("backend/tests/socket_guard.py"),
+            "a package shadowing the socket guard": lambda f: f["changed_files"].append(
+                "backend/tests/socket_guard/__init__.py"),
+            "a symlink": lambda f: f.update(tripwire=[{"file": "x", "kind": "symlink", "detail": "symbolic link"}]),
+            "an executable bit": lambda f: f.update(tripwire=[{"file": "x", "kind": "executable",
+                                                                  "detail": "file made executable"}]),
             "tripwire didn't run": lambda f: f.update(tripwire=None),
             "no token": lambda f: f.update(token_problem="no readable cruise merge token"),
         }
@@ -157,50 +153,58 @@ class DecideTests(unittest.TestCase):
                 change(facts)
                 self.assertTrue(cruise_merge.decide(facts), "expected the gate to refuse")
 
-    def test_a_similar_path_outside_the_blocked_ones_is_allowed(self):
+    def test_application_code_tests_and_living_docs_merge_under_autopilot(self):
+        # ADR 0031: the security-critical modules, the tax/doxx/chain engines, their tests and the
+        # living binding documents are no longer the owner's to merge.
         facts = good_facts()
-        facts["changed_files"] += ["backend/coinacct/taxonomy.py", "docs/cruise-mode-notes.md",
-                                   "frontend/src/views/tax/Report.tsx", "backend/coinacct/services/syntax.py",
-                                   "backend/coinacct/rpc_types.py", "backend/coinacct/configuration_help.py"]
+        facts["changed_files"] += [
+            "backend/coinacct/tax/engine.py", "backend/tests/unit/tax/test_lots.py",
+            "backend/coinacct/doxx/rules.py", "backend/coinacct/chain/scan.py",
+            "backend/coinacct/api/security.py", "backend/coinacct/launcher.py", "backend/coinacct/rpc.py",
+            "backend/coinacct/storage/watchdog.py", "backend/coinacct/domain/secret.py",
+            "backend/tests/unit/conftest.py", "frontend/src/views/tax/Report.tsx", "frontend/vite.config.ts",
+            "e2e/specs/tax/export.spec.ts", "e2e/playwright.config.ts", "frontend/tsconfig.json",
+            "docs/THREAT_MODEL.md", "docs/ENGINEERING.md", "PLAN.md", "docs/DEPENDENCIES.md",
+            "docs/cruise-mode-notes.md", "frontend/src/logo.svg",
+        ]
         self.assertEqual(cruise_merge.decide(facts), [])
 
-    def test_every_flag_blocks_except_the_two_noisy_content_labels(self):
-        blocked = [
-            {"file": "AGENTS.md", "kind": "path", "detail": "agent instructions or tooling"},
-            {"file": "backend/coinacct/rpc.py", "kind": "path", "detail": "security-critical module"},
-            {"file": "x.py", "kind": "removed", "detail": "removed test or assertion (near line 4)"},
-            {"file": "x.py", "kind": "deleted", "detail": "file deleted"},
+    def test_any_branch_of_the_repository_can_merge(self):
+        facts = good_facts()
+        facts["pr"]["head"].update(ref="m0.3/launcher-serve")
+        self.assertEqual(cruise_merge.decide(facts), [])
+
+    def test_dynamic_code_is_reported_not_blocking(self):
+        # ADR 0031: the Opus tripwire judges it; a Medium-or-above flag sends the PR to the human.
+        facts = good_facts()
+        facts["dynamic_code"].append(("backend/coinacct/x.py", 3))
+        self.assertEqual(cruise_merge.decide(facts), [])
+
+    def test_only_structural_tripwire_flags_block(self):
+        blocking = [
             {"file": "x", "kind": "symlink", "detail": "symbolic link added, changed or removed"},
             {"file": "x", "kind": "submodule", "detail": "git submodule (gitlink)"},
             {"file": "x", "kind": "executable", "detail": "file made executable"},
             {"file": "x", "kind": "unparsed", "detail": "could not parse this change"},
-            {"file": "x.py", "kind": "content", "detail": "URL host 127.0.0.1 (line 2)"},
-            {"file": "x.py", "kind": "content", "detail": "URL host example.com (line 2)"},
-            {"file": "x.py", "kind": "content", "detail": "long encoded blob (line 2)"},
-            {"file": "x.py", "kind": "content", "detail": "network access (line 2)"},  # a renamed label
+        ]
+        for flag in blocking:
+            with self.subTest(flag["kind"]):
+                self.assertEqual(len(cruise_merge.blocking([flag])), 1)
+        reported = [
+            {"file": "AGENTS.md", "kind": "path", "detail": "agent instructions or tooling"},
+            {"file": "backend/coinacct/rpc.py", "kind": "path", "detail": "security-critical module"},
+            {"file": "x.py", "kind": "removed", "detail": "removed test or assertion (near line 4)"},
+            {"file": "x.py", "kind": "deleted", "detail": "file deleted"},
+            {"file": "x.py", "kind": "content", "detail": "network use (line 2)"},
+            {"file": "x.py", "kind": "content", "detail": "test weakening (line 2)"},
+            {"file": "x.py", "kind": "content", "detail": "dynamic code or deserialisation (line 2)"},
             {"file": "x.py", "kind": "novel", "detail": "a kind added to the tripwire later"},
         ]
-        for flag in blocked:
-            with self.subTest(flag["detail"]):
-                self.assertEqual(len(cruise_merge.blocking([flag])), 1)
-        noisy = [
-            {"file": "x.py", "kind": "content", "detail": "dynamic code or deserialisation (line 2)"},
-            {"file": "x.py", "kind": "content", "detail": "environment-dependent behaviour (line 2)"},
-        ]
-        self.assertEqual(cruise_merge.blocking(noisy), [])
-
-    def test_every_real_tripwire_content_label_is_classified_on_purpose(self):
-        # A label the tripwire adds or renames blocks by default; this lists today's on purpose.
-        labels = {label for label, _ in tripwire.ADDED_RULES}
-        self.assertTrue(set(cruise_merge.NON_BLOCKING_CONTENT) <= labels)
-        for label in labels - set(cruise_merge.NON_BLOCKING_CONTENT):
-            with self.subTest(label):
-                flag = {"file": "x.py", "kind": "content", "detail": f"{label} (line 1)"}
-                self.assertEqual(len(cruise_merge.blocking([flag])), 1)
+        self.assertEqual(cruise_merge.blocking(reported), [])
 
     def test_reasons_never_quote_source_text(self):
         facts = good_facts()
-        facts["tripwire"] = [{"file": "x.py", "kind": "content", "detail": "network use (line 2)", "text": "SECRET"}]
+        facts["tripwire"] = [{"file": "x.py", "kind": "symlink", "detail": "symbolic link", "text": "SECRET"}]
         self.assertNotIn("SECRET", "\n".join(cruise_merge.decide(facts)))
 
 
@@ -239,9 +243,9 @@ class GitScanTests(unittest.TestCase):
         return self.git("rev-parse", "HEAD").strip()
 
     def test_a_non_ascii_path_comes_back_unquoted_and_is_blocked(self):
-        head = self.commit({"backend/coinacct/tax/règles.py": "y = 2\n"})
+        head = self.commit({"docs/adr/0099-règles.md": "y = 2\n"})
         changed = cruise_merge.git_z("diff", *cruise_merge.DIFF_OPTS, "--name-only", "-z", self.base, head)
-        self.assertEqual(changed, ["backend/coinacct/tax/règles.py"])
+        self.assertEqual(changed, ["docs/adr/0099-règles.md"])
         self.assertTrue(cruise_merge.blocked_path(changed[0]))
 
     def test_dangerous_dynamic_calls_are_found_and_re_compile_is_not(self):

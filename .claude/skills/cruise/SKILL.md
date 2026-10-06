@@ -31,14 +31,12 @@ Work through `<scope>` of `PLAN.md` in cruise mode ([ADR 0030](../../../docs/adr
   - the secret scan before posting
   - no symlinks or submodules
   - no VeraCrypt volume mounted (`AGENTS.md`)
-- **Never touch these in a cruise PR you mean to auto-merge.** The gate refuses them, so put such changes in their own PR, opened as a **draft** for the human, and say so in the tracking issue:
-  - dependency files
-  - agent instructions or skills
-  - CI or scripts
-  - binding documents
-  - security-critical modules
-  - anything with a `tax`, `doxx` or `chain` path component under `backend/`, tests and golden files included
-  - `PROCESS_MODE` and `docs/cruise-mode.md`
+- **Autopilot (ADR 0031): everything merges through the gate except human decisions and the agents' own controls.** The gate refuses these, so put such changes in their own PR, opened as a **draft** for the human, and say so in the tracking issue:
+  - dependency manifests and lockfiles (the human approves the Socket verdict, ENGINEERING §2.4)
+  - ADRs and `docs/architecture.md`
+  - `scripts/`, `.github/`, `.claude/`, `AGENTS.md`, `CLAUDE.md`, the `Makefile`, `PROCESS_MODE` and `docs/cruise-mode.md`
+
+  Application code, its tests and golden files, the `tax/`, `doxx/` and `chain/` engines, the security-critical modules, tool configuration and the living binding documents (`THREAT_MODEL.md`, `ENGINEERING.md`, `PLAN.md`, `DEPENDENCIES.md`) are ordinary slices.
 - **The tracking issue is the run's record.** Every merge, refusal, decision, pause and stop is added to it, through the review panel's posting path (the marker is `<!-- cruise:<run-id>:<kind> -->`).
 - **Notify the human** when blocked on them, when paused, and when the run ends.
   - Use ntfy, with the topic read from `~/.config/coin-accounting/ntfy-topic`. That file is never committed, and it must be the user's own, with mode 600. Keep the topic out of the command line, since other local users can read process arguments: pass the URL to `curl -sS -m 15 -K -` on stdin as `url = "https://ntfy.sh/<topic>"`, with the message as `-H "Title: Claude Code" -d "<minimal message>"`.
@@ -89,7 +87,7 @@ The cron job's prompt is `/cruise <scope> --tick`. A call without `--tick` is th
 2. Read `PLAN.md` for the scope, plus the open issues that belong to it. Plan **slices**:
    - each a reviewable PR of roughly 100–400 lines, with its tests
    - ordered by dependency
-   - no slice that needs a dependency, an ADR-level decision (ENGINEERING §4.1), a binding-document change, or one of the paths the gate refuses. List those as **human items** instead: they're built as draft PRs for the human, or left to them.
+   - no slice that needs a dependency, an ADR-level decision (ENGINEERING §4.1), an ADR or architecture change, or one of the paths the gate refuses. List those as **human items** instead: they're built as draft PRs for the human, or left to them.
 3. Make sure the `cruise` label exists (create it if not), then open the tracking issue **"Cruise: <scope>"** with that label. Save `run.json` only after the issue exists. The issue holds:
    - the scope
    - `start_sha`
@@ -130,7 +128,7 @@ Take the first slice whose dependencies are `merged` and whose status is `todo`,
      7. Re-check the first bullet (a Medium-or-above Opus flag hands the PR to the human) before running the gate.
    - **Otherwise run the gate** on the head SHA (Rules):
      - **Exit 0 (merged):** mark the slice `merged`, and add the merge to the tracking issue. Then run the review panel's **After the merge** routine for the PR: it deletes the branch only at its final SHA and with no dependent PR, and cleans up the worktrees and files.
-     - **Exit 1 (refused):** convert the PR to a draft, post the standard hand-off with the gate's reasons, and mark the slice `handed-to-human`. Until CI runs `make test`/`make lint` (#44), the gate refuses every PR, so this is the normal path.
+     - **Exit 1 (refused):** convert the PR to a draft, post the standard hand-off with the gate's reasons, and mark the slice `handed-to-human`.
      - **Exit 2 (couldn't check):** increment the slice's `gate_exit2`, and try again on the next tick. At 2, go to `awaiting-human`.
 5. **If later slices depend on a `handed-to-human` slice,** they wait; take independent slices meanwhile. If nothing is left to take, go to `awaiting-human` (reason: `merges`) and notify.
 6. **When every slice is `merged`,** go to `closing`.

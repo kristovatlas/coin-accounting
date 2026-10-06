@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cruise mode's merge gate (ADR 0030). Standard library only.
+"""Cruise mode's merge gate (ADR 0030, as narrowed by ADR 0031, autopilot). Standard library only.
 
 Merges one PR only when every mechanical condition below holds. Otherwise it prints each
 reason and exits 1, and the PR goes to the human as in standard mode. Always run `main`'s
@@ -17,18 +17,20 @@ Conditions, all required:
   - `main`'s branch protection requires a pull request (with no required approvals), every
     REQUIRED_CHECKS name and branches up to date (`strict`), applies to administrators too (so the
     owner's token can't bypass it), and forbids deleting and force-pushing `main`
-  - the PR is open, not a draft, on a `cruise/` branch of this repository, based on `main`, authored by the owner,
+  - the PR is open, not a draft, on a branch of this repository, based on `main`, authored by the owner,
     every commit authored or committed by the owner, mergeable, and its head is exactly SHA
   - SHA contains the current `main`, so CI tested the result of the merge
   - on SHA, every REQUIRED_CHECKS check-run from github-actions succeeded, the check-run list is
     complete, and every other check-run completed without failing
-  - no changed file is binary, has a suffix outside TEXT_SUFFIXES, or is blocked (`blocked_path`: the
-    tax/doxx/chain areas, the cruise-mode files, and tool configuration such as pytest.toml or ruff.toml)
-  - no added line in a file that can run code (CODE_SUFFIXES, HTML included) uses a dynamic-code
-    name (DYNAMIC_CODE_ANY, and DYNAMIC_CODE_JS outside Python): a best-effort tripwire, not a complete
-    control (R-11) (the tripwire's "dynamic code" label also fires on
-    harmless `re.compile`, so the gate checks the dangerous calls itself)
-  - `main`'s tripwire on merge-base(origin/main, SHA)..SHA raised no blocking flag (see `blocking`)
+  - no changed file is binary, has a suffix outside TEXT_SUFFIXES, or is blocked (`blocked_path`):
+    under autopilot (ADR 0031) only what needs a human decision or controls the agents themselves:
+    dependency and lockfiles, ADRs and the architecture baseline, CI, `scripts/`, the Makefile,
+    agent instructions and skills, and the mode files. Application code, tests and the other
+    binding documents merge automatically.
+  - `main`'s tripwire ran on merge-base(origin/main, SHA)..SHA and raised no blocking flag (only
+    symlinks, submodules, executable bits and unparsable changes block; every other flag, and the
+    dynamic-code scan, is reported to the review panel's Opus tripwire, which sends a Medium-or-above
+    flag to the human)
   Paths come from git with a fixed configuration and NUL separators, so quoting can't hide them.
   - the cruise merge token file is a regular file owned by this user, with mode 600
 
@@ -58,28 +60,18 @@ REQUIRED_CHECKS = ("checks (ubuntu-latest)", "checks (macos-latest)", "tests (ub
 STOP_FILE = "cruise-stop"  # in the git common dir: `touch .git/cruise-stop` stops every merge
 TOKEN_FILE_ENV = "CRUISE_MERGE_TOKEN_FILE"
 DEFAULT_TOKEN_FILE = "~/.config/coin-accounting/cruise-merge-token"
-# Paths the gate refuses on top of the tripwire's risky paths: anything under backend/ with a tax,
-# doxx or chain component (the engines, their tests and golden files), and the files that control
-# cruise mode itself. Compared in lower case: macOS checkouts are case-insensitive.
-BLOCKED_COMPONENTS = ("tax", "doxx", "chain")
-BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md", "backend/coinacct/domain/secret.py",
-                 "backend/tests/socket_guard.py", "backend/tests/stub_http.py")
-# Single-file modules the gate or the tripwire protects: a package of the same name would take over
-# (Python finds `name/__init__.py` before `name.py` in the same directory).
-SHADOWABLE_MODULES = tuple(
-    [f"backend/coinacct/{m}" for m in ("launcher", "config", "rpc")]
-    + [f[: -len(".py")] for f in BLOCKED_FILES if f.endswith(".py")]
-)
-# Tool configuration that, in any directory, can override or weaken the project's test, lint, type or
-# build settings (pytest reads `pytest.toml` before `pyproject.toml`; ruff reads `ruff.toml` first).
-BLOCKED_NAMES = ("pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "ruff.toml",
-                 ".ruff.toml", "mypy.ini", ".mypy.ini", ".coveragerc", "conftest.py", "pyproject.toml",
-                 "package.json", "tsconfig.json")
-BLOCKED_NAME_PREFIXES = ("eslint.config.", ".eslintrc", "vite.config.", "vitest.config.", "vitest.workspace.",
-                         "playwright.config.", "postcss.config.", "babel.config.", ".babelrc", "tsconfig.")
+# Autopilot (ADR 0031): the gate refuses only what needs a human decision, and what controls the
+# agents themselves, so an agent can never loosen its own checks. Compared in lower case: macOS
+# checkouts are case-insensitive.
+BLOCKED_PREFIXES = (".claude/", ".github/", "scripts/", "docs/adr/")
+BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md", "agents.md", "claude.md", "makefile",
+                 "docs/architecture.md", ".mcp.json", "backend/tests/socket_guard.py")
+# Dependency manifests and lockfiles, anywhere: new dependencies are the owner's decision (ENGINEERING §2.4).
+BLOCKED_NAMES = ("pyproject.toml", "uv.lock", "package.json", "pnpm-lock.yaml", "pnpm-lock.times.json",
+                 "pnpm-workspace.yaml", ".npmrc", ".pnpmfile.cjs", ".pnpmfile.mjs", "requirements.txt")
 # Every changed file must have one of these suffixes: no binaries, no unscanned file types.
 TEXT_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".json", ".toml", ".yml", ".yaml",
-                 ".css", ".html", ".htm", ".md", ".csv")
+                 ".css", ".html", ".htm", ".md", ".csv", ".svg", ".txt")
 # Files that can run code: scanned for DYNAMIC_CODE line by line.
 CODE_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".html", ".htm")
 # Names that build, look up or run code at run time, and so could hide process, network or file access.
@@ -110,34 +102,25 @@ DIFF_OPTS = ("--no-color", "--no-ext-diff", "--no-textconv", "--no-renames")
 
 def blocked_path(path: str) -> bool:
     low = path.lower()
-    parts = low.split("/")
-    name = parts[-1]
-    name_words = re.split(r"[._-]", name)  # every word of the name, so `report.tax.csv` counts too
-    in_scope = parts[0] in ("backend", "e2e")
+    name = low.split("/")[-1]
     return (
         low in BLOCKED_FILES
+        or low.startswith(BLOCKED_PREFIXES)
         or name in BLOCKED_NAMES
-        or name.startswith(BLOCKED_NAME_PREFIXES)
-        # tax, doxx and chain: as a directory, or as a word in the file name (`services/tax.py`, `test_tax_lots.py`)
-        or (in_scope and any(c in parts[1:-1] or c in name_words for c in BLOCKED_COMPONENTS))
-        # a package next to a blocked single-file module would shadow it (`rpc/__init__.py`, `socket_guard/…`)
-        or any(low.startswith(m + "/") for m in SHADOWABLE_MODULES)
+        or name.startswith(".pnpmfile.")
+        # a package next to the socket guard would shadow it (`socket_guard/__init__.py`)
+        or low.startswith("backend/tests/socket_guard/")
     )
 
-# Every tripwire flag blocks except these content labels, which fire on every `re.compile` and
-# `os.environ` and are left to the Opus tripwire check. Any new or renamed label blocks.
-NON_BLOCKING_CONTENT = ("dynamic code or deserialisation", "environment-dependent behaviour")
+# Autopilot (ADR 0031): only these tripwire kinds block. CI rejects symlinks and submodules too; an
+# executable bit or a change the tripwire can't parse goes to the human. Every other flag (paths,
+# content, removed lines) is reported to the Opus tripwire, whose Medium-or-above flags go to the human.
+BLOCKING_KINDS = ("symlink", "submodule", "executable", "unparsed")
 
 
 def blocking(flags: list[dict]) -> list[str]:
     """The tripwire flags that stop an automatic merge, rendered without source text."""
-    out = []
-    for f in flags:
-        kind, detail = f.get("kind", ""), f.get("detail", "")
-        label = detail.split(" (line ", 1)[0]
-        if not (kind == "content" and label in NON_BLOCKING_CONTENT):
-            out.append(f"{f.get('file')}: {detail}")
-    return out
+    return [f"{f.get('file')}: {f.get('detail', '')}" for f in flags if f.get("kind", "") in BLOCKING_KINDS]
 
 
 def decide(facts: dict) -> list[str]:
@@ -176,8 +159,6 @@ def decide(facts: dict) -> list[str]:
         reasons.append("the PR is a draft (drafts are for the human)")
     if (pr.get("head") or {}).get("sha") != sha:
         reasons.append("the PR's head isn't the reviewed commit")
-    if not str((pr.get("head") or {}).get("ref", "")).startswith("cruise/"):
-        reasons.append("the PR isn't a cruise slice (its branch doesn't start with cruise/)")
     if (pr.get("base") or {}).get("ref") != "main":
         reasons.append("the PR isn't based on main")
     head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
@@ -220,7 +201,6 @@ def decide(facts: dict) -> list[str]:
             reasons.append(f"blocked path changed: {p}")
         elif not p.lower().endswith(TEXT_SUFFIXES):
             reasons.append(f"file type the gate doesn't scan: {p}")
-    reasons.extend(f"dynamic code call added: {p} (line {n})" for p, n in facts["dynamic_code"])
     if facts["tripwire"] is None:
         reasons.append("the tripwire did not run")
     else:

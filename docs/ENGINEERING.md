@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.29 |
-| Last updated | 2026-10-04 |
+| Version | 0.2.31 |
+| Last updated | 2026-10-05 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -180,7 +180,7 @@ A `.pnpmfile.*` in any letter case anywhere in the tree fails. Its pnpm-lockfile
 - **Branch protection on `main`:**
   - PRs only, with all required checks green
   - stacked PRs are merged with merge commits
-  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605. The one exception is cruise mode's gate (ADR 0030, R-11)
+  - **only the human merges**, or explicitly tells an agent to merge. Agents act with the owner's GitHub credentials, so this is a **procedural** rule, not a technical one: user decision, 2026-09-27; THREAT_MODEL T-605. The exception is cruise mode's gate with autopilot (ADR 0030, ADR 0031, R-11, R-12): it merges every reviewed PR except dependency files, ADRs and the architecture baseline, and the agents' own controls
 - **Commit signing is not required** (user decision, 2026-09-27). Agents would need the owner's key, so signatures couldn't tell agent commits from human ones. GitHub signs the merge commits it creates. If releases are ever published for other users, release tags will be signed (THREAT_MODEL T-606).
 - GitHub secret scanning and push protection are enabled.
 
@@ -339,8 +339,8 @@ Agents (Claude Code, Codex and others) follow `AGENTS.md`, which makes this docu
       - later rounds review only the fix, with at most 2 rounds
       - a P1 is only a confirmed Critical/High, a broken or flaky test, a real leak, or wrong tax figures
       - one comment per round
-    - **`/cruise <scope>`** works through a PLAN scope. PRs outside the risky paths are merged by the mechanical gate `scripts/cruise_merge.py` (`main`'s copy, with a separate repository-scoped token). Everything else goes to the human as a draft.
-    - **Docs:** each run ends with a milestone-closing PR that the human merges, holding the threat-model and changelog updates.
+    - **`/cruise <scope>`** works through a PLAN scope. With autopilot (ADR 0031) the agent starts the panel on every PR it opens, and the mechanical gate `scripts/cruise_merge.py` (`main`'s copy, with a separate repository-scoped token) merges every reviewed PR except dependency files, ADRs and the architecture baseline, and the agents' own controls. Those, and anything else the gate refuses, go to the human as a draft.
+    - **Docs:** each run ends with a milestone-closing PR, merged through the gate, holding the threat-model and changelog updates.
 
 ## 7. Workflow
 
@@ -385,7 +385,7 @@ A change is done only when:
 | ADR immutability, diagram hash | CI checks |
 | Threat model / ADR / DEPENDENCIES updates | PR template checklist + human review |
 | Test-slop rules | Partly automated (§3.5) + review checklist + periodic test audit |
-| Only the human merges, except through cruise mode's gate (ADR 0030) | Procedural (Documented, T-605); the gate's conditions are mechanical (`scripts/cruise_merge.py`, R-11) |
+| Only the human merges, except through cruise mode's gate (ADR 0030, autopilot ADR 0031) | Procedural (Documented, T-605); the gate's conditions are mechanical (`scripts/cruise_merge.py`, R-11) |
 | No real data for agents | `AGENTS.md` + SessionStart hook + human discipline (Documented, T-607, R-6) |
 
 ## 10. Changelog
@@ -422,3 +422,4 @@ A change is done only when:
 | 2026-10-03 | 0.2.27 | Cruise mode (ADR 0030): a switchable faster process. It adds a lighter review-panel profile, gated automatic merges (`scripts/cruise_merge.py`), `/cruise` milestone loops, and threat-model and changelog updates in a milestone-closing PR (§4.3, §6, §8); `PROCESS_MODE` = `standard` restores the previous rules |
 | 2026-10-04 | 0.2.28 | §5.2: `ctypes` is its own capability in `scripts/check_architecture.py`, allowed only in `launcher.py` (for `prctl(PR_SET_DUMPABLE, 0)`, architecture §1); `storage/volume.py` no longer gets it with `subprocess` |
 | 2026-10-04 | 0.2.29 | §2.7: CI's `tests` job runs `make test` and `make lint` on every PR, on Linux and macOS, passing `DEPS_APPROVED=1` as decided in #44 (T-608) |
+| 2026-10-05 | 0.2.31 | Autopilot (ADR 0031): §6 the agent starts the review panel and the gate merges every reviewed PR except dependency files, ADRs and the architecture baseline, and the agents' own controls; the milestone-closing PR merges through the gate |
