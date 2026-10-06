@@ -2,5 +2,14 @@
   "name": "coinacct-frontend",
   "private": true,
   "version": "0.0.0",
-  "description": "SPA workspace (M0.3). No lifecycle scripts allowed (ENGINEERING §2.1)."
+  "description": "SPA workspace (M0.3). No lifecycle scripts allowed (ENGINEERING §2.1).",
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.1"
+  }
 }

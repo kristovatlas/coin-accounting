@@ -100,8 +100,9 @@ require-pkg:
 propose-js: require-pkg require-approved-config require-toolchain ## Resolve a JS dependency into the lockfile only. Usage: make propose-js PKG=name@version WORKSPACE=frontend|e2e [DEV=1]
 	@case "$$WORKSPACE" in frontend|e2e) ;; *) echo "WORKSPACE must be frontend or e2e" >&2; exit 1;; esac
 	"$(SFW)" "$(PNPM)" add --lockfile-only $${DEV:+--save-dev} --filter "./$$WORKSPACE" "$$PKG"
-	@git --no-pager diff --stat -- package.json '*/package.json' pnpm-lock.yaml
-	@git ls-files --others --exclude-standard -- package.json '*/package.json' pnpm-lock.yaml | sed 's/^/ new file: /'
+	@$(LOCK_PYTHON_PICK); "$$py" scripts/npm_publish_times.py pnpm-lock.yaml pnpm-lock.times.json -- "$(SFW)" "$(PNPM)"
+	@git --no-pager diff --stat -- package.json '*/package.json' pnpm-lock.yaml pnpm-lock.times.json
+	@git ls-files --others --exclude-standard -- package.json '*/package.json' pnpm-lock.yaml pnpm-lock.times.json | sed 's/^/ new file: /'
 	@echo "Nothing was installed. Next: Socket review of the lockfile diff, a DEPENDENCIES.md entry and human approval. Only the human installs unmerged changes (DEPS_APPROVED=1 on the make command line)."
 
 .PHONY: propose-py
@@ -220,4 +221,4 @@ check: ## Run all repository checks
 	@$(LOCK_PYTHON_PICK); echo "$$py scripts/check_lockfiles.py"; "$$py" scripts/check_lockfiles.py
 	"$(SYS_PYTHON)" -m unittest discover -s scripts/tests -p 'test_*.py'
 	@# The lockfile tests skip on a host Python < 3.11; run them on the 3.11+ interpreter as well (#71).
-	@$(LOCK_PYTHON_PICK); "$$py" -m unittest -q scripts.tests.test_check_lockfiles
+	@$(LOCK_PYTHON_PICK); "$$py" -m unittest -q scripts.tests.test_check_lockfiles scripts.tests.test_npm_publish_times
