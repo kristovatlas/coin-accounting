@@ -6,16 +6,16 @@ requires-python = "==3.13.*"
 # Dependencies are added only after human approval (ENGINEERING §2.4, docs/DEPENDENCIES.md).
 dependencies = [
     "fastapi==0.141.1",
-    "uvicorn==0.53.0",
+    "uvicorn==0.54.0",
 ]
 
 [dependency-groups]
 dev = [
-    "coverage==7.16.1",
-    "hypothesis==6.168.1",
+    "coverage==7.16.2",
+    "hypothesis==6.168.2",
     "mypy==2.3.1",
     "pytest==9.1.1",
-    "ruff==0.16.8",
+    "ruff==0.16.9",
 ]
 
 [tool.uv]
