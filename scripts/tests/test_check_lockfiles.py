@@ -273,6 +273,39 @@ class CheckLockfilesTests(unittest.TestCase):
                                                  "      - 'x\n", 1))
         self.assertIn("a single quote is left open", self.errors())
 
+    def test_a_quote_inside_a_plain_flow_item_cannot_open_a_scalar(self):
+        # PR #136 round 5 (#146): `[a'b, 'c]` has an even quote count, but YAML reads `a'b` as plain text
+        # and `'c]` as the start of a quoted scalar that runs on into the following lines.
+        cl = check_lockfiles
+        for field, good, bads in (
+            ("os", ["[linux]", "[darwin, linux]", "['x', y]", "[]", "['it''s']"],
+             ["[a'b, 'c]", "[x', 'y', z'w]", "[a b]", "['open]"]),
+            ("engines", ["{node: '>=20'}", "{node: ^10 || ^12 || >=14}", "{node: '>=8', npm: '>=7'}"],
+             ["{node: a'b, x: 'y}", "{node: >=20}", "{node: '>=20}", "{node: x, }"]),
+        ):
+            for value in good:
+                with self.subTest(field=field, value=value):
+                    self.assertIsNotNone(cl.PNPM_FLOW_VALUE[field].match(value))
+            for value in bads:
+                with self.subTest(field=field, value=value):
+                    self.assertIsNone(cl.PNPM_FLOW_VALUE[field].match(value))
+        for value in ("true", "'] #'", "Use x instead", "'it''s gone'"):
+            with self.subTest(value=value):
+                self.assertIsNotNone(cl.PNPM_PLAIN_VALUE.match(value))
+        for value in ("don't use", "x 'y' z", "'a' b", "[x]", "> folded", "'open"):
+            with self.subTest(value=value):
+                self.assertIsNone(cl.PNPM_PLAIN_VALUE.match(value))
+        self.pnpm("\n  x@1.0.0:\n" + RES + "    os: [a'b, 'c]\n", times={**PNPM_TIMES, "x@1.0.0": OLD})
+        self.assertIn("os must be a one-line value", self.errors())
+
+    def test_sections_out_of_order_fail(self):
+        self.pnpm(times=PNPM_TIMES)
+        lock = self.repo / "pnpm-lock.yaml"
+        text = lock.read_text()
+        importers = text[text.index("importers:"):text.index("packages:")]
+        lock.write_text(text.replace(importers, "", 1).replace("\nsnapshots:", "\n" + importers + "snapshots:", 1))
+        self.assertIn("the importers section is out of order", self.errors())
+
     def test_jsr_sources_fail(self):
         self.pnpm(times=PNPM_TIMES)
         lock = self.repo / "pnpm-lock.yaml"
