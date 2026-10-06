@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Cruise mode's merge gate (ADR 0030). Standard library only.
+"""Cruise mode's merge gate (ADR 0030, as narrowed by ADR 0031, autopilot). Standard library only.
 
 Merges one PR only when every mechanical condition below holds. Otherwise it prints each
 reason and exits 1, and the PR goes to the human as in standard mode. Always run `main`'s
 copy (`git show origin/main:scripts/cruise_merge.py`), never a PR's, as with the tripwire.
 
     cruise_merge.py N SHA [--dry-run]
+    cruise_merge.py --list-blocked MERGE_BASE SHA   (the changed paths the gate would refuse)
 
 The caller updates `origin/main` and the PR head first, in a separate step; the gate itself
 never downloads anything.
@@ -17,18 +18,26 @@ Conditions, all required:
   - `main`'s branch protection requires a pull request (with no required approvals), every
     REQUIRED_CHECKS name and branches up to date (`strict`), applies to administrators too (so the
     owner's token can't bypass it), and forbids deleting and force-pushing `main`
-  - the PR is open, not a draft, on a `cruise/` branch of this repository, based on `main`, authored by the owner,
+  - the PR is open, not a draft, on a branch of this repository, based on `main`, authored by the owner,
     every commit authored or committed by the owner, mergeable, and its head is exactly SHA
   - SHA contains the current `main`, so CI tested the result of the merge
   - on SHA, every REQUIRED_CHECKS check-run from github-actions succeeded, the check-run list is
     complete, and every other check-run completed without failing
-  - no changed file is binary, has a suffix outside TEXT_SUFFIXES, or is blocked (`blocked_path`: the
-    tax/doxx/chain areas, the cruise-mode files, and tool configuration such as pytest.toml or ruff.toml)
-  - no added line in a file that can run code (CODE_SUFFIXES, HTML included) uses a dynamic-code
-    name (DYNAMIC_CODE_ANY, and DYNAMIC_CODE_JS outside Python): a best-effort tripwire, not a complete
-    control (R-11) (the tripwire's "dynamic code" label also fires on
-    harmless `re.compile`, so the gate checks the dangerous calls itself)
-  - `main`'s tripwire on merge-base(origin/main, SHA)..SHA raised no blocking flag (see `blocking`)
+  - the PR doesn't carry the label `autopilot-blocked` (the panel's permanent block, ADR 0031 §5)
+  - no file under the floored engines (`tax/`, `doxx/`, `chain/`) is deleted or renamed
+  - the review panel cleared SHA: its commit status `review-panel`, set by the owner, is `success` (set only after a
+    clean round and an Opus tripwire with no flag of Medium or above; advisory, since the owner's
+    token can set it, R-9 and R-12, but it stops a merge no panel reviewed)
+  - no changed file is binary, has a suffix outside TEXT_SUFFIXES, or is blocked (`blocked_path`):
+    under autopilot (ADR 0031) only what needs a human decision or controls the agents themselves:
+    dependency, lock and install-config files, ADRs and the architecture baseline, CI, `scripts/`,
+    the Makefile, agent instructions, skills and tool configuration at any depth, the test socket
+    guard and the files that switch it on, and the mode files. Application code, tests and the
+    other binding documents merge automatically.
+  - `main`'s tripwire ran on merge-base(origin/main, SHA)..SHA and raised no blocking flag (the
+    tripwire's path, content, removed-line and deleted-file flags are judged by the review panel's
+    Opus tripwire, whose Medium-or-above flags go to the human; every other kind, including kinds
+    added later, blocks)
   Paths come from git with a fixed configuration and NUL separators, so quoting can't hide them.
   - the cruise merge token file is a regular file owned by this user, with mode 600
 
@@ -42,65 +51,75 @@ Exit status: 0 merged (or would merge, with --dry-run); 1 refused; 2 could not c
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
-import re
 import stat
 import subprocess
-import unicodedata
 import sys
 import tempfile
 from pathlib import Path
 
-# The CI jobs that must pass. `tests (…)` runs `make test` and `make lint`; until CI has those jobs
-# (#44), the gate refuses every PR (ADR 0030).
+# The CI jobs that must pass. `tests (…)` runs `make test` and `make lint`.
 REQUIRED_CHECKS = ("checks (ubuntu-latest)", "checks (macos-latest)", "tests (ubuntu-latest)", "tests (macos-latest)")
 STOP_FILE = "cruise-stop"  # in the git common dir: `touch .git/cruise-stop` stops every merge
 TOKEN_FILE_ENV = "CRUISE_MERGE_TOKEN_FILE"
 DEFAULT_TOKEN_FILE = "~/.config/coin-accounting/cruise-merge-token"
-# Paths the gate refuses on top of the tripwire's risky paths: anything under backend/ with a tax,
-# doxx or chain component (the engines, their tests and golden files), and the files that control
-# cruise mode itself. Compared in lower case: macOS checkouts are case-insensitive.
-BLOCKED_COMPONENTS = ("tax", "doxx", "chain")
-BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md", "backend/coinacct/domain/secret.py",
-                 "backend/tests/socket_guard.py", "backend/tests/stub_http.py")
-# Single-file modules the gate or the tripwire protects: a package of the same name would take over
-# (Python finds `name/__init__.py` before `name.py` in the same directory).
-SHADOWABLE_MODULES = tuple(
-    [f"backend/coinacct/{m}" for m in ("launcher", "config", "rpc")]
-    + [f[: -len(".py")] for f in BLOCKED_FILES if f.endswith(".py")]
-)
-# Tool configuration that, in any directory, can override or weaken the project's test, lint, type or
-# build settings (pytest reads `pytest.toml` before `pyproject.toml`; ruff reads `ruff.toml` first).
-BLOCKED_NAMES = ("pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg", "ruff.toml",
-                 ".ruff.toml", "mypy.ini", ".mypy.ini", ".coveragerc", "conftest.py", "pyproject.toml",
-                 "package.json", "tsconfig.json")
-BLOCKED_NAME_PREFIXES = ("eslint.config.", ".eslintrc", "vite.config.", "vitest.config.", "vitest.workspace.",
-                         "playwright.config.", "postcss.config.", "babel.config.", ".babelrc", "tsconfig.")
+# Autopilot (ADR 0031): the gate refuses only what needs a human decision, and what controls the
+# agents themselves, so an agent can never loosen its own checks. Compared in lower case: macOS
+# checkouts are case-insensitive.
+# e2e/harness/ holds the pinned-bitcoind check and the regtest node's P2P isolation, which the socket
+# guard can't see.
+BLOCKED_PREFIXES = (".github/", "scripts/", "docs/adr/", "e2e/harness/")
+BLOCKED_FILES = ("process_mode", "docs/cruise-mode.md", "makefile", "docs/architecture.md",
+                 # the test socket guard (ENGINEERING §3.2), and the package that would shadow it
+                 "backend/tests/socket_guard.py", "backend/tests/__init__.py")
+# Anywhere. Dependency manifests, lockfiles and install configuration: new dependencies, and what
+# installs them, are the owner's decision (ENGINEERING §2.4; the Makefile's DEP_FILES and
+# INSTALL_CONFIG, kept in sync by a test). Plus the files that configure CI's checks and could take
+# precedence over pyproject.toml for a subtree: the pytest files that switch the socket guard on or
+# could skip it, and the lint, type-check and coverage settings (a ruff.toml beats pyproject.toml).
+BLOCKED_NAMES = ("pyproject.toml", "uv.lock", "uv.toml", "package.json", "pnpm-lock.yaml", "pnpm-lock.times.json",
+                 "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "bun.lock",
+                 "pnpm-workspace.yaml", ".npmrc", ".python-version", ".node-version",
+                 "conftest.py", "pytest.toml", ".pytest.toml", "pytest.ini", ".pytest.ini", "tox.ini", "setup.cfg",
+                 "ruff.toml", ".ruff.toml", "mypy.ini", ".mypy.ini", ".coveragerc",
+                 ".mcp.json", ".cursorrules", ".windsurfrules", ".clinerules", ".devcontainer.json",
+                 "opencode.json", "opencode.jsonc",
+                 # Socket's repository config: it can ignore paths or turn off the PR alerts the owner
+                 # approves dependencies by (ENGINEERING §2.4)
+                 "socket.yml", "socket.yaml", ".socket.yml", ".socket.yaml",
+                 # the mutation-testing exclusion list (ENGINEERING §3.5), like a coverage setting
+                 "mutation-exclusions.md")
+BLOCKED_NAME_PATTERNS = ("requirements*.txt", "constraints*.txt", ".pnpmfile.*",
+                         # frontend lint and coverage settings
+                         "eslint.config.*", ".eslintrc*", "vitest.config.*", "vitest.workspace.*",
+                         # Vitest reads its test and coverage settings from vite.config.* when there is
+                         # no vitest.config.*
+                         "vite.config.*",
+                         # copied-in third-party code skips the dependency decision (ENGINEERING §2.4)
+                         "*.min.*",
+                         # agent instructions and skills, at any depth (AGENTS.override.md, backend/CLAUDE.md)
+                         "*agent*.md", "*claude*.md", "*gemini*.md", "skill.md", ".aider*", "warp.md", "crush.md",
+                         "qwen.md",
+                         # a stub next to a module makes mypy check the stub instead of the real code
+                         "*.pyi")
+# Agent and editor tool configuration directories, at any depth (.vscode can hold MCP servers and tasks).
+BLOCKED_DIRS = (".claude", ".codex", ".agents", ".cursor", ".gemini", ".vscode", ".idea", ".windsurf",
+                ".clinerules", ".continue", ".roo", ".kiro", ".amazonq", ".devcontainer", ".zed", ".opencode",
+                ".junie", ".kilocode", ".trae", ".fleet",
+                # vendored third-party code (ENGINEERING §2.4)
+                "vendor", "vendored", "third_party", "third-party", "node_modules", "bower_components",
+                "site-packages", "dist-packages")
+# Deleting or renaming a file in these engines would quietly drop the 95 % coverage floor and the
+# mutation runs, which the Makefile keys on these directory names (ENGINEERING §3.3).
+FLOORED_DIRS = ("backend/coinacct/tax/", "backend/coinacct/doxx/", "backend/coinacct/chain/")
+# The PR label the review panel adds when a round finds a Critical issue, a committed secret or real
+# data. It is never removed by an agent, and the gate refuses a PR that carries it (ADR 0031 §5).
+BLOCK_LABEL = "autopilot-blocked"
 # Every changed file must have one of these suffixes: no binaries, no unscanned file types.
 TEXT_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".json", ".toml", ".yml", ".yaml",
-                 ".css", ".html", ".htm", ".md", ".csv")
-# Files that can run code: scanned for DYNAMIC_CODE line by line.
-CODE_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".html", ".htm")
-# Names that build, look up or run code at run time, and so could hide process, network or file access.
-# A BEST-EFFORT TRIPWIRE, not a complete control (owner decision, 2026-10-04; R-11): it catches the
-# common direct forms, and deliberate evasion is an accepted risk. Bare names match too, so a simple
-# alias (`g = getattr`) is caught; dotted forms are excluded where the name is also a harmless method
-# (`re.compile`, `regex.exec`). Lines are NFKC-normalised first, as Python does for identifiers.
-DYNAMIC_CODE_ANY = re.compile(
-    r"(?<![.\w])(eval|exec|getattr|setattr|delattr|globals)\b"
-    r"|(?<![.\w])compile\s*\("
-    r"|\b(__import__|__builtins__|builtins|importlib|runpy|pickle|marshal|ctypes|__globals__|__subclasses__"
-    r"|attrgetter|methodcaller)\b"
-    r"|\bsys\.modules\b"
-)
-# JavaScript, TypeScript and HTML only: in Python these forms are ordinary (`from x import (`, `self[k]`).
-DYNAMIC_CODE_JS = re.compile(
-    r"(?<![.\w])(require|import)\s*\("
-    r"|\bReflect\.|\b(globalThis|window|self|this|top|parent|frames)\s*\[|\bnew\s+Function\b|(?<![.\w])Function\s*\("
-    r"|\.constructor\s*\.\s*constructor\b|\b(setTimeout|setInterval)\s*\(\s*['\"`]"
-)
-PY_SUFFIXES = (".py", ".pyi")
+                 ".css", ".html", ".htm", ".md", ".csv", ".svg", ".txt")
 GIT_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_") and k != "GIT_CONFIG_PARAMETERS"}
 GIT_ENV.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1", "LC_ALL": "C"})
 GIT_OPTS = ("-c", "core.quotePath=false", "-c", "diff.external=", "-c", "core.attributesFile=" + os.devnull,
@@ -108,36 +127,52 @@ GIT_OPTS = ("-c", "core.quotePath=false", "-c", "diff.external=", "-c", "core.at
 DIFF_OPTS = ("--no-color", "--no-ext-diff", "--no-textconv", "--no-renames")
 
 
+# Only these may change at the top of the repository: anything else there (a root `coverage.py`, a
+# `pytest/` package) would be imported in place of a real tool by the `python -m` commands CI runs from
+# the root, and could turn the tests off. The blocked top-level entries stay with the owner anyway.
+ALLOWED_TOP = ("backend", "frontend", "e2e", "docs", "plan.md", "readme.md")
+# Python packages that may sit directly under backend/ and e2e/ (both are on the tests' sys.path):
+# any other module there could shadow pytest, its plugins or the standard library.
+ALLOWED_PACKAGES = {"backend": ("coinacct", "tests"), "e2e": ("harness",)}
+
+
+def shadows_a_tool(parts: list[str]) -> bool:
+    if parts[0] not in ALLOWED_TOP:
+        return True
+    allowed = ALLOWED_PACKAGES.get(parts[0])
+    if allowed is None or len(parts) < 2:
+        return False
+    if len(parts) == 2:  # a file directly under backend/ or e2e/
+        return parts[1].endswith((".py", ".pyi", ".pth"))
+    return parts[1] not in allowed and parts[-1].endswith((".py", ".pyi"))
+
+
 def blocked_path(path: str) -> bool:
-    low = path.lower()
+    low = path.casefold()
     parts = low.split("/")
     name = parts[-1]
-    name_words = re.split(r"[._-]", name)  # every word of the name, so `report.tax.csv` counts too
-    in_scope = parts[0] in ("backend", "e2e")
     return (
-        low in BLOCKED_FILES
+        shadows_a_tool(parts)
+        or low in BLOCKED_FILES
+        or low.startswith(BLOCKED_PREFIXES)
         or name in BLOCKED_NAMES
-        or name.startswith(BLOCKED_NAME_PREFIXES)
-        # tax, doxx and chain: as a directory, or as a word in the file name (`services/tax.py`, `test_tax_lots.py`)
-        or (in_scope and any(c in parts[1:-1] or c in name_words for c in BLOCKED_COMPONENTS))
-        # a package next to a blocked single-file module would shadow it (`rpc/__init__.py`, `socket_guard/…`)
-        or any(low.startswith(m + "/") for m in SHADOWABLE_MODULES)
+        or any(fnmatch.fnmatchcase(name, pat) for pat in BLOCKED_NAME_PATTERNS)
+        or any(part in BLOCKED_DIRS for part in parts[:-1])
+        # a package next to the socket guard would shadow it (`socket_guard/__init__.py`)
+        or low.startswith("backend/tests/socket_guard/")
     )
 
-# Every tripwire flag blocks except these content labels, which fire on every `re.compile` and
-# `os.environ` and are left to the Opus tripwire check. Any new or renamed label blocks.
-NON_BLOCKING_CONTENT = ("dynamic code or deserialisation", "environment-dependent behaviour")
+# Autopilot (ADR 0031): these tripwire kinds don't block; the review panel's Opus tripwire judges the
+# change, and its Medium-or-above flags go to the human. Every other kind blocks: symlinks and
+# submodules (CI rejects them too), executable bits, changes the tripwire can't parse, and any kind
+# added to the tripwire later, until it is classified here on purpose.
+REPORTED_KINDS = ("path", "content", "removed", "deleted")
+REVIEW_STATUS = "review-panel"  # the commit status the review panel sets when it clears a commit
 
 
 def blocking(flags: list[dict]) -> list[str]:
     """The tripwire flags that stop an automatic merge, rendered without source text."""
-    out = []
-    for f in flags:
-        kind, detail = f.get("kind", ""), f.get("detail", "")
-        label = detail.split(" (line ", 1)[0]
-        if not (kind == "content" and label in NON_BLOCKING_CONTENT):
-            out.append(f"{f.get('file')}: {detail}")
-    return out
+    return [f"{f.get('file')}: {f.get('detail', '')}" for f in flags if f.get("kind", "") not in REPORTED_KINDS]
 
 
 def decide(facts: dict) -> list[str]:
@@ -176,8 +211,6 @@ def decide(facts: dict) -> list[str]:
         reasons.append("the PR is a draft (drafts are for the human)")
     if (pr.get("head") or {}).get("sha") != sha:
         reasons.append("the PR's head isn't the reviewed commit")
-    if not str((pr.get("head") or {}).get("ref", "")).startswith("cruise/"):
-        reasons.append("the PR isn't a cruise slice (its branch doesn't start with cruise/)")
     if (pr.get("base") or {}).get("ref") != "main":
         reasons.append("the PR isn't based on main")
     head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
@@ -214,13 +247,22 @@ def decide(facts: dict) -> list[str]:
             reasons.append(f"check-run {r.get('name')} is still {r.get('status')}")
         elif r.get("conclusion") not in ("success", "neutral", "skipped"):
             reasons.append(f"check-run {r.get('name')} concluded {r.get('conclusion')}")
+    labels = {(lb or {}).get("name") for lb in (pr.get("labels") or [])}
+    if BLOCK_LABEL in labels:
+        reasons.append(f"the review panel blocked this PR for good (label {BLOCK_LABEL})")
+    if facts["review_status"] != "success":
+        reasons.append(f"the review panel hasn't cleared this commit (status {REVIEW_STATUS}: {facts['review_status']})")
     reasons.extend(f"binary file changed: {p}" for p in facts["binary_files"])
+    reasons.extend(
+        f"file deleted or renamed in a floored engine: {p}"
+        for p in facts["deleted_files"]
+        if p.casefold().startswith(FLOORED_DIRS)
+    )
     for p in facts["changed_files"]:
         if blocked_path(p):
             reasons.append(f"blocked path changed: {p}")
-        elif not p.lower().endswith(TEXT_SUFFIXES):
+        elif not p.casefold().endswith(TEXT_SUFFIXES):
             reasons.append(f"file type the gate doesn't scan: {p}")
-    reasons.extend(f"dynamic code call added: {p} (line {n})" for p, n in facts["dynamic_code"])
     if facts["tripwire"] is None:
         reasons.append("the tripwire did not run")
     else:
@@ -270,30 +312,6 @@ def git_z(*args: str) -> list[str]:
     return [f.decode("utf-8", "surrogateescape") for f in out.split(b"\0") if f]
 
 
-def added_dynamic_code(merge_base: str, sha: str, paths: list[str]) -> list[tuple[str, int]]:
-    hits = []
-    for path in paths:
-        if not path.lower().endswith(CODE_SUFFIXES):
-            continue
-        is_py = path.lower().endswith(PY_SUFFIXES)
-        patch = subprocess.run(
-            ["git", *GIT_OPTS, "diff", *DIFF_OPTS, "--text", "-U0", merge_base, sha, "--", f":(literal){path}"],
-            check=True, capture_output=True, env=GIT_ENV,
-        ).stdout.decode("utf-8", "replace")
-        in_hunk, line_no = False, 0
-        for line in patch.split("\n"):
-            m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
-            if m:  # everything before the first hunk header is metadata, including `+++ b/path`
-                in_hunk, line_no = True, int(m.group(1))
-                continue
-            if in_hunk and line.startswith("+"):
-                text = unicodedata.normalize("NFKC", line[1:])
-                if DYNAMIC_CODE_ANY.search(text) or (not is_py and DYNAMIC_CODE_JS.search(text)):
-                    hits.append((path, line_no))
-                line_no += 1
-    return hits
-
-
 def gather(n: int, sha: str) -> dict:
     repo = json.loads(run("gh", "repo", "view", "--json", "nameWithOwner,owner"))
     name, owner = repo["nameWithOwner"], repo["owner"]["login"]
@@ -331,7 +349,9 @@ def gather(n: int, sha: str) -> dict:
     numstat = git_z("diff", *DIFF_OPTS, "--numstat", "-z", merge_base, sha)
     binary = [f.split("\t", 2)[2] for f in numstat if f.startswith("-\t-\t")]
     changed = git_z("diff", *DIFF_OPTS, "--name-only", "-z", merge_base, sha)
-    dynamic = added_dynamic_code(merge_base, sha, changed)
+    statuses = gh_api(f"repos/{name}/commits/{sha}/statuses?per_page=100")  # newest first
+    review_status = owner_review_status(statuses, owner)
+    deleted = git_z("diff", *DIFF_OPTS, "--name-only", "--diff-filter=D", "-z", merge_base, sha)
     tripwire = None
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "tripwire.py"
@@ -357,20 +377,30 @@ def gather(n: int, sha: str) -> dict:
         "check_runs": runs,
         "check_runs_total": total,
         "binary_files": binary,
+        "deleted_files": deleted,
         "changed_files": changed,
-        "dynamic_code": dynamic,
+        "review_status": review_status,
         "tripwire": tripwire,
         "token_problem": token_problem,
     }
 
 
 def recheck(facts: dict) -> list[str]:
-    """The conditions that can change in the seconds between `gather` and the merge."""
+    """The conditions that can change in the seconds between `gather` and the merge: `main`, the stop
+    file, and the panel's two signals (the block label and the owner's status), which branch protection
+    doesn't enforce."""
     reasons = []
-    if gh_api(f"repos/{facts['name']}/commits/main")["sha"] != facts["github_main"]:
+    name = facts["name"]
+    if gh_api(f"repos/{name}/commits/main")["sha"] != facts["github_main"]:
         reasons.append("main moved while the gate was checking")
     if (git_dir() / STOP_FILE).exists():
         reasons.append("the stop file .git/cruise-stop appeared")
+    pr = gh_api(f"repos/{name}/pulls/{facts['pr']['number']}")
+    if BLOCK_LABEL in {(lb or {}).get("name") for lb in (pr.get("labels") or [])}:
+        reasons.append(f"the PR was labelled {BLOCK_LABEL} while the gate was checking")
+    statuses = gh_api(f"repos/{name}/commits/{facts['sha']}/statuses?per_page=100")
+    if owner_review_status(statuses, facts["owner"]) != "success":
+        reasons.append("the review panel's status changed while the gate was checking")
     return reasons
 
 
@@ -382,18 +412,61 @@ def merge(name: str, n: int, sha: str) -> None:
     run(
         "gh", "api", "--hostname", "github.com", "-X", "PUT", f"repos/{name}/pulls/{n}/merge",
         "-f", f"sha={sha}", "-f", "merge_method=merge",
-        "-f", f"commit_title=Merge pull request #{n} (cruise mode, ADR 0030)",
+        "-f", f"commit_title=Merge pull request #{n} (autopilot, ADR 0031)",
         env=env,
     )  # fmt: skip
 
 
+def owner_review_status(statuses: list, owner: str) -> str | None:
+    """The newest `review-panel` status the owner set; one set by anyone else (an app, a workflow) is ignored."""
+    for st in statuses:
+        if st.get("context") == REVIEW_STATUS and (st.get("creator") or {}).get("login") == owner:
+            return st.get("state")
+    return None
+
+
+def refused_paths(changed: list[str], binary: list[str], deleted: list[str]) -> list[str]:
+    """Every changed path the gate refuses on its own: blocked, binary, an unscanned type, or a deletion
+    in a floored engine."""
+    out = [p for p in changed if blocked_path(p) or not p.casefold().endswith(TEXT_SUFFIXES)]
+    out += [p for p in binary if p not in out]
+    out += [p for p in deleted if p.casefold().startswith(FLOORED_DIRS) and p not in out]
+    return out
+
+
+def list_blocked(merge_base: str, sha: str) -> list[str]:
+    """The changed paths the gate would refuse, so the review panel picks the profile from the gate's own
+    rules rather than by eye (ADR 0031 §2)."""
+    changed = git_z("diff", *DIFF_OPTS, "--name-only", "-z", merge_base, sha)
+    numstat = git_z("diff", *DIFF_OPTS, "--numstat", "-z", merge_base, sha)
+    binary = [f.split("\t", 2)[2] for f in numstat if f.startswith("-\t-\t")]
+    deleted = git_z("diff", *DIFF_OPTS, "--name-only", "--diff-filter=D", "-z", merge_base, sha)
+    return refused_paths(changed, binary, deleted)
+
+
+def is_sha(value: str) -> bool:
+    return len(value) == 40 and all(c in "0123456789abcdef" for c in value)
+
+
 def main(argv: list[str] | None = None) -> int:
+    args_in = sys.argv[1:] if argv is None else argv
+    if args_in[:1] == ["--list-blocked"]:
+        if len(args_in) != 3 or not (is_sha(args_in[1]) and is_sha(args_in[2])):
+            print("usage: cruise_merge.py --list-blocked MERGE_BASE SHA (full commit ids)", file=sys.stderr)
+            return 2
+        try:
+            for p in list_blocked(args_in[1], args_in[2]):
+                print(p)
+        except Exception as e:
+            print(f"cruise_merge: could not list ({type(e).__name__})", file=sys.stderr)
+            return 2
+        return 0
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pr", type=int)
     parser.add_argument("sha")
     parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args(argv)
-    if len(args.sha) != 40 or any(c not in "0123456789abcdef" for c in args.sha):
+    args = parser.parse_args(args_in)
+    if not is_sha(args.sha):
         print("cruise_merge: SHA must be a full 40-character commit id", file=sys.stderr)
         return 2
     try:
