@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import re
+import json
 import os
 import subprocess
 import shutil
@@ -43,6 +45,9 @@ def make_repo(root: Path, arch: str | None, adrs: list[tuple[str, str, str]], in
         (adr_dir / "README.md").write_text("| ADR | Title |\n|---|---|\n" + "\n".join(rows) + "\n")
     if arch is not None:
         (root / "docs" / "architecture.md").write_text(arch)
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class CheckAdrsTests(unittest.TestCase):
@@ -519,16 +524,60 @@ class ToolchainTests(unittest.TestCase):
                 self.assertEqual(list(target.iterdir()), [])
 
     def test_the_browser_pin_is_the_build_the_pinned_playwright_uses(self):
-        # ENGINEERING §2.3: the E2E browser is pinned and hash-checked here; its version must be
-        # the one @playwright/test's playwright-core expects, or Playwright would run an untested build.
+        # ENGINEERING §2.3: the E2E browser must be the build the locked Playwright expects, so a
+        # Playwright bump without a re-pin (or the reverse) fails here.
         entry = toolchain.load_lock()["chrome-headless-shell"]
-        self.assertEqual(entry["version"], "153.0.8010.12")
-        for key in ("linux-x86_64", "linux-arm64", "darwin-arm64", "darwin-x86_64"):
+        lock_text = (ROOT / "pnpm-lock.yaml").read_text()
+        locked = re.findall(r"^  playwright-core@([0-9][^:'(]*):$", lock_text, re.M)
+        self.assertEqual(locked, [entry["playwright"]])
+        browsers = ROOT / "node_modules/.pnpm" / f"playwright-core@{entry['playwright']}" / \
+            "node_modules/playwright-core/browsers.json"
+        if browsers.exists():  # installed: check against Playwright's own record too
+            shell = next(b for b in json.loads(browsers.read_text())["browsers"] if b["name"] == "chromium-headless-shell")
+            self.assertEqual(shell["browserVersion"], entry["version"])
+        dirs = {"linux-x86_64": "linux64", "linux-arm64": "linux-arm64", "darwin-arm64": "mac-arm64",
+                "darwin-x86_64": "mac-x64"}
+        for key, cft in dirs.items():
             with self.subTest(platform=key):
                 self.assertEqual(entry[key]["kind"], "zip")
-                self.assertTrue(entry[key]["url"].startswith(
-                    "https://cdn.playwright.dev/builds/cft/153.0.8010.12/"), entry[key]["url"])
+                self.assertRegex(entry[key]["sha256"], r"^[0-9a-f]{64}$")
+                self.assertEqual(entry[key]["url"], f"https://cdn.playwright.dev/builds/cft/{entry['version']}/"
+                                                    f"{cft}/chrome-headless-shell-{cft}.zip")
+                self.assertEqual(entry[key]["bin"], f"chrome-headless-shell-{cft}/chrome-headless-shell")
         self.assertNotIn("chrome-headless-shell", toolchain.DEFAULT_TOOLS)  # only make e2e-tools installs it
+
+    def test_a_zip_bomb_or_a_late_unsafe_member_writes_nothing(self):
+        cases = {
+            "too many": [(f"f{i}", b"", 0o100644) for i in range(3)],
+            "late unsafe": [("ok.txt", b"x", 0o100644), ("../escape", b"x", 0o100644)],
+        }
+        for label, members in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as d, \
+                    mock.patch.object(toolchain, "MAX_ZIP_MEMBERS", 2):
+                archive = Path(d) / "a.zip"
+                archive.write_bytes(self.zip_blob(members))
+                target = Path(d) / "out"
+                target.mkdir()
+                with self.assertRaises(zipfile.BadZipFile):
+                    toolchain.safe_extract_zip(archive, target)
+                self.assertEqual(list(target.iterdir()), [])
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(toolchain, "MAX_ZIP_BYTES", 10):
+            archive = Path(d) / "a.zip"
+            archive.write_bytes(self.zip_blob([("big", b"x" * 100, 0o100644)]))
+            target = Path(d) / "out"
+            target.mkdir()
+            with self.assertRaises(zipfile.BadZipFile):
+                toolchain.safe_extract_zip(archive, target)
+
+    def test_an_unextractable_zip_is_a_toolchain_error_not_a_traceback(self):
+        blob = self.zip_blob([("../escape", b"x", 0o100644)])
+        spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x.zip",
+                                                  "sha256": hashlib.sha256(blob).hexdigest(), "kind": "zip", "bin": "x"}}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
+            with self.assertRaisesRegex(toolchain.ToolchainError, "can't extract"):
+                toolchain.install_tool("x", spec, "linux-x86_64")
 
     def wrapped_tar(self, inner: str, data: bytes) -> bytes:
         buf = io.BytesIO()

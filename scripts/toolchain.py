@@ -125,26 +125,45 @@ def safe_extract(archive: Path, target: Path) -> None:
         tar.extractall(target)
 
 
+MAX_ZIP_MEMBERS = 5000
+MAX_ZIP_BYTES = 2 * MAX_DOWNLOAD  # uncompressed; the pinned archives expand to well under this
+
+
 def safe_extract_zip(archive: Path, target: Path) -> None:
-    """Extract a zip, refusing absolute paths, `..`, links and anything but files and directories.
-    Only the execute bits of a file's mode are kept (0o755 or 0o644)."""
+    """Extract a zip, refusing absolute paths, `..`, backslashes, links and anything but files and
+    directories, and bounding the member count and the uncompressed size (Python's "decompression
+    pitfalls"). Every member is checked before any is written. Only the execute bits of a file's
+    mode are kept (0o755 or 0o644)."""
     root = target.resolve()
     with zipfile.ZipFile(archive) as zf:
-        for info in zf.infolist():
+        members = zf.infolist()
+        if len(members) > MAX_ZIP_MEMBERS:
+            raise zipfile.BadZipFile(f"too many members in archive ({len(members)})")
+        if sum(m.file_size for m in members) > MAX_ZIP_BYTES:
+            raise zipfile.BadZipFile("archive expands to more than the limit")
+        for info in members:
             name = info.filename
             mode = (info.external_attr >> 16) & 0o177777
             dest = (target / name).resolve()
-            if name.startswith(("/", "\\")) or "\\" in name or ".." in Path(name).parts \
+            if not name or name.startswith(("/", "\\")) or "\\" in name or ".." in Path(name).parts \
                     or not (dest == root or root in dest.parents):
                 raise zipfile.BadZipFile(f"unsafe path in archive: {name!r}")
             if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
                 raise zipfile.BadZipFile(f"unsupported member type in archive (a link?): {name!r}")
-            if info.is_dir():
+        written = 0
+        for info in members:
+            dest = target / info.filename
+            mode = (info.external_attr >> 16) & 0o177777
+            if info.is_dir() or stat.S_ISDIR(mode):
                 dest.mkdir(parents=True, exist_ok=True)
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info) as src, dest.open("wb") as out:
-                shutil.copyfileobj(src, out)
+            with zf.open(info) as src, dest.open("xb") as out:
+                for chunk in iter(lambda: src.read(1 << 20), b""):
+                    written += len(chunk)
+                    if written > MAX_ZIP_BYTES:  # the declared sizes could lie
+                        raise zipfile.BadZipFile("archive expands to more than the limit")
+                    out.write(chunk)
             dest.chmod(0o755 if mode & 0o111 else 0o644)
 
 
@@ -231,7 +250,10 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
         elif entry["kind"] == "tar":
             safe_extract(artifact, staging)
         elif entry["kind"] == "zip":
-            safe_extract_zip(artifact, staging)
+            try:
+                safe_extract_zip(artifact, staging)
+            except (zipfile.BadZipFile, OSError) as e:
+                raise ToolchainError(f"{name}: can't extract {entry['url']}: {e}") from e
         else:
             raise ToolchainError(f"{name}: unknown kind {entry['kind']!r}")
         binary = staging / entry["bin"]

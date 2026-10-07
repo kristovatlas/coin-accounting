@@ -260,6 +260,7 @@
   },
   "chrome-headless-shell": {
     "version": "153.0.8010.12",
+    "playwright": "1.63.0",
     "source": "Chrome for Testing headless shell, the build @playwright/test 1.63.0 uses (playwright-core browsers.json: chromium-headless-shell revision 1243, browserVersion 153.0.8010.12), from Playwright's CDN. No publisher checksums: trust-on-first-use. At pin time (2026-10-06) every archive was byte-identical to Google's copy at storage.googleapis.com/chrome-for-testing-public. Launched by the E2E tests through `executablePath`, so Playwright's own downloader never runs (ENGINEERING \u00a72.3). Installed by `make e2e-tools`, not by `make toolchain`.",
     "linux-x86_64": {
       "url": "https://cdn.playwright.dev/builds/cft/153.0.8010.12/linux64/chrome-headless-shell-linux64.zip",
