@@ -66,6 +66,11 @@ log = logging.getLogger(__name__)
 PR_SET_DUMPABLE: Final = 4  # <linux/prctl.h>
 DATA_DIR_ENV: Final = "COINACCT_DATA_DIR"
 BOOTSTRAP_PREFIX: Final = "coinacct-bootstrap-"
+# The production frontend build (the frontend make target). Read once at start-up and served from
+# memory, since `api/` has no filesystem access (architecture §2).
+FRONTEND_DIST: Final = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+MAX_BUNDLE_FILES: Final = 200
+MAX_BUNDLE_BYTES: Final = 20 * 1024 * 1024
 LISTEN_BACKLOG: Final = 64
 GRACEFUL_SECONDS: Final = 5  # uvicorn's wait for open requests at shutdown
 SERVER_STOP_SECONDS: Final = 10.0  # under services.lifecycle.DEADLINE_SECONDS (15)
@@ -324,6 +329,60 @@ def shutdown_signals(request: Callable[[str], None], force_exit: Callable[[], No
             signal.signal(sig, old)
 
 
+def load_bundle(dist: Path) -> dict[str, bytes] | None:
+    """The built frontend, as {relative POSIX path: bytes}, or None if there is no build (then the app
+    serves its placeholder page). Read once, at start-up, and never written (architecture §2, ADR
+    0034). Only regular files are read, never through a link, and the bundle is bounded; anything
+    else, an unreadable directory included, stops start-up rather than serving a partial or foreign
+    tree."""
+    try:
+        st = dist.lstat()
+    except FileNotFoundError:
+        return None
+    try:
+        if not stat.S_ISDIR(st.st_mode):
+            raise LaunchError(f"the frontend build at {dist} is not a directory")
+        try:
+            index = (dist / "index.html").lstat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(index.st_mode):
+            raise LaunchError(f"the frontend build's index.html is not a regular file: {dist}")
+        files: dict[str, bytes] = {}
+        total = 0
+        for root, dirs, names in os.walk(dist, onerror=_refuse_unreadable, followlinks=False):
+            for d in dirs:
+                if (Path(root) / d).is_symlink():
+                    raise LaunchError(f"the frontend build contains a link: {Path(root) / d}")
+            for name in names:
+                path = Path(root) / name
+                if len(files) >= MAX_BUNDLE_FILES:
+                    raise LaunchError(f"the frontend build at {dist} is larger than expected")
+                data = _read_bundle_file(path, MAX_BUNDLE_BYTES - total)
+                total += len(data)
+                files[path.relative_to(dist).as_posix()] = data
+        return files
+    except OSError as e:
+        raise LaunchError(f"can't read the frontend build at {dist} ({e.strerror or e})") from None
+
+
+def _refuse_unreadable(error: OSError) -> None:
+    raise error  # os.walk would otherwise skip the directory and serve a partial build
+
+
+def _read_bundle_file(path: Path, budget: int) -> bytes:
+    """One regular file, opened without following a link (O_NONBLOCK so a FIFO can't block), and
+    read up to `budget` bytes: a file that is, or grows, larger stops start-up."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise LaunchError(f"the frontend build contains something other than a file: {path}")
+        data = f.read(budget + 1)
+    if len(data) > budget:
+        raise LaunchError(f"the frontend build at {path.parent} is larger than expected")
+    return data
+
+
 def remove_file(path: Path) -> None:
     with suppress(FileNotFoundError):
         path.unlink()
@@ -362,6 +421,7 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
     open_browser: Callable[[Path], bool] = open_in_browser,
     announce: Callable[[str], None] = print_flushed,
     exit_process: Callable[[int], object] = os._exit,
+    bundle_dir: Path | None = None,
 ) -> int:
     """Run the app until it shuts down. Returns the process exit code.
 
@@ -372,6 +432,7 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
     a check can wait on the node for a long time.
     """
     data = prepared.data_dir
+    bundle = load_bundle(FRONTEND_DIST if bundle_dir is None else bundle_dir)
     sock = loopback_socket()
     port = sock.getsockname()[1]
     token = new_bootstrap_token()
@@ -476,6 +537,7 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
                     allow_unencrypted=prepared.needs_test_chain,
                     on_claimed=remove_launch_file,
                     shutdown=shutdown,
+                    bundle=bundle,
                 )
             finally:
                 with phase_lock:

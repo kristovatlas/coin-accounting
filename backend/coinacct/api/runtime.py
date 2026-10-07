@@ -8,7 +8,7 @@ network or the filesystem: the listening socket, uvicorn, the bootstrap file and
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,6 +49,7 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
     check: Callable[..., NodeStatus] = startup.check_configured_node,
     ttl: float = BOOTSTRAP_TTL_SECONDS,
     shutdown: Shutdown | None = None,
+    bundle: Mapping[str, bytes] | None = None,
 ) -> Runtime:
     """`rpc` is `config.RpcConfig` and `volume` is `storage.volume.VolumeStatus`, passed as values
     (architecture §2: `api/` imports neither). Raises `StorageRefused` when the storage policy
@@ -72,6 +73,10 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
     # the bootstrap file is written and the browser opened.
     sessions = Sessions(bootstrap_token, ttl=ttl, on_claimed=on_claimed)
     app = create_app(
-        port=port, sessions=sessions, status=lambda: status, on_quit=lambda: shutdown.request(QUIT_REASON)
+        port=port,
+        sessions=sessions,
+        status=lambda: status,
+        on_quit=lambda: shutdown.request(QUIT_REASON),
+        bundle=bundle,
     )
     return Runtime(app=app, sessions=sessions, shutdown=shutdown, status=status)

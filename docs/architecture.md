@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.4 (status: see ADR 0014, ADR 0029) |
-| Last updated | 2026-10-01 |
+| Version | 0.2.5 (status: see ADR 0014, ADR 0029, ADR 0034) |
+| Last updated | 2026-10-06 |
 | Scope | v1: Bitcoin (Bitcoin Core), single user, Linux + macOS |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) (IDs such as TB1, T-203, F2 refer to it) · [`ENGINEERING.md`](ENGINEERING.md) |
 
@@ -79,7 +79,7 @@ flowchart LR
 
 | Component | Responsibility | Must not |
 |---|---|---|
-| **Launcher** (`launcher.py`) | Runs **in the same process** as the server (§3). First, before any other import: sets `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0` (Linux), `TMPDIR`, `SQLITE_TMPDIR` and `tempfile.tempdir` to the volume. Then it installs the redacting log handler and exception hooks, runs the storage checks (T-401), reads the config through `storage/`, writes the bootstrap file (§4), starts uvicorn, and opens the bootstrap file in the default browser (`webbrowser`) | Start a child process; pass any secret in argv or the environment of another process; start if the storage checks fail on mainnet (T-401) |
+| **Launcher** (`launcher.py`) | Runs **in the same process** as the server (§3). First, before any other import: sets `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0` (Linux), `TMPDIR`, `SQLITE_TMPDIR` and `tempfile.tempdir` to the volume. Then it installs the redacting log handler and exception hooks, runs the storage checks (T-401), reads the config through `storage/`, reads the built frontend (`frontend/dist`) into memory once, read-only (ADR 0034), writes the bootstrap file (§4), starts uvicorn, and opens the bootstrap file in the default browser (`webbrowser`) | Start a child process; pass any secret in argv or the environment of another process; start if the storage checks fail on mainnet (T-401) |
 | **SPA** | UI: graph, tagging, events, sells, reports. Talks only to the API, with a bearer session token held in `sessionStorage` | Contact any other origin; embed remote assets; put sensitive values in URLs; use cookies |
 | **`api/`** | HTTP boundary: Host allowlist, bearer session check, security headers (CSP, `no-store`, `Referrer-Policy`, frame denial), request and upload validation (size limits). Calls `services/` only | Contain business logic, or import anything except `services/` and `domain/` |
 | **`services/`** | Orchestration: import and discovery, tagging and suggestions, events, report generation and export, price refresh and CSV import, settings, the background job worker and the tip poller (§3) | Talk to the node except through `chain/`, or to the internet except through `prices/` |
@@ -145,7 +145,7 @@ flowchart TD
 | Network (`socket`, `ssl`, `http.client`, `urllib.request`, `httpx`, `asyncio` streams) | `rpc.py`, `prices/`, `launcher.py` (server bind), `tests/`, `e2e/harness/` |
 | `webbrowser` | `launcher.py` |
 | `subprocess` | `storage/volume.py` (macOS `diskutil`), `tests/`, `e2e/harness/` |
-| Filesystem (`open`, `pathlib` writes, `os` file functions, `tempfile`, `shutil`, `sqlite3`) | `storage/`, `launcher.py` (bootstrap file, hardening), `tests/`, `e2e/harness/` |
+| Filesystem (`open`, `pathlib` writes, `os` file functions, `tempfile`, `shutil`, `sqlite3`) | `storage/`, `launcher.py` (bootstrap file, hardening, reading the built frontend once at start-up: ADR 0034), `tests/`, `e2e/harness/` |
 | Clock (`time.time`, `datetime.now`, `date.today`) | Everywhere **except** `tax/`, `doxx/`, `domain/` |
 | Floats | Nowhere in `tax/` (ENGINEERING §5.2) |
 
@@ -400,3 +400,4 @@ flowchart LR
 | 2026-10-01 | 0.2.2 | §9: the pinned workflow linters, and zizmor's online audits as a development-time flow to the GitHub API (ADR 0026) |
 | 2026-10-01 | 0.2.3 | §9: the pinned osv-scanner, and `make audit` as a development-time flow to the OSV API (ADR 0027) |
 | 2026-10-02 | 0.2.4 | §1, §8.1: the minimum Bitcoin Core version is 31.1 (ADR 0029) |
+| 2026-10-06 | 0.2.5 | §1, §2: the launcher reads the built frontend into memory at start-up; `api/` serves it from memory (ADR 0034) |

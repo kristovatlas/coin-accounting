@@ -93,7 +93,7 @@ class AgentGuardTests(unittest.TestCase):
     def test_allows_repository_make_targets_and_normal_commands(self):
         for cmd in ("make bootstrap", "make propose-js PKG=react@19.0.0 WORKSPACE=frontend DEV=1",
                     "make check BASE=origin/main", "make propose-py PKG='a==1'", "git log --oneline", "make",
-                    "make test", "make lint", "make e2e-tools"):
+                    "make test", "make lint", "make e2e-tools", "make frontend", "make e2e"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.bash(cmd), 0)
 
@@ -204,6 +204,11 @@ class MakefileOverrideTests(unittest.TestCase):
                                                    "zizmor\" --no-config .")),
                             (("audit-tools",), ("scripts/toolchain.py install --only osv-scanner \n",)),
                             (("e2e-tools",), ("scripts/toolchain.py install --only chrome-headless-shell \n",)),
+                            (("frontend",), ("toolchain.py verify sfw pnpm uv node python", "exec vite build")),
+                            (("e2e",), ("toolchain.py verify bitcoind", "exec vite build",
+                                        "scripts/toolchain.py verify chrome-headless-shell)",
+                                        "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1", "COINACCT_E2E_CHROME=\"$chrome\"",
+                                        "exec playwright test")),
                             (("audit",), ("toolchain.py verify osv-scanner", "scripts/check_repo_files.py",
                                           "--lockfile=$f", ": > \"$cfgdir/osv-scanner.toml\"",
                                           "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin \"",
