@@ -5,7 +5,6 @@ import hashlib
 import io
 import re
 import json
-import lzma
 import os
 import subprocess
 import shutil
@@ -499,8 +498,10 @@ class ToolchainTests(unittest.TestCase):
         return buf.getvalue()
 
     def test_zip_is_extracted_with_execute_bits_and_found_by_its_bin(self):
-        blob = self.zip_blob([("chrome-x/chrome-headless-shell", b"#!/bin/sh\n", 0o100755),
-                              ("chrome-x/lib.so", b"x", 0o100755), ("chrome-x/data.pak", b"y", 0o100644)])
+        blob = self.zip_blob([("chrome-x/", b"", 0o040755), ("chrome-x/sub", b"", 0o040755),  # dir entries
+                              ("chrome-x/chrome-headless-shell", b"#!/bin/sh\n", 0o100755),
+                              ("chrome-x/lib.so", b"x", 0o100755), ("chrome-x/data.pak", b"y", 0o100644),
+                              ("chrome-x/dos.txt", b"z", 0)])  # made on a non-Unix system: no mode bits
         spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x.zip",
                                                   "sha256": hashlib.sha256(blob).hexdigest(), "kind": "zip",
                                                   "bin": "chrome-x/chrome-headless-shell"}}
@@ -512,6 +513,8 @@ class ToolchainTests(unittest.TestCase):
             self.assertTrue(path.stat().st_mode & 0o100)
             self.assertTrue((path.parent / "lib.so").stat().st_mode & 0o100)  # not only the entry binary
             self.assertFalse((path.parent / "data.pak").stat().st_mode & 0o111)
+            self.assertTrue((path.parent / "sub").is_dir())
+            self.assertEqual((path.parent / "dos.txt").stat().st_mode & 0o777, 0o444)  # 0o644, then read-only
             self.assertEqual(toolchain.install_tool("chrome", spec, "linux-x86_64"), path)  # cached, verified
 
     def test_zip_with_unsafe_members_is_refused(self):
@@ -581,8 +584,9 @@ class ToolchainTests(unittest.TestCase):
         spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x.zip",
                                                   "sha256": hashlib.sha256(blob).hexdigest(), "kind": "zip", "bin": "x"}}
         for error in (RuntimeError("File 'x' is encrypted, password required"), NotImplementedError("compression type 99"),
-                      EOFError(), zlib.error("invalid stored block lengths"), lzma.LZMAError("corrupt input"),
-                      UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")):
+                      EOFError(), zlib.error("invalid stored block lengths"),
+                      UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+                      type("ZstdError", (Exception,), {})("corrupt frame")):  # any codec's own error
             with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as d, \
                     mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
                     mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)), \

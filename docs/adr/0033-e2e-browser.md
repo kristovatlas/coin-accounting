@@ -28,7 +28,7 @@ The browser runs only on the development machine and in CI, during `make e2e`. I
 - **The pin:** the four platforms in `scripts/toolchain.lock`, each with a committed SHA-256. There are no publisher checksums, so it's trust-on-first-use against Playwright's CDN, like `sfw` and actionlint (ADR 0026). At pin time, each archive was byte-identical to Google's own copy at `storage.googleapis.com/chrome-for-testing-public/153.0.8010.12/…`, linux-arm64 included.
 - **The tie to Playwright:** the lock entry records the Playwright version, and a test checks it against `pnpm-lock.yaml` and Playwright's own `browsers.json`. Bumping one without the other fails.
 - **Installing:** `make e2e-tools` installs it like every other pin. That means only after the human approves the pin on `main`, with the archive checked against its hash before a safe zip extraction (no links, no unsafe paths, size and member caps). It's not part of `make toolchain`.
-- **Launching:** the E2E target verifies the installed tree, and Playwright launches it through `executablePath`. Playwright's own downloader never runs (`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`).
+- **Launching** (M0.3 H4, part 2): the E2E target verifies the installed tree, and Playwright launches it through `executablePath`. Playwright's own downloader never runs (`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`).
 - **Host libraries:** on Linux the browser needs the host's NSS, ATK, X11, GBM and ALSA libraries. They're host prerequisites, like the host `python3`; this repository doesn't install them. GitHub's Ubuntu runners have them.
 
 ### Consequences
@@ -38,7 +38,7 @@ The browser runs only on the development machine and in CI, during `make e2e`. I
   - Nothing is fetched outside the repository's verified install path.
 - **Bad:**
   - **Unreviewed native code.** The browser is a large binary trusted on first use; its code isn't reviewed beyond the cross-checked hash.
-  - **It runs with the privileges of whoever runs `make e2e`:** the developer's account or the CI job.
+  - **It runs with the privileges of whoever runs the E2E tests** (`make e2e`, M0.3 H4 part 2): the developer's account or the CI job.
   - **It can reach the network.** The E2E pages are served from loopback under the app's CSP (`connect-src 'self'`), and the spec loads nothing else. But a compromised browser could still open connections of its own.
   - **Residual risk:** a compromised browser could act on the developer's machine or in CI.
     - **On the developer's machine** it runs as the owner, alongside the owner's GitHub credentials (and, in cruise mode, the merge token), the same exposure as every other pinned tool and dependency there (R-9). It's limited only by the owner's rule that no real data lives where agents and tests run (R-6, R-9).

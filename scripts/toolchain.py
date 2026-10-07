@@ -19,7 +19,6 @@ import argparse
 import base64
 import hashlib
 import json
-import lzma
 import os
 import platform
 import shutil
@@ -31,7 +30,6 @@ import tempfile
 import urllib.error
 import urllib.request
 import zipfile
-import zlib
 from pathlib import Path
 
 if sys.version_info < (3, 9):  # noqa: UP036 - this script runs on the host Python, before the pinned one exists
@@ -150,7 +148,9 @@ def safe_extract_zip(archive: Path, target: Path) -> None:
             if not name or name.startswith(("/", "\\")) or "\\" in name or ".." in Path(name).parts \
                     or not (dest == root or root in dest.parents):
                 raise zipfile.BadZipFile(f"unsafe path in archive: {name!r}")
-            if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            # No file-type bits (a non-Unix archive, or zipfile's own default of 0o600) is a plain file;
+            # any type other than a regular file or a directory (a link, FIFO, device) is refused.
+            if stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR):
                 raise zipfile.BadZipFile(f"unsupported member type in archive (a link?): {name!r}")
         written = 0
         for info in members:
@@ -255,11 +255,12 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
         elif entry["kind"] == "zip":
             try:
                 safe_extract_zip(artifact, staging)
-            # zipfile also raises RuntimeError (encrypted member), NotImplementedError (compression
-            # method), EOFError, zlib.error and lzma.LZMAError (truncated or corrupt data), and
-            # UnicodeDecodeError, a ValueError (a name flagged UTF-8 that isn't).
-            except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError, EOFError, ValueError,
-                    zlib.error, lzma.LZMAError) as e:
+            except PermissionError:
+                raise  # cmd_install reports ownership problems itself
+            # Besides BadZipFile, zipfile raises RuntimeError (encrypted member), NotImplementedError
+            # (compression method), EOFError and each codec's own error (zlib, and lzma or zstd where
+            # the host Python has them), and UnicodeDecodeError: any failure here is the archive's.
+            except Exception as e:  # noqa: BLE001 - every extraction failure is reported the same way
                 raise ToolchainError(f"{name}: can't extract {entry['url']}: {e}") from e
         else:
             raise ToolchainError(f"{name}: unknown kind {entry['kind']!r}")
