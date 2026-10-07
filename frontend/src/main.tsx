@@ -3,7 +3,11 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 
-import { claimSession, getStatus, quit, type NodeStatus } from "./api/client";
+import { claimSession, getStatus, quit, SessionError, takeBootstrapToken, type NodeStatus } from "./api/client";
+
+// Before anything renders: the token leaves the address bar at once (T-110), and the claim runs
+// exactly once, however often React runs the effect below (StrictMode runs it twice in development).
+const session = claimSession(takeBootstrapToken());
 
 type State =
   | { kind: "starting" }
@@ -25,9 +29,9 @@ function App() {
     let cancelled = false;
     (async () => {
       try {
-        const session = await claimSession();
-        const status = await getStatus(session);
-        if (!cancelled) setState({ kind: "ready", session, status });
+        const token = await session;
+        const status = await getStatus(token);
+        if (!cancelled) setState({ kind: "ready", session: token, status });
       } catch (error) {
         if (!cancelled) setState({ kind: "error", message: (error as Error).message });
       }
@@ -37,10 +41,16 @@ function App() {
     };
   }, []);
 
-  async function onQuit(session: string) {
+  async function onQuit(token: string) {
     setQuitting(true);
-    await quit(session);
-    setState({ kind: "stopped" });
+    try {
+      await quit(token);
+      setState({ kind: "stopped" });
+    } catch (error) {
+      // A refusal, or no answer at all: the app may still be running, so never say it stopped.
+      const message = error instanceof SessionError ? error.message : "The app did not answer. Close it from the terminal.";
+      setState({ kind: "error", message });
+    }
   }
 
   return (

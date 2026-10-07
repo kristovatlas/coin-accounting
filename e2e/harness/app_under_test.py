@@ -54,7 +54,12 @@ def main(workdir: Path) -> int:
             ],
             stdout=subprocess.PIPE,
             text=True,
-            env={"PATH": "/usr/bin:/bin", "HOME": str(workdir), "PYTHONPATH": str(BACKEND)},
+            env={
+                "PATH": "/usr/bin:/bin",
+                "HOME": str(workdir),
+                "PYTHONPATH": str(BACKEND),
+                "PYTHONDONTWRITEBYTECODE": "1",  # the pinned Python's tree is verified (Makefile)
+            },
         )
 
         def stop(signum: int, frame: FrameType | None) -> None:

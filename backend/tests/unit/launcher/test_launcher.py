@@ -277,7 +277,7 @@ def test_the_build_is_read_into_memory(tmp_path: Path) -> None:
     }
 
 
-@pytest.mark.parametrize("kind", ["file link", "directory link", "fifo"])
+@pytest.mark.parametrize("kind", ["file link", "directory link", "fifo", "index link"])
 def test_a_build_with_a_link_or_special_file_stops_start_up(tmp_path: Path, kind: str) -> None:
     dist = tmp_path / "dist"
     (dist / "assets").mkdir(parents=True)
@@ -287,6 +287,9 @@ def test_a_build_with_a_link_or_special_file_stops_start_up(tmp_path: Path, kind
     (outside / "secret").write_text("x")
     if kind == "file link":
         (dist / "assets" / "a.js").symlink_to(outside / "secret")
+    elif kind == "index link":
+        (dist / "index.html").unlink()
+        (dist / "index.html").symlink_to(outside / "secret")
     elif kind == "directory link":
         (dist / "more").symlink_to(outside)
     else:
@@ -302,3 +305,48 @@ def test_an_oversized_build_stops_start_up(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(launcher, "MAX_BUNDLE_BYTES", 50)
     with pytest.raises(LaunchError, match="larger than expected"):
         launcher.load_bundle(dist)
+    monkeypatch.setattr(launcher, "MAX_BUNDLE_BYTES", 100)  # exactly the limit is fine
+    assert launcher.load_bundle(dist) == {"index.html": b"x" * 100}
+
+
+def test_a_build_with_too_many_files_stops_start_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    for name in ("index.html", "a.js", "b.js"):
+        (dist / name).write_text("x")
+    monkeypatch.setattr(launcher, "MAX_BUNDLE_FILES", 2)
+    with pytest.raises(LaunchError, match="larger than expected"):
+        launcher.load_bundle(dist)
+    monkeypatch.setattr(launcher, "MAX_BUNDLE_FILES", 3)
+    assert len(launcher.load_bundle(dist) or {}) == 3
+
+
+def test_the_limit_counts_the_bytes_actually_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("x" * 100)  # read with a bound, so a file can't grow past it
+    monkeypatch.setattr(launcher, "MAX_BUNDLE_BYTES", 99)
+    with pytest.raises(LaunchError, match="larger than expected"):
+        launcher.load_bundle(dist)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable directories")
+@pytest.mark.parametrize("what", ["subdirectory", "file"])
+def test_an_unreadable_part_of_the_build_stops_start_up(tmp_path: Path, what: str) -> None:
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html>")
+    (dist / "assets" / "a.js").write_text("x")
+    target = dist / "assets" if what == "subdirectory" else dist / "assets" / "a.js"
+    target.chmod(0)
+    try:
+        with pytest.raises(LaunchError, match="can't read the frontend build"):
+            launcher.load_bundle(dist)
+    finally:
+        target.chmod(0o700)
+
+
+def test_a_build_that_is_a_file_stops_start_up(tmp_path: Path) -> None:
+    (tmp_path / "dist").write_text("x")
+    with pytest.raises(LaunchError, match="not a directory"):
+        launcher.load_bundle(tmp_path / "dist")

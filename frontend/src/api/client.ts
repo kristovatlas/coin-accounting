@@ -9,16 +9,22 @@ export type NodeStatus = { online: boolean; chain: string | null; reasons: strin
 
 export class SessionError extends Error {}
 
-/** Claims the session if the address carries a launch token, then returns the session token.
- * The token is dropped from the address bar and history before the request is made (T-110). */
-export async function claimSession(): Promise<string> {
-  const match = BOOTSTRAP.exec(window.location.hash);
-  if (match) {
-    window.history.replaceState(null, "", window.location.pathname);
+/** Removes a launch token from the address bar and history, and returns it. Called once, before
+ * the first render (T-110). Any `#bootstrap` fragment is removed, even a malformed one. */
+export function takeBootstrapToken(): string | null {
+  const hash = window.location.hash;
+  if (!hash.startsWith("#bootstrap")) return null;
+  window.history.replaceState(null, "", window.location.pathname);
+  return BOOTSTRAP.exec(hash)?.[1] ?? null;
+}
+
+/** Claims the session with the launch token, if there is one, then returns the session token. */
+export async function claimSession(bootstrap: string | null): Promise<string> {
+  if (bootstrap) {
     const response = await fetch("/api/session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bootstrap: match[1] }),
+      body: JSON.stringify({ bootstrap }),
     });
     const data: { session?: string; error?: string } = await response.json().catch(() => ({}));
     if (!response.ok || !data.session) {
@@ -45,10 +51,15 @@ export async function getStatus(session: string): Promise<NodeStatus> {
   return (await response.json()) as NodeStatus;
 }
 
+/** Asks the app to stop. Resolves only once the app has accepted (202); a refusal throws, so the
+ * page never says the app stopped while it is still running. */
 export async function quit(session: string): Promise<void> {
-  await fetch("/api/quit", {
+  const response = await fetch("/api/quit", {
     method: "POST",
     headers: { ...auth(session), "Content-Type": "application/json" },
     body: "{}",
-  }).catch(() => undefined);
+  });
+  if (!response.ok) {
+    throw new SessionError(`The app refused to quit (${response.status}). Close it from the terminal.`);
+  }
 }

@@ -29,10 +29,18 @@ from coinacct.services.startup import NodeStatus, StorageRefused
 from coinacct.storage import datadir
 from coinacct.storage.volume import Encryption, VolumeStatus
 from coinacct.storage.watchdog import Watchdog
+from tests.unit.api.asgi import call
 
 CONFIG = '[rpc]\nhost = "127.0.0.1"\nport = 18443\nuser = "ro-client"\npassword = "serve-test-password"\n'
 ONLINE = NodeStatus(online=True, chain="regtest", reasons=())
 WAIT = 5.0
+
+
+@pytest.fixture(autouse=True)
+def no_checkout_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`serve` reads the checkout's frontend/dist by default: point it at an empty place, so these
+    tests never depend on whatever was last built there."""
+    monkeypatch.setattr(launcher, "FRONTEND_DIST", tmp_path / "no-build")
 
 
 @pytest.fixture
@@ -181,6 +189,41 @@ def test_quit_stops_the_server_and_exits_cleanly(prepared: Prepared) -> None:
     assert h.serve(prepared) == 0
     assert h.server is not None and h.server.should_exit
     assert h.runtime is not None and h.runtime.shutdown.reason == runtime.QUIT_REASON
+
+
+def test_the_built_frontend_is_what_the_app_serves(
+    prepared: Prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>the build</title>")
+    (dist / "assets" / "index-abc.js").write_text("export {};")
+    monkeypatch.setattr(launcher, "FRONTEND_DIST", dist)
+    h = Harness()
+    served: dict[str, bytes] = {}
+
+    def during(server: FakeServer) -> None:
+        host = f"127.0.0.1:{h.port}"
+        served["/"] = call(server.app, "GET", "/", host=host).body
+        served["/assets/index-abc.js"] = call(server.app, "GET", "/assets/index-abc.js", host=host).body
+        quitting(h)(server)
+
+    h.during = during
+    assert h.serve(prepared) == 0
+    assert served == {"/": b"<!doctype html><title>the build</title>", "/assets/index-abc.js": b"export {};"}
+
+
+def test_without_a_build_the_placeholder_is_served(prepared: Prepared) -> None:
+    h = Harness()
+    served: list[bytes] = []
+
+    def during(server: FakeServer) -> None:
+        served.append(call(server.app, "GET", "/", host=f"127.0.0.1:{h.port}").body)
+        quitting(h)(server)
+
+    h.during = during
+    assert h.serve(prepared) == 0
+    assert b'<script src="/app.js"' in served[0]
 
 
 def test_nothing_listens_and_no_launch_file_exists_during_the_node_checks(prepared: Prepared) -> None:
