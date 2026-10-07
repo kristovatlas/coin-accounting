@@ -342,7 +342,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
      - the regtest harness
      - the first E2E test
 
-     M0.3 is done (2026-10-06; the first E2E test is PRs #153 and #154). What it left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues.
+     M0.3 is done (2026-10-07; the first E2E test is PRs #153 and #154). What it left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues.
 2. **M1 chain access:** node checks (including index sync and the canary), the tx fetch layer, spender lookups, the scan protocol (bounded ranges, gap guards, tip handling), the scan job queue (status/abort, leftover-scan cleanup), busy-script budgets, the chain-data cache with coverage and snapshots, fork-point reorg handling, the mempool pass, and the mainnet perf check.
 3. **M2 user DB + import + discovery:**
    - entities, tax accounts, clients
