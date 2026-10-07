@@ -8,6 +8,7 @@ import subprocess
 import shutil
 import sys
 import tarfile
+import zipfile
 import tempfile
 import unittest
 import urllib.request
@@ -174,9 +175,10 @@ class ToolchainTests(unittest.TestCase):
 
     def test_pinned_urls_match_their_platform_and_differ(self):
         # #67: a copy-paste slip between platforms would otherwise pass.
-        hints = {"linux-x86_64": ("linux",), "linux-arm64": ("linux",), "darwin-arm64": ("darwin", "apple", "macos"),
-                 "darwin-x86_64": ("darwin", "apple", "macos")}
-        arch = {"linux-x86_64": ("x86_64", "x64", "amd64"), "linux-arm64": ("arm64", "aarch64"),
+        hints = {"linux-x86_64": ("linux",), "linux-arm64": ("linux",), "darwin-arm64": ("darwin", "apple", "macos", "/mac-"),
+                 "darwin-x86_64": ("darwin", "apple", "macos", "/mac-")}
+        # Chrome for Testing spells x86-64 Linux "linux64" and macOS "mac-".
+        arch = {"linux-x86_64": ("x86_64", "x64", "amd64", "linux64"), "linux-arm64": ("arm64", "aarch64"),
                 "darwin-arm64": ("arm64", "aarch64"), "darwin-x86_64": ("x86_64", "x64", "amd64")}
         for name, spec in toolchain.load_lock().items():
             if name.startswith("_"):
@@ -479,6 +481,54 @@ class ToolchainTests(unittest.TestCase):
             target.mkdir()
             with self.assertRaises(tarfile.TarError):
                 toolchain.safe_extract(archive, target)
+
+    def zip_blob(self, members: list[tuple[str, bytes, int]]) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, data, mode in members:
+                info = zipfile.ZipInfo(name)
+                info.external_attr = mode << 16
+                zf.writestr(info, data)
+        return buf.getvalue()
+
+    def test_zip_is_extracted_with_execute_bits_and_found_by_its_bin(self):
+        blob = self.zip_blob([("chrome-x/chrome-headless-shell", b"#!/bin/sh\n", 0o100755),
+                              ("chrome-x/lib.so", b"x", 0o100755), ("chrome-x/data.pak", b"y", 0o100644)])
+        spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x.zip",
+                                                  "sha256": hashlib.sha256(blob).hexdigest(), "kind": "zip",
+                                                  "bin": "chrome-x/chrome-headless-shell"}}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)):
+            path = toolchain.install_tool("chrome", spec, "linux-x86_64")
+            self.assertEqual(path.name, "chrome-headless-shell")
+            self.assertTrue(path.stat().st_mode & 0o100)
+            self.assertFalse((path.parent / "data.pak").stat().st_mode & 0o111)
+            self.assertEqual(toolchain.install_tool("chrome", spec, "linux-x86_64"), path)  # cached, verified
+
+    def test_zip_with_unsafe_members_is_refused(self):
+        for name, mode in (("../escape", 0o100644), ("/abs", 0o100644), ("a\\..\\b", 0o100644),
+                           ("chrome-x/link", 0o120777), ("chrome-x/fifo", 0o010644)):
+            with self.subTest(name=name, mode=oct(mode)), tempfile.TemporaryDirectory() as d:
+                archive = Path(d) / "a.zip"
+                archive.write_bytes(self.zip_blob([(name, b"x", mode)]))
+                target = Path(d) / "out"
+                target.mkdir()
+                with self.assertRaises(zipfile.BadZipFile):
+                    toolchain.safe_extract_zip(archive, target)
+                self.assertEqual(list(target.iterdir()), [])
+
+    def test_the_browser_pin_is_the_build_the_pinned_playwright_uses(self):
+        # ENGINEERING §2.3: the E2E browser is pinned and hash-checked here; its version must be
+        # the one @playwright/test's playwright-core expects, or Playwright would run an untested build.
+        entry = toolchain.load_lock()["chrome-headless-shell"]
+        self.assertEqual(entry["version"], "153.0.8010.12")
+        for key in ("linux-x86_64", "linux-arm64", "darwin-arm64", "darwin-x86_64"):
+            with self.subTest(platform=key):
+                self.assertEqual(entry[key]["kind"], "zip")
+                self.assertTrue(entry[key]["url"].startswith(
+                    "https://cdn.playwright.dev/builds/cft/153.0.8010.12/"), entry[key]["url"])
+        self.assertNotIn("chrome-headless-shell", toolchain.DEFAULT_TOOLS)  # only make e2e-tools installs it
 
     def wrapped_tar(self, inner: str, data: bytes) -> bytes:
         buf = io.BytesIO()

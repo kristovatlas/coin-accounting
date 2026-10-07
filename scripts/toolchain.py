@@ -29,6 +29,7 @@ import tarfile
 import tempfile
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 if sys.version_info < (3, 9):  # noqa: UP036 - this script runs on the host Python, before the pinned one exists
@@ -124,6 +125,29 @@ def safe_extract(archive: Path, target: Path) -> None:
         tar.extractall(target)
 
 
+def safe_extract_zip(archive: Path, target: Path) -> None:
+    """Extract a zip, refusing absolute paths, `..`, links and anything but files and directories.
+    Only the execute bits of a file's mode are kept (0o755 or 0o644)."""
+    root = target.resolve()
+    with zipfile.ZipFile(archive) as zf:
+        for info in zf.infolist():
+            name = info.filename
+            mode = (info.external_attr >> 16) & 0o177777
+            dest = (target / name).resolve()
+            if name.startswith(("/", "\\")) or "\\" in name or ".." in Path(name).parts \
+                    or not (dest == root or root in dest.parents):
+                raise zipfile.BadZipFile(f"unsafe path in archive: {name!r}")
+            if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                raise zipfile.BadZipFile(f"unsupported member type in archive (a link?): {name!r}")
+            if info.is_dir():
+                dest.mkdir(parents=True, exist_ok=True)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, dest.open("wb") as out:
+                shutil.copyfileobj(src, out)
+            dest.chmod(0o755 if mode & 0o111 else 0o644)
+
+
 def artifact_id(entry: dict) -> str:
     """The pinned identity of an artifact: a SHA-256 hex digest, or an npm `sha512-…` integrity."""
     return entry.get("sha256") or entry["integrity"]
@@ -206,6 +230,8 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
             shutil.copyfile(artifact, staging / entry["bin"])
         elif entry["kind"] == "tar":
             safe_extract(artifact, staging)
+        elif entry["kind"] == "zip":
+            safe_extract_zip(artifact, staging)
         else:
             raise ToolchainError(f"{name}: unknown kind {entry['kind']!r}")
         binary = staging / entry["bin"]

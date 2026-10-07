@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.32 |
+| Version | 0.2.33 |
 | Last updated | 2026-10-06 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -99,7 +99,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | `bitcoind` (regtest) | `SHA256SUMS` plus a threshold of builder signatures (pinned `guix.sigs` builder keys), minimum and latest supported versions |
   | actionlint, zizmor | Committed per-platform SHA-256 of the GitHub release asset: trust-on-first-use against GitHub, like `sfw`. At pin time it was cross-checked against actionlint's `checksums.txt` and GitHub's SLSA provenance listing; the provenance signatures aren't verified yet (ADR 0026) |
   | osv-scanner | Committed per-platform SHA-256 of the GitHub release binary: trust-on-first-use against GitHub. It matches the publisher's `osv-scanner_SHA256SUMS`, which is in the same release, and its SLSA provenance isn't verified yet (ADR 0027) |
-  | Playwright browsers | Pinned `@playwright/test` version; each downloaded browser archive checked against a committed per-platform SHA-256; fails closed if no hash is recorded |
+  | Playwright browsers | Pinned `@playwright/test` version, and the one browser the E2E tests use, Chrome for Testing's headless shell at the build that version expects, pinned in `scripts/toolchain.lock` with a committed per-platform SHA-256 (trust-on-first-use against Playwright's CDN; at pin time each archive matched Google's `chrome-for-testing-public` copy). The `e2e-tools` target installs it like the other pins (fails closed on a missing or wrong hash); the tests launch it through `executablePath`, so Playwright's own downloader never runs. On Linux the browser needs the distribution's NSS, ATK, X11, GBM and ALSA libraries, which the developer installs with the system package manager (GitHub's Ubuntu runners have them) |
 
 - **Enforcement:** a CI check (`scripts/check-install-commands`) scans the `Makefile`, `scripts/`, `.github/workflows/` and config files for install or fetch-and-run commands without the `sfw` wrapper. It can be bypassed by obfuscation, so it is **hygiene, not a security boundary** (ADR 0022: the Claude Code guard and this check catch accidental or habitual installs; deliberate evasion is accepted risk R-8), and it allowlists documentation files that quote the banned commands. `AGENTS.md` repeats the rule for agents.
 
@@ -434,3 +434,4 @@ A change is done only when:
 | 2026-10-04 | 0.2.29 | §2.7: CI's `tests` job runs `make test` and `make lint` on every PR, on Linux and macOS, passing `DEPS_APPROVED=1` as decided in #44 (T-608) |
 | 2026-10-05 | 0.2.31 | Autopilot (ADR 0031): §6 the agent starts the review panel and the gate merges every PR the panel cleared except dependency and install files, ADRs and the architecture baseline, and the agents' own controls; §4.3 the milestone-closing PR merges through the gate. (0.2.30 was skipped.) |
 | 2026-10-06 | 0.2.32 | §2.5: the pnpm lockfile check lands with the first JavaScript dependencies (M0.3): a strict full read of `pnpm-lock.yaml` (registry-only sources, one sha512 integrity per package, no foreign keys or YAML constructs) and the 7-day cooldown from publish times that `make propose-js` records in `pnpm-lock.times.json` (owner decision: recorded at propose time, same back-dating limit as `uv.lock`). Known limit: a bare integrity means the registry configured for the package's scope, so `registry.npmjs.org` relies on the registry settings until #36 and #93 pin them; the `@jsr/` scope and `jsr:` specifiers fail |
+| 2026-10-06 | 0.2.33 | §2.3: the E2E browser pin: Chrome for Testing's headless shell 153.0.8010.12 (the build `@playwright/test` 1.63.0 uses) in `scripts/toolchain.lock`, a safe zip extractor in `toolchain.py`, and the `e2e-tools` target (M0.3 H4) |
