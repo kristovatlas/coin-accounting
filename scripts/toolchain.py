@@ -30,6 +30,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from pathlib import Path
 
 if sys.version_info < (3, 9):  # noqa: UP036 - this script runs on the host Python, before the pinned one exists
@@ -161,7 +162,8 @@ def safe_extract_zip(archive: Path, target: Path) -> None:
             with zf.open(info) as src, dest.open("xb") as out:
                 for chunk in iter(lambda: src.read(1 << 20), b""):
                     written += len(chunk)
-                    if written > MAX_ZIP_BYTES:  # the declared sizes could lie
+                    # Defence in depth: zipfile already stops at each member's declared size.
+                    if written > MAX_ZIP_BYTES:
                         raise zipfile.BadZipFile("archive expands to more than the limit")
                     out.write(chunk)
             dest.chmod(0o755 if mode & 0o111 else 0o644)
@@ -252,7 +254,9 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
         elif entry["kind"] == "zip":
             try:
                 safe_extract_zip(artifact, staging)
-            except (zipfile.BadZipFile, OSError) as e:
+            # zipfile also raises RuntimeError (encrypted member), NotImplementedError (compression
+            # method), EOFError and zlib.error (truncated or corrupt data).
+            except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError, EOFError, zlib.error) as e:
                 raise ToolchainError(f"{name}: can't extract {entry['url']}: {e}") from e
         else:
             raise ToolchainError(f"{name}: unknown kind {entry['kind']!r}")

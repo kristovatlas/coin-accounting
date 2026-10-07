@@ -11,6 +11,7 @@ import shutil
 import sys
 import tarfile
 import zipfile
+import zlib
 import tempfile
 import unittest
 import urllib.request
@@ -532,6 +533,8 @@ class ToolchainTests(unittest.TestCase):
         self.assertEqual(locked, [entry["playwright"]])
         browsers = ROOT / "node_modules/.pnpm" / f"playwright-core@{entry['playwright']}" / \
             "node_modules/playwright-core/browsers.json"
+        if os.environ.get("COINACCT_REQUIRE_PLAYWRIGHT"):  # CI, after bootstrap
+            self.assertTrue(browsers.exists(), f"{browsers} is missing")
         if browsers.exists():  # installed: check against Playwright's own record too
             shell = next(b for b in json.loads(browsers.read_text())["browsers"] if b["name"] == "chromium-headless-shell")
             self.assertEqual(shell["browserVersion"], entry["version"])
@@ -568,6 +571,21 @@ class ToolchainTests(unittest.TestCase):
             target.mkdir()
             with self.assertRaises(zipfile.BadZipFile):
                 toolchain.safe_extract_zip(archive, target)
+
+    def test_zipfile_read_errors_are_toolchain_errors_not_tracebacks(self):
+        # zipfile raises these for an encrypted member, an unknown compression method, and truncated
+        # or corrupt data; install_tool must report each as a ToolchainError.
+        blob = self.zip_blob([("x", b"x", 0o100644)])
+        spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x.zip",
+                                                  "sha256": hashlib.sha256(blob).hexdigest(), "kind": "zip", "bin": "x"}}
+        for error in (RuntimeError("File 'x' is encrypted, password required"), NotImplementedError("compression type 99"),
+                      EOFError(), zlib.error("invalid stored block lengths")):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as d, \
+                    mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
+                    mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)), \
+                    mock.patch.object(zipfile.ZipFile, "open", side_effect=error):
+                with self.assertRaisesRegex(toolchain.ToolchainError, "can't extract"):
+                    toolchain.install_tool("x", spec, "linux-x86_64")
 
     def test_an_unextractable_zip_is_a_toolchain_error_not_a_traceback(self):
         blob = self.zip_blob([("../escape", b"x", 0o100644)])

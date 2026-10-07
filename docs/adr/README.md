@@ -39,5 +39,6 @@ MADR-format records of significant decisions (see [ADR 0001](0001-record-decisio
 | [0030](0030-cruise-mode.md) | Cruise mode: a lighter review panel, gated automatic merges and milestone loops |
 | [0031](0031-autopilot.md) | Autopilot: agents merge everything except human decisions |
 | [0032](0032-native-frontend-build-tools.md) | Prebuilt native binaries for the frontend build tools (Rolldown, Lightning CSS, fsevents) |
+| [0033](0033-e2e-browser.md) | A pinned headless Chrome for the E2E tests |
 
 Template: [0000-template.md](0000-template.md).
