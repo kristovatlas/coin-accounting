@@ -5,6 +5,7 @@ import hashlib
 import io
 import re
 import json
+import lzma
 import os
 import subprocess
 import shutil
@@ -509,6 +510,7 @@ class ToolchainTests(unittest.TestCase):
             path = toolchain.install_tool("chrome", spec, "linux-x86_64")
             self.assertEqual(path.name, "chrome-headless-shell")
             self.assertTrue(path.stat().st_mode & 0o100)
+            self.assertTrue((path.parent / "lib.so").stat().st_mode & 0o100)  # not only the entry binary
             self.assertFalse((path.parent / "data.pak").stat().st_mode & 0o111)
             self.assertEqual(toolchain.install_tool("chrome", spec, "linux-x86_64"), path)  # cached, verified
 
@@ -579,7 +581,8 @@ class ToolchainTests(unittest.TestCase):
         spec = {"version": "1", "linux-x86_64": {"url": "https://example.invalid/x.zip",
                                                   "sha256": hashlib.sha256(blob).hexdigest(), "kind": "zip", "bin": "x"}}
         for error in (RuntimeError("File 'x' is encrypted, password required"), NotImplementedError("compression type 99"),
-                      EOFError(), zlib.error("invalid stored block lengths")):
+                      EOFError(), zlib.error("invalid stored block lengths"), lzma.LZMAError("corrupt input"),
+                      UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")):
             with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as d, \
                     mock.patch.object(toolchain, "TOOLCHAIN", Path(d)), \
                     mock.patch.object(toolchain, "download", lambda url, dest: dest.write_bytes(blob)), \

@@ -70,6 +70,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | `make update-deps` | Batch update (§2.6), lockfile-only, then the same review |
   | `make update-sfw` | Reviewed update of the pinned `sfw` version and checksum |
   | `make test-tools` | Pinned, verified test tooling downloads (see "Non-package downloads") |
+  | `make e2e-tools` | The pinned, verified headless Chrome for the E2E tests (ADR 0033) |
   | `make lint-tools` / `make lint-workflows` | Install the pinned actionlint and zizmor; check the workflows with them (§2.7, ADR 0026) |
   | `make audit` | The pinned `osv-scanner` binary (§2.3, `make audit-tools`) against `uv.lock` and `pnpm-lock.yaml`. It sends package names and versions to `api.osv.dev` (THREAT_MODEL §6), with an empty config from outside the repository, `--no-resolve` and an empty environment (ADR 0027). One tool for both ecosystems, so no `pip-audit` dependency tree |
   | `make test` | The backend unit and regtest integration tests (`pytest`, with only the named plugins and the socket guard, §3.2) under `coverage`, then the §3.3 floors: 85 % overall, 95 % for each of `chain/`, `tax/`, `doxx/` that exists. Needs the pinned `bitcoind` (`make test-tools`); the harness in `e2e/harness/` verifies it before each run |
@@ -185,7 +186,7 @@ The `scripts/check-lockfiles` wrapper and the Makefile (its `SYS_PYTHON`, which 
   - the lockfile policy check
   - the install-command check
   - the Socket App report
-  - tests and coverage on **Linux and macOS**: the `tests` job (`make test`, `make lint`), on the `pull_request` trigger only, as T-608 requires
+  - tests and coverage on **Linux and macOS**: the `tests` job (`make test`, `make lint`, and the check that the E2E browser pin matches the installed Playwright), on the `pull_request` trigger only, as T-608 requires
   - a **reproducible frontend build**: build twice in the same pinned environment and compare the normalized `dist/` output
 - **Branch protection on `main`:**
   - PRs only, with all required checks green

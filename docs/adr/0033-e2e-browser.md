@@ -8,7 +8,7 @@ deciders: repository owner (human), drafted by Claude Code
 
 ## Context and Problem Statement
 
-ENGINEERING §3.1 makes E2E the primary test layer: Playwright drives a browser against the production build, under the real CSP. ENGINEERING §2.3 already says the browser is pinned and hash-checked, but not which one. ENGINEERING §4.1 requires an ADR for "a new dependency with network, native-code or install-time execution capability". A browser is all three of the first two: it's a large native binary, and it can fetch from the network.
+ENGINEERING §3.1 makes E2E the primary test layer: Playwright drives a browser against the production build, under the real CSP. ENGINEERING §2.3 already says the browser is pinned and hash-checked, but not which one. ENGINEERING §4.1 requires an ADR for "a new dependency with network, native-code or install-time execution capability". A browser has the first two of these: it's a large native binary, and it can fetch from the network.
 
 `@playwright/test` 1.63.0 (approved in PR #136) expects **Chrome for Testing's headless shell 153.0.8010.12** (playwright-core `browsers.json`, chromium-headless-shell revision 1243). Left to itself, Playwright downloads that browser through its own downloader. That downloader doesn't check a hash we commit, and it runs outside the repository's install path.
 
@@ -40,9 +40,10 @@ The browser runs only on the development machine and in CI, during `make e2e`. I
   - **Unreviewed native code.** The browser is a large binary trusted on first use; its code isn't reviewed beyond the cross-checked hash.
   - **It runs with the privileges of whoever runs `make e2e`:** the developer's account or the CI job.
   - **It can reach the network.** The E2E pages are served from loopback under the app's CSP (`connect-src 'self'`), and the spec loads nothing else. But a compromised browser could still open connections of its own.
-  - **Residual risk:** a compromised browser could act on the developer's machine or in CI. This is limited by:
-    - no real data or credentials where agents and tests run (R-6, R-9)
-    - CI jobs with no secrets and read-only contents
-    - the hash pin, cross-checked against a second source
+  - **Residual risk:** a compromised browser could act on the developer's machine or in CI.
+    - **On the developer's machine** it runs as the owner, alongside the owner's GitHub credentials (and, in cruise mode, the merge token), the same exposure as every other pinned tool and dependency there (R-9). It's limited only by the owner's rule that no real data lives where agents and tests run (R-6, R-9).
+    - **In CI** it runs in jobs with no secrets and a read-only token.
+    - **In both:** the hash pin, cross-checked against a second source.
+    - Recorded as accepted risk **R-14** in THREAT_MODEL, which takes effect when this ADR is accepted.
   - **This is a test-time risk only.** The shipped app neither contains nor starts the browser. The owner accepts it by accepting this ADR.
 - **Re-pinning:** each Playwright update needs a new pin, cross-checked the same way, and a new approval.

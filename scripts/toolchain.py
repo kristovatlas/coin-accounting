@@ -19,6 +19,7 @@ import argparse
 import base64
 import hashlib
 import json
+import lzma
 import os
 import platform
 import shutil
@@ -255,8 +256,10 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
             try:
                 safe_extract_zip(artifact, staging)
             # zipfile also raises RuntimeError (encrypted member), NotImplementedError (compression
-            # method), EOFError and zlib.error (truncated or corrupt data).
-            except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError, EOFError, zlib.error) as e:
+            # method), EOFError, zlib.error and lzma.LZMAError (truncated or corrupt data), and
+            # UnicodeDecodeError, a ValueError (a name flagged UTF-8 that isn't).
+            except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError, EOFError, ValueError,
+                    zlib.error, lzma.LZMAError) as e:
                 raise ToolchainError(f"{name}: can't extract {entry['url']}: {e}") from e
         else:
             raise ToolchainError(f"{name}: unknown kind {entry['kind']!r}")
