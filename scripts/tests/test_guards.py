@@ -93,7 +93,7 @@ class AgentGuardTests(unittest.TestCase):
     def test_allows_repository_make_targets_and_normal_commands(self):
         for cmd in ("make bootstrap", "make propose-js PKG=react@19.0.0 WORKSPACE=frontend DEV=1",
                     "make check BASE=origin/main", "make propose-py PKG='a==1'", "git log --oneline", "make",
-                    "make test", "make lint"):
+                    "make test", "make lint", "make e2e-tools"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.bash(cmd), 0)
 
@@ -203,6 +203,7 @@ class MakefileOverrideTests(unittest.TestCase):
                                                    "PATH=/usr/bin:/bin ZIZMOR_GITHUB_TOKEN=\"$ZIZMOR_GITHUB_TOKEN\" \"",
                                                    "zizmor\" --no-config .")),
                             (("audit-tools",), ("scripts/toolchain.py install --only osv-scanner \n",)),
+                            (("e2e-tools",), ("scripts/toolchain.py install --only chrome-headless-shell \n",)),
                             (("audit",), ("toolchain.py verify osv-scanner", "scripts/check_repo_files.py",
                                           "--lockfile=$f", ": > \"$cfgdir/osv-scanner.toml\"",
                                           "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin \"",

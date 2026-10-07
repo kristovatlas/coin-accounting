@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.32 |
+| Version | 0.2.33 |
 | Last updated | 2026-10-06 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
@@ -70,6 +70,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | `make update-deps` | Batch update (§2.6), lockfile-only, then the same review |
   | `make update-sfw` | Reviewed update of the pinned `sfw` version and checksum |
   | `make test-tools` | Pinned, verified test tooling downloads (see "Non-package downloads") |
+  | `make e2e-tools` | The pinned, verified headless Chrome for the E2E tests (ADR 0033) |
   | `make lint-tools` / `make lint-workflows` | Install the pinned actionlint and zizmor; check the workflows with them (§2.7, ADR 0026) |
   | `make audit` | The pinned `osv-scanner` binary (§2.3, `make audit-tools`) against `uv.lock` and `pnpm-lock.yaml`. It sends package names and versions to `api.osv.dev` (THREAT_MODEL §6), with an empty config from outside the repository, `--no-resolve` and an empty environment (ADR 0027). One tool for both ecosystems, so no `pip-audit` dependency tree |
   | `make test` | The backend unit and regtest integration tests (`pytest`, with only the named plugins and the socket guard, §3.2) under `coverage`, then the §3.3 floors: 85 % overall, 95 % for each of `chain/`, `tax/`, `doxx/` that exists. Needs the pinned `bitcoind` (`make test-tools`); the harness in `e2e/harness/` verifies it before each run |
@@ -99,7 +100,7 @@ Configured in `pyproject.toml` `[tool.uv]`.
   | `bitcoind` (regtest) | `SHA256SUMS` plus a threshold of builder signatures (pinned `guix.sigs` builder keys), minimum and latest supported versions |
   | actionlint, zizmor | Committed per-platform SHA-256 of the GitHub release asset: trust-on-first-use against GitHub, like `sfw`. At pin time it was cross-checked against actionlint's `checksums.txt` and GitHub's SLSA provenance listing; the provenance signatures aren't verified yet (ADR 0026) |
   | osv-scanner | Committed per-platform SHA-256 of the GitHub release binary: trust-on-first-use against GitHub. It matches the publisher's `osv-scanner_SHA256SUMS`, which is in the same release, and its SLSA provenance isn't verified yet (ADR 0027) |
-  | Playwright browsers | Pinned `@playwright/test` version; each downloaded browser archive checked against a committed per-platform SHA-256; fails closed if no hash is recorded |
+  | Playwright browsers | Pinned `@playwright/test` version, and the one browser the E2E tests use, Chrome for Testing's headless shell at the build that version expects, pinned in `scripts/toolchain.lock` with a committed per-platform SHA-256 (trust-on-first-use against Playwright's CDN; at pin time each archive matched Google's `chrome-for-testing-public` copy; ADR 0033). The `e2e-tools` target installs it like the other pins (fails closed on a missing or wrong hash); the E2E tests (M0.3 H4, part 2) launch it through `executablePath`, after verifying it, so Playwright's own downloader never runs. On Linux it needs the host's NSS, ATK, X11, GBM and ALSA libraries: host prerequisites, like the host `python3`, which this repository doesn't install (GitHub's Ubuntu runners have them) |
 
 - **Enforcement:** a CI check (`scripts/check-install-commands`) scans the `Makefile`, `scripts/`, `.github/workflows/` and config files for install or fetch-and-run commands without the `sfw` wrapper. It can be bypassed by obfuscation, so it is **hygiene, not a security boundary** (ADR 0022: the Claude Code guard and this check catch accidental or habitual installs; deliberate evasion is accepted risk R-8), and it allowlists documentation files that quote the banned commands. `AGENTS.md` repeats the rule for agents.
 
@@ -117,7 +118,7 @@ Third-party code is never copied into the repository (a vendored package, a mini
 6. **Human approval.** The human explicitly approves the dependency in the PR. AI agents may propose dependencies, never approve them.
 7. **Only then install.** Approval is the human's merge to `main`, compared against `refs/remotes/origin/main`.
    - `make bootstrap` installs only dependency files that match it: the manifests and lockfiles, plus config that changes installs or runs code during them (`.pnpmfile.*`, `.npmrc`, `uv.toml`, `pnpm-workspace.yaml`, `.python-version`, `.node-version`). Untracked files count even if a gitignore would hide them.
-   - `scripts/toolchain.py install` (behind `make toolchain`/`make test-tools`) refuses pins in `scripts/toolchain.lock` that aren't on `main`, including when run directly.
+   - `scripts/toolchain.py install` (behind `make toolchain`/`make test-tools`/`make e2e-tools`) refuses pins in `scripts/toolchain.lock` that aren't on `main`, including when run directly.
    - Step 2 (`make propose-*`) refuses unapproved install config, because resolving follows it too. It resolves with `--no-build`, and pnpm is set to `ignorePnpmfile`, so no package or hook code runs while resolving **(verify at setup)**.
    - To use an approved change before it is merged, **the human** adds `DEPS_APPROVED=1` to the make command line. CI does the same, explicitly in its workflow file, so dependency PRs can be tested before approval on a throwaway machine (from M0.2; THREAT_MODEL §5.6.1, T-608). Agents never set it (AGENTS.md); the Claude Code guard blocks it, while other agents are bound by the AGENTS.md rule alone.
    - GNU make treats a variable in an inherited `MAKEFLAGS` as a command-line one, so **never put `DEPS_APPROVED` in `MAKEFLAGS`**, a shell profile or agent settings.
@@ -185,7 +186,7 @@ The `scripts/check-lockfiles` wrapper and the Makefile (its `SYS_PYTHON`, which 
   - the lockfile policy check
   - the install-command check
   - the Socket App report
-  - tests and coverage on **Linux and macOS**: the `tests` job (`make test`, `make lint`), on the `pull_request` trigger only, as T-608 requires
+  - tests and coverage on **Linux and macOS**: the `tests` job (`make test`, `make lint`, and the check that the E2E browser pin matches the installed Playwright), on the `pull_request` trigger only, as T-608 requires
   - a **reproducible frontend build**: build twice in the same pinned environment and compare the normalized `dist/` output
 - **Branch protection on `main`:**
   - PRs only, with all required checks green
@@ -434,3 +435,4 @@ A change is done only when:
 | 2026-10-04 | 0.2.29 | §2.7: CI's `tests` job runs `make test` and `make lint` on every PR, on Linux and macOS, passing `DEPS_APPROVED=1` as decided in #44 (T-608) |
 | 2026-10-05 | 0.2.31 | Autopilot (ADR 0031): §6 the agent starts the review panel and the gate merges every PR the panel cleared except dependency and install files, ADRs and the architecture baseline, and the agents' own controls; §4.3 the milestone-closing PR merges through the gate. (0.2.30 was skipped.) |
 | 2026-10-06 | 0.2.32 | §2.5: the pnpm lockfile check lands with the first JavaScript dependencies (M0.3): a strict full read of `pnpm-lock.yaml` (registry-only sources, one sha512 integrity per package, no foreign keys or YAML constructs) and the 7-day cooldown from publish times that `make propose-js` records in `pnpm-lock.times.json` (owner decision: recorded at propose time, same back-dating limit as `uv.lock`). Known limit: a bare integrity means the registry configured for the package's scope, so `registry.npmjs.org` relies on the registry settings until #36 and #93 pin them; the `@jsr/` scope and `jsr:` specifiers fail |
+| 2026-10-06 | 0.2.33 | §2.3: the E2E browser pin: Chrome for Testing's headless shell 153.0.8010.12 (the build `@playwright/test` 1.63.0 uses) in `scripts/toolchain.lock`, a safe zip extractor in `toolchain.py`, and the `e2e-tools` target (M0.3 H4) |

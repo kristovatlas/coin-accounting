@@ -29,6 +29,7 @@ import tarfile
 import tempfile
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 if sys.version_info < (3, 9):  # noqa: UP036 - this script runs on the host Python, before the pinned one exists
@@ -124,6 +125,51 @@ def safe_extract(archive: Path, target: Path) -> None:
         tar.extractall(target)
 
 
+MAX_ZIP_MEMBERS = 5000
+MAX_ZIP_BYTES = 2 * MAX_DOWNLOAD  # uncompressed; the pinned archives expand to well under this
+
+
+def safe_extract_zip(archive: Path, target: Path) -> None:
+    """Extract a zip, refusing absolute paths, `..`, backslashes, links and anything but files and
+    directories, and bounding the member count and the uncompressed size (Python's "decompression
+    pitfalls"). Every member is checked before any is written. Only the execute bits of a file's
+    mode are kept (0o755 or 0o644)."""
+    root = target.resolve()
+    with zipfile.ZipFile(archive) as zf:
+        members = zf.infolist()
+        if len(members) > MAX_ZIP_MEMBERS:
+            raise zipfile.BadZipFile(f"too many members in archive ({len(members)})")
+        if sum(m.file_size for m in members) > MAX_ZIP_BYTES:
+            raise zipfile.BadZipFile("archive expands to more than the limit")
+        for info in members:
+            name = info.filename
+            mode = (info.external_attr >> 16) & 0o177777
+            dest = (target / name).resolve()
+            if not name or name.startswith(("/", "\\")) or "\\" in name or ".." in Path(name).parts \
+                    or not (dest == root or root in dest.parents):
+                raise zipfile.BadZipFile(f"unsafe path in archive: {name!r}")
+            # No file-type bits (a non-Unix archive, or zipfile's own default of 0o600) is a plain file;
+            # any type other than a regular file or a directory (a link, FIFO, device) is refused.
+            if stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR):
+                raise zipfile.BadZipFile(f"unsupported member type in archive (a link?): {name!r}")
+        written = 0
+        for info in members:
+            dest = target / info.filename
+            mode = (info.external_attr >> 16) & 0o177777
+            if info.is_dir() or stat.S_ISDIR(mode):
+                dest.mkdir(parents=True, exist_ok=True)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, dest.open("xb") as out:
+                for chunk in iter(lambda: src.read(1 << 20), b""):
+                    written += len(chunk)
+                    # Defence in depth: zipfile already stops at each member's declared size.
+                    if written > MAX_ZIP_BYTES:
+                        raise zipfile.BadZipFile("archive expands to more than the limit")
+                    out.write(chunk)
+            dest.chmod(0o755 if mode & 0o111 else 0o644)
+
+
 def artifact_id(entry: dict) -> str:
     """The pinned identity of an artifact: a SHA-256 hex digest, or an npm `sha512-…` integrity."""
     return entry.get("sha256") or entry["integrity"]
@@ -206,6 +252,16 @@ def install_tool(name: str, spec: dict, key: str, force: bool = False) -> Path:
             shutil.copyfile(artifact, staging / entry["bin"])
         elif entry["kind"] == "tar":
             safe_extract(artifact, staging)
+        elif entry["kind"] == "zip":
+            try:
+                safe_extract_zip(artifact, staging)
+            except PermissionError:
+                raise  # cmd_install reports ownership problems itself
+            # Besides BadZipFile, zipfile raises RuntimeError (encrypted member), NotImplementedError
+            # (compression method), EOFError and each codec's own error (zlib, and lzma or zstd where
+            # the host Python has them), and UnicodeDecodeError: any failure here is the archive's.
+            except Exception as e:  # noqa: BLE001 - every extraction failure is reported the same way
+                raise ToolchainError(f"{name}: can't extract {entry['url']}: {e}") from e
         else:
             raise ToolchainError(f"{name}: unknown kind {entry['kind']!r}")
         binary = staging / entry["bin"]

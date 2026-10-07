@@ -59,3 +59,7 @@ jobs:
         run: make test
       - name: Lint and strict typing
         run: make lint
+      - name: The E2E browser pin matches the installed Playwright (ADR 0033)
+        env:
+          COINACCT_REQUIRE_PLAYWRIGHT: "1"
+        run: python3 -m unittest scripts.tests.test_check_adrs_and_toolchain -k browser_pin

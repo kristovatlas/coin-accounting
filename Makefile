@@ -80,6 +80,10 @@ lint-workflows: ## Check the GitHub workflows with the pinned actionlint and ziz
 	@# rejects linter config files and zizmor ignore comments (ADR 0026).
 	cd "$(ROOT)" && env -i HOME="$$HOME" PATH=/usr/bin:/bin ZIZMOR_GITHUB_TOKEN="$$ZIZMOR_GITHUB_TOKEN" "$(TOOLBIN)/zizmor" --no-config .
 
+.PHONY: e2e-tools
+e2e-tools: ## Install the pinned headless Chrome for the E2E tests (hash-verified; pins must be on origin/main)
+	"$(SYS_PYTHON)" scripts/toolchain.py install --only chrome-headless-shell $(if $(DEPS_OK),--approved)
+
 .PHONY: test-tools
 test-tools: ## Install the pinned bitcoind for regtest tests (hash-verified; pins must be on origin/main)
 	"$(SYS_PYTHON)" scripts/toolchain.py install --only bitcoind $(if $(DEPS_OK),--approved)
