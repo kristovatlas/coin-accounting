@@ -188,6 +188,20 @@ COV_FLOOR_ALL := 85
 COV_FLOOR_STRICT := 95
 COV_STRICT_MODULES := chain tax doxx
 
+.PHONY: frontend
+frontend: require-toolchain ## Build the production frontend bundle into frontend/dist (no network; the app serves it)
+	@[ -d "$(ROOT)/frontend/node_modules" ] || { echo "Run 'make bootstrap' first: the frontend build needs the approved dependencies." >&2; exit 1; }
+	cd "$(ROOT)/frontend" && "$(PNPM)" exec vite build
+
+.PHONY: e2e
+e2e: require-toolchain frontend ## Run the E2E tests: the built app against regtest in the pinned headless Chrome (needs make test-tools and make e2e-tools)
+	@"$(SYS_PYTHON)" scripts/toolchain.py verify bitcoind >/dev/null || { echo "Run 'make test-tools' first: the E2E tests need the pinned regtest bitcoind." >&2; exit 1; }
+	@[ -d "$(ROOT)/e2e/node_modules" ] || { echo "Run 'make bootstrap' first: the E2E tests need the approved dependencies." >&2; exit 1; }
+	@# The browser is the pinned, verified tree, launched by the path the verifier prints; Playwright's
+	@# own downloader never runs (ENGINEERING §2.3).
+	chrome="$$("$(SYS_PYTHON)" scripts/toolchain.py verify chrome-headless-shell)" || { echo "Run 'make e2e-tools' first: the E2E tests need the pinned headless Chrome." >&2; exit 1; }; \
+	cd "$(ROOT)/e2e" && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 COINACCT_E2E_CHROME="$$chrome" COINACCT_E2E_PYTHON="$(ROOT)/.venv/bin/python" "$(PNPM)" exec playwright test
+
 .PHONY: run
 run: require-toolchain ## Start the app. Usage: make run DATA_DIR=/path/on/your/encrypted/volume (or set COINACCT_DATA_DIR)
 	PYTHONPATH="$(ROOT)/backend" "$(ROOT)/.venv/bin/python" -m coinacct.launcher $${DATA_DIR:+--data-dir "$$DATA_DIR"}

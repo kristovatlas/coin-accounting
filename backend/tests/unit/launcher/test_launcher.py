@@ -255,3 +255,50 @@ def test_bootstrap_tokens_are_long_and_unpredictable() -> None:
 def test_a_bad_port_is_refused_for_the_bootstrap_file(tmp_path: Path, port: int) -> None:
     with pytest.raises(ValueError, match="port"):
         launcher.write_bootstrap_file(tmp_path, port, "t")
+
+
+# --- the built frontend ------------------------------------------------------------------------
+
+
+def test_without_a_build_the_bundle_is_none(tmp_path: Path) -> None:
+    assert launcher.load_bundle(tmp_path / "missing") is None
+    (tmp_path / "dist").mkdir()
+    assert launcher.load_bundle(tmp_path / "dist") is None  # no index.html yet
+
+
+def test_the_build_is_read_into_memory(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html>")
+    (dist / "assets" / "index-abc.js").write_text("console.log(1)")
+    assert launcher.load_bundle(dist) == {
+        "index.html": b"<!doctype html>",
+        "assets/index-abc.js": b"console.log(1)",
+    }
+
+
+@pytest.mark.parametrize("kind", ["file link", "directory link", "fifo"])
+def test_a_build_with_a_link_or_special_file_stops_start_up(tmp_path: Path, kind: str) -> None:
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html>")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("x")
+    if kind == "file link":
+        (dist / "assets" / "a.js").symlink_to(outside / "secret")
+    elif kind == "directory link":
+        (dist / "more").symlink_to(outside)
+    else:
+        os.mkfifo(dist / "assets" / "pipe")
+    with pytest.raises(LaunchError):
+        launcher.load_bundle(dist)
+
+
+def test_an_oversized_build_stops_start_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("x" * 100)
+    monkeypatch.setattr(launcher, "MAX_BUNDLE_BYTES", 50)
+    with pytest.raises(LaunchError, match="larger than expected"):
+        launcher.load_bundle(dist)

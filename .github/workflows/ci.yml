@@ -53,8 +53,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Install the pinned toolchain, the locked dependencies and bitcoind
-        run: make toolchain bootstrap test-tools DEPS_APPROVED=1
+      - name: Install the pinned toolchain, the locked dependencies, bitcoind and the E2E browser
+        run: make toolchain bootstrap test-tools e2e-tools DEPS_APPROVED=1
       - name: Tests (socket guard on, coverage floors)
         run: make test
       - name: Lint and strict typing
@@ -63,3 +63,5 @@ jobs:
         env:
           COINACCT_REQUIRE_PLAYWRIGHT: "1"
         run: python3 -m unittest scripts.tests.test_check_adrs_and_toolchain -k browser_pin
+      - name: E2E (production build, real CSP, pinned headless Chrome, regtest)
+        run: make e2e

@@ -30,3 +30,6 @@ coinacct-bootstrap-*.html
 
 # Local agent/editor settings
 .claude/settings.local.json
+
+# The production frontend build (the frontend make target)
+frontend/dist/

@@ -504,3 +504,53 @@ def test_a_token_that_cant_be_encoded_is_a_plain_mismatch() -> None:
     sessions = Sessions(TOKEN)
     assert sessions.claim("\ud800") is not None
     assert sessions.claim("\ud800").name == "WRONG_TOKEN"  # type: ignore[union-attr]
+
+
+# --- the built frontend ------------------------------------------------------------------------
+
+BUNDLE = {
+    "index.html": b'<!doctype html><script type="module" src="/assets/index-abc.js"></script>',
+    "assets/index-abc.js": b"console.log(1)",
+    "assets/style-abc.css": b"p{}",
+    "assets/notes.txt": b"not served",
+}
+
+
+def bundled() -> World:
+    w = World()
+    w.app = create_app(
+        port=PORT, sessions=w.sessions, status=lambda: w.status, on_quit=w.on_quit, bundle=BUNDLE
+    )
+    return w
+
+
+def test_the_built_frontend_is_served_with_the_security_headers() -> None:
+    w = bundled()
+    page = call(w.app, "GET", "/")
+    assert page.status == 200
+    assert page.body == BUNDLE["index.html"]
+    assert page.headers["content-type"].startswith("text/html")
+    script = call(w.app, "GET", "/assets/index-abc.js")
+    assert script.status == 200
+    assert script.body == b"console.log(1)"
+    assert script.headers["content-type"] == "text/javascript; charset=utf-8"
+    assert call(w.app, "GET", "/assets/style-abc.css").headers["content-type"] == "text/css; charset=utf-8"
+    for reply in (page, script):
+        assert reply.headers["content-security-policy"] == CSP
+        assert reply.headers["x-frame-options"] == "DENY"
+        assert reply.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/assets/missing.js",
+        "/assets/notes.txt",
+        "/assets/..%2Findex.html",
+        "/app.js",
+        "/index.html",
+        "/assets/",
+    ],
+)
+def test_only_the_bundles_own_assets_are_served(path: str) -> None:
+    assert call(bundled().app, "GET", path).status == 404

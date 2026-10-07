@@ -5,7 +5,9 @@ as values and callbacks: the port, the bootstrap token, the node status, and wha
 and on quit. The API itself opens no files and starts nothing.
 
 Routes:
-- `GET /` and `GET /app.js`: the placeholder page (until the SPA exists). No authentication; no data.
+- `GET /` and `GET /assets/<file>`: the built frontend, handed in by the launcher, which reads it
+  (`api/` opens no files). Without a build, `GET /` and `GET /app.js` serve the placeholder page.
+  No authentication; no data.
 - `POST /api/session`: bootstrap token → session token, once (§4).
 - `GET /api/status` (bearer): the node status from start-up.
 - `POST /api/quit` (bearer): start shutdown.
@@ -17,7 +19,7 @@ third-party assets (T-106), and the default error body echoes the request input.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, Request
@@ -31,6 +33,15 @@ from coinacct.api.session import ClaimError, Sessions
 from coinacct.services.startup import NodeStatus
 
 log = logging.getLogger(__name__)
+
+# The file types a Vite build emits; anything else in the bundle is not served.
+BUNDLE_TYPES = {
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".woff2": "font/woff2",
+}
 
 CLAIM_STATUS = {ClaimError.WRONG_TOKEN: 401, ClaimError.EXPIRED: 410, ClaimError.ALREADY_CLAIMED: 409}
 
@@ -50,6 +61,7 @@ def create_app(
     sessions: Sessions,
     status: Callable[[], NodeStatus],
     on_quit: Callable[[], None],
+    bundle: Mapping[str, bytes] | None = None,
 ) -> SecurityMiddleware:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -70,13 +82,30 @@ def create_app(
     async def invalid(request: Request, exc: RequestValidationError) -> Response:
         return JSONResponse({"error": "invalid request"}, status_code=422)
 
-    @app.get("/")
-    def index() -> Response:
-        return Response(INDEX_HTML, media_type="text/html; charset=utf-8")
+    if bundle is not None:
+        index_html = bundle["index.html"]
 
-    @app.get("/app.js")
-    def script() -> Response:
-        return Response(APP_JS, media_type="text/javascript; charset=utf-8")
+        @app.get("/")
+        def index() -> Response:
+            return Response(index_html, media_type="text/html; charset=utf-8")
+
+        @app.get("/assets/{name}")
+        def asset(name: str) -> Response:
+            body = bundle.get(f"assets/{name}")
+            media_type = BUNDLE_TYPES.get(name[name.rfind(".") :] if "." in name else "")
+            if body is None or media_type is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return Response(body, media_type=media_type)
+
+    else:
+
+        @app.get("/")
+        def placeholder() -> Response:
+            return Response(INDEX_HTML, media_type="text/html; charset=utf-8")
+
+        @app.get("/app.js")
+        def script() -> Response:
+            return Response(APP_JS, media_type="text/javascript; charset=utf-8")
 
     @app.post("/api/session")
     def claim(body: SessionRequest) -> Response:
