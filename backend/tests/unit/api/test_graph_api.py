@@ -18,6 +18,7 @@ from coinacct.domain.chain import Outpoint
 from coinacct.services.graph import Graph
 from coinacct.services.startup import NodeStatus
 from coinacct.storage import chain_cache as cc
+from coinacct.storage import tags
 from coinacct.storage.datadir import DataDir, open_data_dir
 from coinacct.storage.db import open_reader
 from tests.unit.services.test_graph import MINE, TIP, FakeChain, h, tx
@@ -75,6 +76,15 @@ def test_a_transaction_comes_with_its_owners(world: World, chain: FakeChain) -> 
     assert body["outputs"][0]["script"] == MINE and body["outputs"][0]["owner"]["label"] == "savings"
     assert body["outputs"][1]["owner"] is None
     assert body["inputs"][0]["prevout"] == {"txid": h(1001), "vout": 0}
+    assert body["mixing"] is None
+
+
+def test_a_transaction_carries_the_users_mixing_flag(
+    world: World, chain: FakeChain, conn: sqlite3.Connection
+) -> None:
+    chain.txs[(h(1), h(490))] = tx(1)
+    tags.set_mixing(conn, h(1), True, at="2026-10-08T12:00:00+00:00")
+    assert world.post("/api/graph/tx", {"txid": h(1), "blockhash": h(490)}).json()["mixing"] is True
 
 
 def test_a_spend_and_an_unspent_snapshot(world: World, chain: FakeChain, conn: sqlite3.Connection) -> None:

@@ -38,7 +38,8 @@ class Change:
 
 def _address(conn: sqlite3.Connection, script_hex: str) -> dict[str, Any] | None:
     row = conn.execute(
-        "SELECT entity_id, tax_account_id, label FROM address WHERE script_hex = ?", (script_hex,)
+        "SELECT entity_id, tax_account_id, label, text, source FROM address WHERE script_hex = ?",
+        (script_hex,),
     ).fetchone()
     if row is None:
         return None
@@ -48,7 +49,14 @@ def _address(conn: sqlite3.Connection, script_hex: str) -> dict[str, Any] | None
             "SELECT client_id FROM address_client WHERE script_hex = ? ORDER BY client_id", (script_hex,)
         )
     ]
-    return {"entity_id": row[0], "tax_account_id": row[1], "label": row[2], "client_ids": clients}
+    return {
+        "entity_id": row[0],
+        "tax_account_id": row[1],
+        "label": row[2],
+        "text": row[3],
+        "source": row[4],
+        "client_ids": clients,
+    }
 
 
 def _log(conn: sqlite3.Connection, at: str, entry: tuple[str, str, Any, Any]) -> None:
@@ -83,15 +91,18 @@ def tag_address(  # noqa: PLR0913 - the address, its owner and account, label, c
     if text is not None:
         refuse_private(text)
     clients = sorted(set(client_ids))
-    after: dict[str, Any] = {
-        "entity_id": entity_id,
-        "tax_account_id": tax_account_id,
-        "label": label,
-        "client_ids": clients,
-    }
     try:
         with transaction(conn):
             before = _address(conn, script_hex)
+            after: dict[str, Any] = {
+                "entity_id": entity_id,
+                "tax_account_id": tax_account_id,
+                "label": label,
+                # the text is the address's, not the tag's: kept once known, filled in if it wasn't
+                "text": text if before is None or before["text"] is None else before["text"],
+                "source": "manual" if before is None else before["source"],
+                "client_ids": clients,
+            }
             if before == after:
                 return False
             if before is None:
@@ -108,6 +119,10 @@ def tag_address(  # noqa: PLR0913 - the address, its owner and account, label, c
                     )
                 if before["label"] != label:
                     conn.execute("UPDATE address SET label = ? WHERE script_hex = ?", (label, script_hex))
+                if before["text"] != after["text"]:
+                    conn.execute(
+                        "UPDATE address SET text = ? WHERE script_hex = ?", (after["text"], script_hex)
+                    )
                 conn.execute("DELETE FROM address_client WHERE script_hex = ?", (script_hex,))
             conn.executemany(
                 "INSERT INTO address_client (script_hex, client_id) VALUES (?, ?)",
@@ -146,12 +161,12 @@ def mixing(conn: sqlite3.Connection, txid: str) -> bool | None:
     return None if row is None else bool(row[0])
 
 
-def changes(conn: sqlite3.Connection, subject: str | None = None) -> list[Change]:
-    """The change log, oldest first; or one subject's."""
+def changes(conn: sqlite3.Connection, of: tuple[str, str] | None = None) -> list[Change]:
+    """The change log, oldest first; or one `(kind, subject)`'s. The kind matters: a 32-byte script
+    and a txid look alike."""
     sql = "SELECT id, at, kind, subject, before, after FROM change_log"
-    rows = conn.execute(
-        sql + (" WHERE subject = ?" if subject else "") + " ORDER BY id", (subject,) if subject else ()
-    ).fetchall()
+    where = "" if of is None else " WHERE kind = ? AND subject = ?"
+    rows = conn.execute(sql + where + " ORDER BY id", () if of is None else of).fetchall()
     return [
         Change(i, a, k, s, None if b is None else json.loads(b), json.loads(af)) for i, a, k, s, b, af in rows
     ]

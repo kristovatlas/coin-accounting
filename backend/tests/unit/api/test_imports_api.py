@@ -314,6 +314,10 @@ def test_the_runtime_serves_imports_and_connects_them_to_the_chain_jobs(tmp_path
     rt.start_chain_jobs()  # the launcher starts them after its last checks
     assert call(rt.app, "POST", "/api/imports/addresses", headers=auth, json_body=body).status == 200
     assert requested == ["sync"]
+    # the tag routes are served too, and a newly tagged address is scanned the same way
+    tag = {"script": p2wpkh(2)[1], "entity_id": ac.ME, "tax_account_id": wallet.json()["id"]}
+    assert call(rt.app, "POST", "/api/tags/address", headers=auth, json_body=tag).json() == {"new": True}
+    assert requested == ["sync", "sync"]
     db.close()
 
 

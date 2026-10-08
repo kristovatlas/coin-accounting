@@ -453,13 +453,16 @@ def _graph_routes(app: FastAPI, graph: Graph, authenticated: list[Any]) -> None:
         }
 
 
+RowId = Annotated[int, Field(ge=1, le=2**63 - 1)]  # SQLite's integer range: no OverflowError, no 500
+
+
 class AddressTag(Strict):
     script: str = Field(pattern=r"^(?:[0-9a-f]{2}){1,10000}$")
     address: str | None = Field(default=None, min_length=1, max_length=90)
-    entity_id: int = Field(ge=1)
-    tax_account_id: int | None = Field(default=None, ge=1)
+    entity_id: RowId
+    tax_account_id: RowId | None = None
     label: str = Field(default="", max_length=200)
-    client_ids: list[int] = Field(default_factory=list, max_length=100)
+    client_ids: list[RowId] = Field(default_factory=list, max_length=100)
 
 
 class MixingFlag(Strict):
@@ -468,6 +471,7 @@ class MixingFlag(Strict):
 
 
 class Subject(Strict):
+    kind: Literal["address_tag", "tx_flag"]  # a 32-byte script and a txid look alike
     subject: str = Field(pattern=r"^(?:[0-9a-f]{2}){1,10000}$")  # a script or a txid
 
 
@@ -495,6 +499,6 @@ def _tag_routes(app: FastAPI, tagging: Tagging, authenticated: list[Any]) -> Non
         return {
             "changes": [
                 {"at": c.at, "kind": c.kind, "before": c.before, "after": c.after}
-                for c in tagging.changes(body.subject)
+                for c in tagging.changes(body.kind, body.subject)
             ]
         }

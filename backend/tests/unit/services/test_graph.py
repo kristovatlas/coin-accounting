@@ -19,6 +19,7 @@ from coinacct.services.graph import TIP_RETRIES, Graph, NotFound
 from coinacct.services.imports import ImportRefused, OfflineError
 from coinacct.storage import accounts as ac
 from coinacct.storage import chain_cache as cc
+from coinacct.storage import tags
 from coinacct.storage.accounts import ME
 from coinacct.storage.chain_state import Tip, record_chain, set_tip
 from coinacct.storage.datadir import DataDir, open_data_dir
@@ -150,6 +151,15 @@ def test_a_confirmed_transaction_is_fetched_cached_and_owned(
     assert view.inputs[0].prevout == Outpoint(h(1001), 0) and view.inputs[0].sats == 70_000
     cached = cc.get_tx(conn, h(1), h(490))  # height = 500 - 11 + 1 = 490
     assert cached is not None and cached.confirmations == 11
+
+
+def test_a_transaction_carries_the_users_mixing_flag(data: DataDir, conn: sqlite3.Connection) -> None:
+    cc.put_tx(conn, tx(1), 490, TIP)
+    assert offline(data, conn).tx(h(1), h(490)).mixing is None  # nobody has set one
+    tags.set_mixing(conn, h(1), True, at="2026-10-08T12:00:00+00:00")
+    assert offline(data, conn).tx(h(1), h(490)).mixing is True
+    tags.set_mixing(conn, h(1), False, at="2026-10-08T12:05:00+00:00")
+    assert offline(data, conn).tx(h(1), h(490)).mixing is False
 
 
 def test_a_cached_transaction_needs_no_node_even_offline(

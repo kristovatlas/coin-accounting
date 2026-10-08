@@ -64,9 +64,16 @@ def test_a_new_address_is_added_and_logged_t408(conn: sqlite3.Connection, exchan
         "deposit",
         "manual",
     )
-    [log] = tags.changes(conn, SCRIPT)
+    [log] = tags.changes(conn, ("address_tag", SCRIPT))
     assert (log.kind, log.before, log.at) == ("address_tag", None, AT)
-    assert log.after == {"entity_id": exchange, "tax_account_id": None, "label": "deposit", "client_ids": []}
+    assert log.after == {
+        "entity_id": exchange,
+        "tax_account_id": None,
+        "label": "deposit",
+        "text": "bcrt1qx",
+        "source": "manual",
+        "client_ids": [],
+    }
 
 
 def test_retagging_logs_before_and_after_and_a_no_op_logs_nothing_t408(
@@ -98,24 +105,67 @@ def test_retagging_logs_before_and_after_and_a_no_op_logs_nothing_t408(
         client_ids=[client],
         at=LATER,
     )
-    first, second = tags.changes(conn, SCRIPT)
+    first, second = tags.changes(conn, ("address_tag", SCRIPT))
     assert second.before == first.after and second.at == LATER
     assert second.after == {
         "entity_id": ME,
         "tax_account_id": wallet,
         "label": "mine",
+        "text": None,
+        "source": "manual",
         "client_ids": [client],
     }
 
 
-@pytest.mark.parametrize("statement", ["UPDATE change_log SET kind = 'tx_flag'", "DELETE FROM change_log"])
+def test_an_address_text_is_filled_in_once_and_then_kept_t408(
+    conn: sqlite3.Connection, exchange: int
+) -> None:
+    def tag(text: str | None) -> None:
+        tags.tag_address(
+            conn, SCRIPT, text=text, entity_id=exchange, tax_account_id=None, label="", client_ids=[], at=AT
+        )
+
+    tag(None)
+    tag("bcrt1qx")  # filled in, and logged
+    tag("bcrt1qy")  # kept: the text is the address's, not the tag's
+    tag(None)
+    assert ac.addresses(conn)[0].text == "bcrt1qx"
+    first, second = tags.changes(conn, ("address_tag", SCRIPT))
+    assert second.before is not None
+    assert (first.after["text"], second.before["text"], second.after["text"]) == (None, None, "bcrt1qx")
+
+
+def test_the_history_of_a_script_and_a_txid_that_look_alike_stays_apart(
+    conn: sqlite3.Connection, exchange: int
+) -> None:
+    tags.tag_address(
+        conn, TXID, text=None, entity_id=exchange, tax_account_id=None, label="", client_ids=[], at=AT
+    )
+    tags.set_mixing(conn, TXID, True, at=AT)
+    assert [c.kind for c in tags.changes(conn, ("address_tag", TXID))] == ["address_tag"]
+    assert [c.kind for c in tags.changes(conn, ("tx_flag", TXID))] == ["tx_flag"]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE change_log SET kind = 'tx_flag'",
+        "DELETE FROM change_log",
+        # REPLACE deletes the old row without firing delete triggers (recursive_triggers is off)
+        "INSERT OR REPLACE INTO change_log (id, at, kind, subject, after)"
+        " VALUES (1, '2026-10-08T12:00:00+00:00', 'tx_flag', 'ab', '{}')",
+        "REPLACE INTO change_log (id, at, kind, subject, after)"
+        " VALUES (1, '2026-10-08T12:00:00+00:00', 'tx_flag', 'ab', '{}')",
+    ],
+)
 def test_the_change_log_is_append_only_t408(conn: sqlite3.Connection, exchange: int, statement: str) -> None:
     tags.tag_address(
         conn, SCRIPT, text=None, entity_id=exchange, tax_account_id=None, label="", client_ids=[], at=AT
     )
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         conn.execute(statement)
-    assert len(tags.changes(conn)) == 1
+    [log] = tags.changes(conn)
+    assert log.kind == "address_tag"
 
 
 def test_the_schemas_ownership_rules_hold_and_nothing_is_logged_on_a_refusal(
@@ -186,7 +236,7 @@ def test_the_mixing_flag_is_set_cleared_and_logged(conn: sqlite3.Connection) -> 
     tags.set_mixing(conn, TXID, True, at=AT)  # no change: not logged
     tags.set_mixing(conn, TXID, False, at=LATER)
     assert tags.mixing(conn, TXID) is False
-    first, second = tags.changes(conn, TXID)
+    first, second = tags.changes(conn, ("tx_flag", TXID))
     assert (first.before, first.after) == (None, {"mixing": True, "source": "user"})
     assert (second.before, second.after) == (
         {"mixing": True, "source": "user"},
