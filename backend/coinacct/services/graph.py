@@ -30,9 +30,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Final
 
 from coinacct.chain import reorg, spenders, txs
-from coinacct.chain.spenders import SpendState
+from coinacct.chain.spenders import BIP30_OVERWRITTEN, Spend, SpendState
 from coinacct.chain.txs import ChainRpc, NodeError
 from coinacct.domain.chain import Outpoint, Tx, TxOut
 from coinacct.services.imports import ImportRefused, OfflineError, db_errors
@@ -40,6 +41,9 @@ from coinacct.storage import accounts, chain_cache
 from coinacct.storage.chain_cache import SpentBy, StaleTipError, reference_tip
 from coinacct.storage.chain_state import Tip
 from coinacct.storage.db import Connection
+
+# Times a spender lookup is asked again while the node's tip moves under it (T-207).
+TIP_RETRIES: Final = 3
 
 
 class NotFound(LookupError):
@@ -144,8 +148,11 @@ class Graph:
             except StaleTipError:
                 return None
 
-    def _fetch(self, txid: str, blockhash: str | None) -> Tx:
-        """The transaction from the cache, or from the node (and cached if confirmed, at a still tip)."""
+    def _fetch(self, txid: str, blockhash: str | None, *, prevouts: bool = True) -> Tx:
+        """The transaction from the cache, or from the node (and cached if confirmed, at a still tip).
+        `prevouts=False` skips fetching an unconfirmed transaction's parents, for callers that only
+        need its outputs (T-205). Without a block hash, a confirmed transaction is the one `txindex`
+        resolves to, which is in the active chain; the tip checks below guard its height."""
         if blockhash is not None:
             cached = self._read(lambda r: chain_cache.get_tx(r, txid, blockhash))
             if cached is not None:
@@ -154,8 +161,11 @@ class Graph:
         with _node_errors():
             before = reorg.node_tip(rpc)
             tx = txs.fetch_tx(rpc, txid, blockhash)
-            if not tx.confirmed:
-                return txs.fill_prevouts(rpc, tx)  # the mempool is never cached (T-207)
+            if tx.blockhash is not None and not tx.confirmed:
+                # `txindex` can name a block that is no longer active, with no confirmations: stale.
+                raise NotFound("the node has no such transaction in its active chain")
+            if not tx.confirmed:  # the mempool is never cached (T-207)
+                return txs.fill_prevouts(rpc, tx) if prevouts else tx
             after = reorg.node_tip(rpc)
         if before == after and tx.blockhash is not None:
             height = after.height - tx.confirmations + 1
@@ -169,18 +179,23 @@ class Graph:
         return _view(found, owners)
 
     def spender(self, txid: str, blockhash: str | None, n: int) -> SpendView:
-        """What spent output `n` of the transaction: from the cache, or from the node."""
-        found = self._fetch(txid, blockhash)
+        """What spent output `n` of the transaction. A confirmed spend comes from the cache when it
+        holds one. Otherwise the node answers when online, so a mempool spend is never hidden behind a
+        cached "unspent"; offline, an "unspent" snapshot at the current tip is the best answer there is.
+        Nothing about an unconfirmed transaction's outputs is cached (T-207)."""
+        found = self._fetch(txid, blockhash, prevouts=False)
         if not 0 <= n < len(found.outputs):
             raise NotFound("the transaction has no such output")
         outpoint = Outpoint(found.txid, n)
-        if found.outputs[n].unspendable:
+        if found.outputs[n].unspendable or _overwritten(found):
             return SpendView(SpendState.UNSPENDABLE.value, None, None, None)
 
         def cached(r: Connection) -> SpendView | None:
             spent = chain_cache.get_spender(r, outpoint)
             if spent is not None:
                 return SpendView(SpendState.SPENT.value, spent.txid, spent.blockhash, None)
+            if self._rpc is not None:
+                return None  # online, the node says whether a mempool transaction spends it
             at, tip = chain_cache.unspent_at(r, outpoint), reference_tip(r)
             if at is not None and at == tip:
                 return SpendView(SpendState.UNSPENT.value, None, None, at)
@@ -189,36 +204,59 @@ class Graph:
         known = self._read(cached)
         if known is not None:
             return known
-        rpc = self._online()
-        with _node_errors():
-            before = reorg.node_tip(rpc)
-            spend = spenders.spend_of(rpc, found, n)
-            spending = (
-                txs.fetch_tx(rpc, spend.spending_txid, spend.blockhash)
-                if spend.state is SpendState.SPENT and spend.spending_txid is not None
-                else None
-            )
-            after = reorg.node_tip(rpc)
-        still = before == after
+        spend, spending, tip = self._ask_spend(self._online(), found, n)
+        cache = found.confirmed  # an unconfirmed transaction's outputs are never cached (T-207)
         if spend.state is SpendState.SPENT and spending is not None and spend.blockhash is not None:
-            if still:
-                height = after.height - spending.confirmations + 1
+            if cache:
+                height = tip.height - spending.confirmations + 1
                 by = SpentBy(spending.txid, spend.blockhash, height)
-                self._cache(lambda w: chain_cache.put_spender(w, outpoint, by, after))
+                self._cache(lambda w: chain_cache.put_spender(w, outpoint, by, tip))
             return SpendView(spend.state.value, spend.spending_txid, spend.blockhash, None)
         if spend.state is SpendState.UNSPENT:
-            if still:
-                self._cache(lambda w: chain_cache.put_unspent(w, outpoint, after))
-            return SpendView(spend.state.value, None, None, after)
+            if cache:
+                self._cache(lambda w: chain_cache.put_unspent(w, outpoint, tip))
+            return SpendView(spend.state.value, None, None, tip)
         return SpendView(spend.state.value, spend.spending_txid, spend.blockhash, None)
+
+    def _ask_spend(self, rpc: ChainRpc, found: Tx, n: int) -> tuple[Spend, Tx | None, Tip]:
+        """The node's answer, and the tip it holds at: asked again while the tip moves under it, so
+        an "unspent" is only ever labelled with a tip it was true at (T-207)."""
+        outpoint = Outpoint(found.txid, n)
+        for _ in range(TIP_RETRIES):
+            with _node_errors():
+                before = reorg.node_tip(rpc)
+                spend = spenders.spend_of(rpc, found, n)
+                try:
+                    spending = (
+                        txs.fetch_tx(rpc, spend.spending_txid, spend.blockhash)
+                        if spend.state is SpendState.SPENT and spend.spending_txid is not None
+                        else None
+                    )
+                except (txs.TxNotFoundError, txs.StaleBlockError):
+                    spending = None  # the spender's block left the chain after the node named it
+                    after = None
+                else:
+                    after = reorg.node_tip(rpc)
+            if spending is not None and not any(i.prevout == outpoint for i in spending.inputs):
+                raise ImportRefused("the node's answer couldn't be read")
+            if after is not None and before == after:
+                return spend, spending, after
+        raise OfflineError("the chain changed during the lookup; try again in a moment")
 
 
 def _owners(conn: Connection) -> dict[str, Owner]:
     return {a.script_hex: Owner(a.entity_id, a.tax_account_id, a.label) for a in accounts.addresses(conn)}
 
 
-def _output(n: int, out: TxOut, owners: dict[str, Owner]) -> OutputView:
-    return OutputView(n, out.sats, out.script_hex, out.address, out.unspendable, owners.get(out.script_hex))
+def _overwritten(tx: Tx) -> bool:
+    """The earlier copy of a BIP30 duplicate coinbase: its outputs were overwritten, never spendable
+    (T-208). Caches are keyed by outpoint, so this is decided before any of them is read."""
+    return tx.blockhash is not None and BIP30_OVERWRITTEN.get(tx.txid) == tx.blockhash
+
+
+def _output(n: int, out: TxOut, owners: dict[str, Owner], *, overwritten: bool = False) -> OutputView:
+    unspendable = out.unspendable or overwritten
+    return OutputView(n, out.sats, out.script_hex, out.address, unspendable, owners.get(out.script_hex))
 
 
 def _view(tx: Tx, owners: dict[str, Owner]) -> TxView:
@@ -232,5 +270,6 @@ def _view(tx: Tx, owners: dict[str, Owner]) -> TxView:
         )
         for i in tx.inputs
     )
-    outputs = tuple(_output(n, o, owners) for n, o in enumerate(tx.outputs))
+    overwritten = _overwritten(tx)
+    outputs = tuple(_output(n, o, owners, overwritten=overwritten) for n, o in enumerate(tx.outputs))
     return TxView(tx.txid, tx.blockhash, tx.confirmations, tx.block_time, inputs, outputs)

@@ -81,7 +81,7 @@ def test_a_spend_and_an_unspent_snapshot(world: World, chain: FakeChain, conn: s
     cc.put_tx(conn, tx(1), 490, TIP)
     chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.SPENT, h(2), h(495))
     chain.spends[Outpoint(h(1), 1)] = Spend(Outpoint(h(1), 1), SpendState.UNSPENT)
-    chain.txs[(h(2), h(495))] = tx(2, block=495, confirmations=6)
+    chain.txs[(h(2), h(495))] = tx(2, block=495, confirmations=6, spends=Outpoint(h(1), 0))
     spent = world.post("/api/graph/spender", {"txid": h(1), "blockhash": h(490), "n": 0}).json()
     assert spent == {"state": "spent", "spending_txid": h(2), "blockhash": h(495), "as_of": None}
     unspent = world.post("/api/graph/spender", {"txid": h(1), "blockhash": h(490), "n": 1}).json()

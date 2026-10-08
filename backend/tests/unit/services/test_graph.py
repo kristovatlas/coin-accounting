@@ -36,9 +36,16 @@ def h(n: int) -> str:
     return f"{n:064x}"
 
 
-def tx(n: int, *, block: int | None = 490, confirmations: int = 11, outputs: tuple[TxOut, ...] = ()) -> Tx:
-    """Transaction `n`, spending output 0 of transaction n+1000 (paid to THEIRS), confirmed in block
-    `block` (its hash is h(block)) unless `block` is None."""
+def tx(
+    n: int,
+    *,
+    block: int | None = 490,
+    confirmations: int = 11,
+    outputs: tuple[TxOut, ...] = (),
+    spends: Outpoint | None = None,
+) -> Tx:
+    """Transaction `n`, spending `spends` (by default output 0 of transaction n+1000, paid to THEIRS),
+    confirmed in block `block` (its hash is h(block)) unless `block` is None."""
     spent = TxOut(70_000, THEIRS, "witness_v0_keyhash")
     outs = outputs or (
         TxOut(50_000, MINE, "witness_v0_keyhash", "bcrt1qmine"),
@@ -49,7 +56,7 @@ def tx(n: int, *, block: int | None = 490, confirmations: int = 11, outputs: tup
         None if block is None else h(block),
         0 if block is None else confirmations,
         None if block is None else 1_700_000_000,
-        (TxIn(Outpoint(h(n + 1000), 0), 0xFFFFFFFD, spent),),
+        (TxIn(spends or Outpoint(h(n + 1000), 0), 0xFFFFFFFD, spent),),
         outs,
     )
 
@@ -64,6 +71,7 @@ class FakeChain:
         self.spends: dict[Outpoint, Spend] = {}
         self.calls: list[str] = []
         self.raise_on_fetch: Exception | None = None
+        self.stale: set[str] = set()  # txids whose block has left the active chain
 
     def node_tip(self, rpc: Any) -> Tip:
         self.calls.append("node_tip")
@@ -73,6 +81,8 @@ class FakeChain:
         self.calls.append(f"fetch_tx {txid[-4:]}")
         if self.raise_on_fetch is not None:
             raise self.raise_on_fetch
+        if txid in self.stale:
+            raise txs.StaleBlockError("that block is no longer in the active chain")
         return self.txs[(txid, blockhash)]
 
     def fill_prevouts(self, rpc: Any, t: Tx) -> Tx:
@@ -230,7 +240,7 @@ def test_a_confirmed_spend_is_cached_with_its_block_height(
 ) -> None:
     cc.put_tx(conn, tx(1), 490, TIP)
     chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.SPENT, h(2), h(495))
-    chain.txs[(h(2), h(495))] = tx(2, block=495, confirmations=6)
+    chain.txs[(h(2), h(495))] = tx(2, block=495, confirmations=6, spends=Outpoint(h(1), 0))
     spend = online(data, conn).spender(h(1), h(490), 0)
     assert (spend.state, spend.spending_txid, spend.blockhash) == ("spent", h(2), h(495))
     assert cc.get_spender(conn, Outpoint(h(1), 0)) == cc.SpentBy(h(2), h(495), 495)
@@ -247,7 +257,9 @@ def test_unspent_is_a_snapshot_at_the_tip_and_stale_once_it_moves_t207(
     spend = online(data, conn).spender(h(1), h(490), 0)
     assert spend.state == "unspent" and spend.as_of == TIP
     assert cc.unspent_at(conn, Outpoint(h(1), 0)) == TIP
-    assert offline(data, conn).spender(h(1), h(490), 0).as_of == TIP  # the snapshot holds at this tip
+    assert (
+        offline(data, conn).spender(h(1), h(490), 0).as_of == TIP
+    )  # offline, the snapshot holds at this tip
     set_tip(conn, OTHER_TIP)  # a new block: the snapshot is stale and isn't trusted
     with pytest.raises(OfflineError):
         offline(data, conn).spender(h(1), h(490), 0)
@@ -264,12 +276,90 @@ def test_a_mempool_spend_is_shown_as_unconfirmed_and_never_cached_t207(
     assert cc.unspent_at(conn, Outpoint(h(1), 0)) is None
 
 
-def test_a_spend_found_while_the_tip_moved_isnt_cached_t207(
+def test_a_spend_found_while_the_tip_moved_is_asked_again_and_cached_from_the_stable_read_t207(
     data: DataDir, conn: sqlite3.Connection, chain: FakeChain
 ) -> None:
     cc.put_tx(conn, tx(1), 490, TIP)
-    chain.tips = [EARLIER_TIP, TIP]  # moved onto the app's tip: the 5 confirmations count from 499
+    chain.tips = [EARLIER_TIP, TIP]  # moved onto the app's tip during the first lookup, then held
     chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.SPENT, h(2), h(495))
-    chain.txs[(h(2), h(495))] = tx(2, block=495, confirmations=5)
+    chain.txs[(h(2), h(495))] = tx(2, block=495, confirmations=6, spends=Outpoint(h(1), 0))
     assert online(data, conn).spender(h(1), h(490), 0).state == "spent"
+    assert chain.calls.count("spend_of 0") == 2
+    assert cc.get_spender(conn, Outpoint(h(1), 0)) == cc.SpentBy(h(2), h(495), 495)
+
+
+def test_an_unspent_answer_is_never_labelled_with_a_tip_it_wasnt_read_at_t207(
+    data: DataDir, conn: sqlite3.Connection, chain: FakeChain
+) -> None:
+    cc.put_tx(conn, tx(1), 490, TIP)
+    chain.tips = [Tip(f"{i:02x}" * 32, 500 + i) for i in range(1, 20)]  # a new block between every read
+    chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.UNSPENT)
+    with pytest.raises(OfflineError):
+        online(data, conn).spender(h(1), h(490), 0)
+    assert cc.unspent_at(conn, Outpoint(h(1), 0)) is None
+
+
+def test_the_earlier_bip30_duplicate_coinbase_is_unspendable_before_any_cache_is_read_t208(
+    data: DataDir, conn: sqlite3.Connection, chain: FakeChain
+) -> None:
+    [(dup, earlier)] = list(spenders.BIP30_OVERWRITTEN.items())[:1]
+    coinbase = Tx(
+        dup, earlier, 11, 1_231_000_000, (TxIn(None, 0xFFFFFFFF),), (TxOut(50 * 10**8, MINE, "pubkey"),)
+    )
+    chain.txs[(dup, earlier)] = coinbase
+    cc.put_unspent(conn, Outpoint(dup, 0), TIP)  # a row for the later copy, keyed by outpoint only
+    graph = online(data, conn)
+    assert graph.spender(dup, earlier, 0).state == "unspendable"
+    assert graph.tx(dup, earlier).outputs[0].unspendable
+    assert "spend_of 0" not in chain.calls
+
+
+def test_online_a_cached_unspent_snapshot_never_hides_a_mempool_spend(
+    data: DataDir, conn: sqlite3.Connection, chain: FakeChain
+) -> None:
+    cc.put_tx(conn, tx(1), 490, TIP)
+    cc.put_unspent(conn, Outpoint(h(1), 0), TIP)  # "unspent" at this tip, from an earlier lookup
+    chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.SPENT_UNCONFIRMED, h(3))
+    spend = online(data, conn).spender(h(1), h(490), 0)
+    assert (spend.state, spend.spending_txid) == ("spent_unconfirmed", h(3))
+
+
+def test_an_unconfirmed_transactions_outputs_are_never_cached_t207(
+    data: DataDir, conn: sqlite3.Connection, chain: FakeChain
+) -> None:
+    chain.txs[(h(1), None)] = tx(1, block=None)
+    chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.UNSPENT)
+    assert online(data, conn).spender(h(1), None, 0).state == "unspent"
+    assert conn.execute("SELECT COUNT(*) FROM snapshot").fetchone()[0] == 0
+    assert "fill_prevouts" not in chain.calls  # a spender lookup needs only the outputs (T-205)
+
+
+def test_a_transaction_named_in_a_stale_block_is_not_found(
+    data: DataDir, conn: sqlite3.Connection, chain: FakeChain
+) -> None:
+    chain.txs[(h(1), None)] = tx(1, block=480, confirmations=0)  # txindex names a block no longer active
+    with pytest.raises(NotFound):
+        online(data, conn).tx(h(1), None)
+    assert conn.execute("SELECT COUNT(*) FROM tx_cache").fetchone()[0] == 0
+
+
+def test_a_spenders_block_that_left_the_chain_mid_lookup_means_try_again(
+    data: DataDir, conn: sqlite3.Connection, chain: FakeChain
+) -> None:
+    cc.put_tx(conn, tx(1), 490, TIP)
+    chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.SPENT, h(2), h(495))
+    chain.stale.add(h(2))  # the spender's block was reorged away after the node named it
+    with pytest.raises(OfflineError):
+        online(data, conn).spender(h(1), h(490), 0)
+    assert cc.get_spender(conn, Outpoint(h(1), 0)) is None
+
+
+def test_a_spender_that_doesnt_spend_the_output_is_refused_and_not_cached(
+    data: DataDir, conn: sqlite3.Connection, chain: FakeChain
+) -> None:
+    cc.put_tx(conn, tx(1), 490, TIP)
+    chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.SPENT, h(2), h(495))
+    chain.txs[(h(2), h(495))] = tx(2, block=495, confirmations=6)  # spends something else
+    with pytest.raises(ImportRefused):
+        online(data, conn).spender(h(1), h(490), 0)
     assert cc.get_spender(conn, Outpoint(h(1), 0)) is None
