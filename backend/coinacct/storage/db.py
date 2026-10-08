@@ -20,7 +20,7 @@ import errno
 import os
 import sqlite3
 import stat
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -67,6 +67,11 @@ def open_db(
         raise DbError(f"can't open the user DB ({type(e).__name__})") from None
     try:
         conn.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
+        # A read makes SQLite open the file now, so the path is checked again before WAL journaling
+        # is switched on. (For a DB already in WAL mode, that read may already open its side files:
+        # the check after the switch covers them; best-effort, see `_check_still_ours`.)
+        conn.execute("PRAGMA schema_version").fetchone()
+        _check_still_ours(path, inode, data_dir)
         if any(row[0] == "TEMP_STORE=0" for row in conn.execute("PRAGMA compile_options")):
             raise DbError(
                 "this SQLite ignores temp_store=MEMORY, so temp data could reach plain disk (T-402)"
@@ -118,48 +123,80 @@ def migrate(conn: sqlite3.Connection, steps: list[tuple[int, str]]) -> None:
     try:
         for version, sql in steps[current:]:
             # One transaction per step, the version bump included, so a failed step leaves the DB
-            # exactly at the previous version.
+            # exactly at the previous version. The step can't end that transaction early: any
+            # transaction statement after the opening BEGIN (COMMIT, END, ROLLBACK, a savepoint) is
+            # refused. The `;` on its own line ends a step whose last statement has none.
+            conn.set_authorizer(_one_transaction())
             try:
-                conn.executescript(f"BEGIN IMMEDIATE;\n{sql}\nPRAGMA user_version = {int(version)};")
+                conn.executescript(f"BEGIN IMMEDIATE;\n{sql}\n;\nPRAGMA user_version = {int(version)};")
+                conn.set_authorizer(None)
                 if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     raise DbError(f"migration {version} left a dangling reference")
                 conn.execute("COMMIT")
             except BaseException:
+                conn.set_authorizer(None)
                 if conn.in_transaction:
                     conn.execute("ROLLBACK")
                 raise
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
+    if conn.execute("PRAGMA foreign_keys").fetchone() != (1,):
+        raise DbError("foreign keys couldn't be switched back on after the migrations")
+
+
+def _one_transaction() -> Callable[[int, str | None, str | None, str | None, str | None], int]:
+    """An authorizer that allows the first transaction statement it sees and refuses every later
+    one, so a migration step can't commit or roll back the runner's transaction."""
+    seen = 0
+
+    def authorize(action: int, _a: str | None, _b: str | None, _db: str | None, _trigger: str | None) -> int:
+        nonlocal seen
+        if action in (sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT):
+            seen += 1
+            if seen > 1:
+                return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    return authorize
 
 
 class transaction:
     """`BEGIN IMMEDIATE` … `COMMIT`, or `ROLLBACK` on any exception. Nests: inside another
     transaction it is a SAVEPOINT, so helpers can be grouped into one atomic change (a reorg drops
-    cache rows and moves the tip together, T-207)."""
-
-    _depth = 0
+    cache rows and moves the tip together, T-207). Every savepoint has the same name: `ROLLBACK TO`
+    and `RELEASE` act on the innermost one of that name."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
-        self.savepoint: str | None = None
+        self.nested = False
 
     def __enter__(self) -> sqlite3.Connection:
         if self.conn.in_transaction:
-            transaction._depth += 1
-            self.savepoint = f"sp{transaction._depth}"
-            self.conn.execute(f"SAVEPOINT {self.savepoint}")
+            self.nested = True
+            self.conn.execute("SAVEPOINT coinacct")
         else:
             self.conn.execute("BEGIN IMMEDIATE")
         return self.conn
 
     def __exit__(self, kind: object, value: object, tb: object) -> None:
-        if self.savepoint is not None:
+        if self.nested:
+            if kind is None:
+                self.conn.execute("RELEASE coinacct")
+                return
+            # Undo the body's changes, but let its own exception be the one that propagates, even
+            # if SQLite already rolled the whole transaction back (no savepoint left). If the
+            # savepoint can't be rolled back while the transaction is still open, the whole
+            # transaction is rolled back, so the body's partial writes can never be committed; if
+            # even that fails, the failure propagates instead, so no caller carries on and commits.
             try:
-                if kind is not None:
-                    self.conn.execute(f"ROLLBACK TO {self.savepoint}")
-                self.conn.execute(f"RELEASE {self.savepoint}")
-            finally:
-                transaction._depth -= 1
+                self.conn.execute("ROLLBACK TO coinacct")
+                self.conn.execute("RELEASE coinacct")
+            except sqlite3.Error:
+                if self.conn.in_transaction:
+                    try:
+                        self.conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        raise DbError("a failed change couldn't be rolled back; close the user DB") from None
             return
         if kind is not None:
             # Roll back, but let the body's own exception be the one that propagates.

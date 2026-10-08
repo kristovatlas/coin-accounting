@@ -8,6 +8,9 @@ foreign keys off and are checked with `foreign_key_check` before they commit.
 
 from typing import Final
 
-from coinacct.storage.migrations import m0001_chain_state
+from coinacct.storage.migrations import m0001_chain_state, m0002_chain_cache
 
-STEPS: Final[tuple[tuple[int, str], ...]] = ((1, m0001_chain_state.SQL),)
+STEPS: Final[tuple[tuple[int, str], ...]] = (
+    (1, m0001_chain_state.SQL),
+    (2, m0002_chain_cache.SQL),
+)
