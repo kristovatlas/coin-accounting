@@ -23,8 +23,8 @@ Cytoscape.js has one such capability that we know of: a URL-valued style propert
 
 Option 1, with these controls on Cytoscape's image loading:
 - **The CSP confines it.** It is `img-src 'self' data: blob:` and `connect-src 'self'` (T-104), so no image can come from another host. Requests to the app's own origin carry no session: the bearer token is only ever sent by the app's own `fetch` calls, as a header (architecture §4). So such a request can reach only the API's unauthenticated answers.
-- **The graph's stylesheet is built from constants only.** No element data (label, script, address, text) is ever mapped to a URL-valued style property. An image a style names, such as a badge, is one of the bundle's own `/assets/` files, chosen by a constant. M3's first graph PR adds a test that fails if a style maps data to a URL.
-- **M3's E2E test will check** that every image the graph view loads is one of the bundle's own `/assets/` files, and that it causes no CSP violation. A CSP violation means replacing the library, never loosening `style-src` or `script-src`.
+- **M3 will build the graph's stylesheet from constants only.** It will never map element data (label, script, address, text) to a URL-valued style property. Any image a style names, such as a badge, will be one of the bundle's own `/assets/` files, chosen by a constant. M3's first graph PR will add a test that fails if a style maps data to a URL.
+- **M3's E2E test will check** that every image request the graph view makes goes to the bundle's own `/assets/` files, and that it causes no CSP violation. A CSP violation means replacing the library, never loosening `style-src` or `script-src`.
 
 `@dagrejs/dagre` and its one dependency, `@dagrejs/graphlib`, only compute positions; they have no network capability.
 
