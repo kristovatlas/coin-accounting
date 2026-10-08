@@ -15,10 +15,12 @@ import pytest
 
 from coinacct import launcher
 from coinacct.chain import node_checks
+from coinacct.chain.mempool import PendingActivity
 from coinacct.chain.scans import Scan
 from coinacct.domain.secret import Secret
 from coinacct.rpc import RpcTransportError
 from coinacct.services import chain_sync, jobs
+from coinacct.services.discovery import Grown
 from coinacct.services.jobs import JobWorker, State, TipPoller
 from coinacct.services.lifecycle import DEADLINE_SECONDS
 from coinacct.storage import chain_cache as cc
@@ -520,9 +522,9 @@ def test_a_grown_window_is_scanned_at_the_next_poll(conn: sqlite3.Connection) ->
     w.start()
     calls: list[list[str]] = []
 
-    def discover(rpc: Any, db: Any, pending: Any) -> list[int]:
-        calls.append(list(pending))
-        return [1] if len(calls) == 1 else []  # the first sync grows a window; the second finds no more
+    def discover(rpc: Any, db: Any, unfinished: Any, cancelled: Any) -> Grown:
+        calls.append(sorted(unfinished))
+        return Grown((1,) if len(calls) == 1 else ())  # the first sync grows a window; the second no more
 
     poller = TipPoller(node, conn, w, lambda: [], interval=3600, discover=discover)
     first = poller.poll()
@@ -535,14 +537,14 @@ def test_a_grown_window_is_scanned_at_the_next_poll(conn: sqlite3.Connection) ->
     w.stop()
 
 
-def test_a_failed_window_growth_leaves_the_sync_done(
+def test_a_failed_window_growth_is_tried_again_at_the_next_poll(
     conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
 ) -> None:
     node = Node(500)
     w = JobWorker()
     w.start()
 
-    def discover(rpc: Any, db: Any, pending: Any) -> list[int]:
+    def discover(rpc: Any, db: Any, unfinished: Any, cancelled: Any) -> Grown:
         raise ValueError("descriptor 1: the node's new addresses can't be used")
 
     poller = TipPoller(node, conn, w, lambda: [], interval=3600, discover=discover)
@@ -552,5 +554,28 @@ def test_a_failed_window_growth_leaves_the_sync_done(
         wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
     assert "growing descriptor windows failed: ValueError" in caplog.text
     assert "descriptor 1" not in caplog.text  # the type only, as every chain-job log line
-    assert poller.poll() is None  # done for this tip; the next block tries again
+    assert poller.poll() is not None  # not done for this tip: the next poll syncs and grows again
     w.stop()
+
+
+def test_discovery_gets_the_unfinished_subjects(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = (PendingActivity("receive", "0014" + "aa" * 20, "11" * 32, 0, 5),)
+    result = chain_sync.SyncResult(
+        None, Tip("bb" * 32, 9), False, waiting=("desc:a",), over_budget=("desc:b",), pending=pending
+    )
+    monkeypatch.setattr(chain_sync, "sync", lambda *a: result)
+    seen: list[tuple[Any, ...]] = []
+
+    def discover(rpc: Any, db: Any, unfinished: Any, cancelled: Any) -> Grown:
+        seen.append((set(unfinished), cancelled()))
+        return Grown()
+
+    poller = TipPoller(Node(500), conn, JobWorker(), lambda: [], interval=3600, discover=discover)
+    assert poller._sync(threading.Event()) is result
+    assert seen == [({"desc:a", "desc:b"}, False)]  # not the mempool's scripts: confirmed use only
+    cancelled = threading.Event()
+    cancelled.set()
+    poller._sync(cancelled)  # cancelled before the sync: nothing runs
+    assert len(seen) == 1

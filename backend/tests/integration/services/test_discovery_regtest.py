@@ -61,7 +61,7 @@ def test_the_window_grows_past_the_first_gap_to_the_wallets_used_addresses(
     for _ in range(5):  # sync, grow, until the gap limit of unused indexes is found
         result = chain_sync.sync(rpc, conn, imports.subjects(conn))
         assert result.complete
-        if not discovery.extend_windows(rpc, conn):
+        if not discovery.extend_windows(rpc, conn).grown:
             break
     else:
         pytest.fail("the window never stopped growing")

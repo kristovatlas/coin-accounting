@@ -26,7 +26,7 @@ import itertools
 import logging
 import queue
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -35,6 +35,7 @@ from coinacct.chain.scans import Scan
 from coinacct.chain.txs import ChainRpc
 from coinacct.domain.secret import Secret
 from coinacct.services import chain_sync
+from coinacct.services.discovery import Grown
 from coinacct.storage.chain_cache import scan_marker
 from coinacct.storage.db import Connection
 
@@ -176,9 +177,9 @@ class JobWorker:
             del self._jobs[i]
 
 
-# After a complete sync: (rpc, db, the scripts with mempool activity) -> the descriptors whose windows
-# grew (services.discovery.extend_windows).
-Discover = Callable[[ChainRpc, Connection, Sequence[str]], Sequence[int]]
+# After a sync: (rpc, db, the subjects it didn't finish, cancelled) -> what grew
+# (services.discovery.extend_windows).
+Discover = Callable[[ChainRpc, Connection, Collection[str], Callable[[], bool]], Grown]
 
 
 class TipPoller:
@@ -247,20 +248,26 @@ class TipPoller:
             # over its budget alone waits for the tip after it: rescanning its refused range every
             # poll would hold Core's one scan slot (T-205, T-212) until the user decides (M2).
             self._last = result.target.blockhash
-        if result.complete and self._discover is not None:
-            self._grow_windows(self._discover, result)
+        if result.target is not None and self._discover is not None and not cancelled.is_set():
+            self._grow_windows(self._discover, result, cancelled)
         return result
 
-    def _grow_windows(self, discover: Discover, result: chain_sync.SyncResult) -> None:
-        """After a complete sync: grow the descriptor windows whose used indexes near their end, and
-        scan the wider windows at the next poll (services.discovery)."""
-        pending = [p.script_hex for p in result.pending or ()]
+    def _grow_windows(
+        self, discover: Discover, result: chain_sync.SyncResult, cancelled: threading.Event
+    ) -> None:
+        """After a sync: grow the windows of the finished descriptors whose used indexes near their
+        end, and scan the wider windows at the next poll (services.discovery)."""
+        unfinished = {*result.waiting, *result.over_budget}
         try:
-            grown = discover(self._rpc, self._conn, pending)
-        except Exception as e:  # the sync itself is done: the next one tries again
+            grown = discover(self._rpc, self._conn, unfinished, cancelled.is_set)
+        except Exception as e:
+            # The node went away, or a bug: the next poll queues the sync again, tip moved or not, so
+            # the windows are grown before the tip counts as done (ENGINEERING §5.3). A descriptor
+            # that can't be grown (its `failed`) is reported instead, and tried again at the next tip.
             log.warning("growing descriptor windows failed: %s", type(e).__name__)
+            self._last = None
             return
-        if grown:
+        if grown.grown:
             self.request_sync()
 
     def _loop(self) -> None:
