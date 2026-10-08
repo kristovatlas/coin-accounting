@@ -12,6 +12,7 @@ import {
   btc,
   type Change,
   getAccounts,
+  type GraphOwner,
   getGraphTx,
   getSpender,
   getTagHistory,
@@ -37,6 +38,20 @@ import { STYLESHEET } from "../graph/style";
 
 const ME = 1; // the user entity, seeded by the schema
 const HASH = /^[0-9a-f]{64}$/;
+
+// Cytoscape adds an inline <style> (one rule: its container is `position: relative`) unless an element
+// with this id exists. The CSP refuses inline styles, and ADR 0037 never loosens it, so app.css carries
+// that rule and this marker stops the injection.
+const CYTOSCAPE_STYLESHEET_ID = "__________cytoscape_stylesheet";
+
+function markCytoscapeStylesheet(): void {
+  if (document.getElementById(CYTOSCAPE_STYLESHEET_ID) !== null) return;
+  const marker = document.createElement("meta");
+  marker.id = CYTOSCAPE_STYLESHEET_ID;
+  marker.name = "cytoscape-style";
+  marker.content = "in app.css";
+  document.head.appendChild(marker);
+}
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : "Something went wrong.";
@@ -130,7 +145,7 @@ function OutputPanel(props: {
   accounts: Accounts | null;
   loaded: boolean; // whether the transaction that created it is in the graph
   onOpen: (txid: string, blockhash: string | null) => Promise<void>;
-  onTagged: (node: OutputNode, entityId: number, accountId: number | null, labelText: string) => void;
+  onTagged: (node: OutputNode, owner: NonNullable<GraphOwner>) => void;
 }) {
   const { node, session, accounts, loaded, onOpen, onTagged } = props;
   const [spender, setSpender] = useState<Spender | null>(null);
@@ -138,7 +153,7 @@ function OutputPanel(props: {
   const [owner, setOwnerChoice] = useState<number>(node.owner?.entity_id ?? ME);
   const [account, setAccount] = useState<number | null>(node.owner?.tax_account_id ?? null);
   const [labelText, setLabelText] = useState(node.owner?.label ?? "");
-  const [clients, setClients] = useState<number[]>([]);
+  const [clients, setClients] = useState<number[]>(node.owner?.client_ids ?? []);
   const [result, setResult] = useState<string | null>(null);
   const [changes, setChanges] = useState<Change[] | null>(null);
 
@@ -170,7 +185,7 @@ function OutputPanel(props: {
         label: labelText,
         client_ids: clients,
       });
-      onTagged(node, owner, accountId, labelText);
+      onTagged(node, { entity_id: owner, tax_account_id: accountId, label: labelText, client_ids: clients });
       setResult(saved.new ? "Tagged. The app is scanning this address's history." : "Tag saved.");
     } catch (e) {
       setResult(message(e));
@@ -246,7 +261,15 @@ function OutputPanel(props: {
             </label>
           )}{" "}
           <label>
-            Label <input id="tag-label" value={labelText} maxLength={200} onChange={(e) => setLabelText(e.target.value)} />
+            Label{" "}
+            <input
+              id="tag-label"
+              value={labelText}
+              maxLength={200}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(e) => setLabelText(e.target.value)}
+            />
           </label>
           {(accounts?.clients ?? []).map((c) => (
             <label key={c.id}>
@@ -284,13 +307,24 @@ export function Graph({ session }: { session: string }) {
   const [error, setError] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<Accounts | null>(null);
 
+  // Owners, wallets and wallet apps can be added in the import view at any time: reload them whenever
+  // an output's panel opens, so the tag form offers what exists now.
+  const selectedOutput = selected !== null && selected.startsWith("out:") ? selected : null;
   useEffect(() => {
-    getAccounts(session).then(setAccounts, () => setAccounts(null));
-  }, [session]);
+    let cancelled = false;
+    getAccounts(session).then(
+      (a) => !cancelled && setAccounts(a),
+      (e) => !cancelled && setError(message(e)),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [session, selectedOutput]);
 
   // One Cytoscape instance for the view's life; its elements follow `graph` below.
   useEffect(() => {
     if (!container.current) return;
+    markCytoscapeStylesheet();
     const cy = cytoscape({
       container: container.current,
       style: STYLESHEET as unknown as cytoscape.StylesheetJson,
@@ -361,12 +395,22 @@ export function Graph({ session }: { session: string }) {
       <h2>Transaction graph</h2>
       <p>
         Open a transaction, then follow its coins: back to the transaction that created an input, forward
-        to the one that spent an output. Links shown are the ones the app knows; they don't make coins
-        private.
+        to the one that spent an output.
+      </p>
+      <p id="graph-known-links">
+        The graph shows known links only: what the chain and your tags say. Others can link coins in ways
+        the app doesn't model (amounts, timing, address types, wallet fingerprints, network data), so a
+        link missing here can still exist.
       </p>
       <label>
         Transaction id{" "}
-        <input id="graph-txid" value={txidText} spellCheck={false} onChange={(e) => setTxidText(e.target.value)} />
+        <input
+          id="graph-txid"
+          value={txidText}
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(e) => setTxidText(e.target.value)}
+        />
       </label>{" "}
       <button id="graph-open" type="button" onClick={openTyped}>
         Open
@@ -397,12 +441,7 @@ export function Graph({ session }: { session: string }) {
               accounts={accounts}
               loaded={graph.nodes.has(txId(node.txid))}
               onOpen={open}
-              onTagged={(n, entityId, accountId, labelText) =>
-                n.script !== null &&
-                setGraph((g) =>
-                  setOwner(g, n.script as string, { entity_id: entityId, tax_account_id: accountId, label: labelText }, n.address),
-                )
-              }
+              onTagged={(n, owner) => n.script !== null && setGraph((g) => setOwner(g, n.script as string, owner, n.address))}
             />
           )}
         </aside>

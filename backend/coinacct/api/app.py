@@ -401,7 +401,12 @@ def _owner(o: Any) -> dict[str, Any] | None:
     return (
         None
         if o is None
-        else {"entity_id": o.entity_id, "tax_account_id": o.tax_account_id, "label": o.label}
+        else {
+            "entity_id": o.entity_id,
+            "tax_account_id": o.tax_account_id,
+            "label": o.label,
+            "client_ids": list(o.client_ids),
+        }
     )
 
 

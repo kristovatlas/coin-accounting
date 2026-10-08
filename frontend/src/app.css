@@ -7,6 +7,11 @@
   align-items: flex-start;
 }
 
+/* The rule Cytoscape would otherwise inject as an inline <style> (Graph.tsx, markCytoscapeStylesheet). */
+.__________cytoscape_container {
+  position: relative;
+}
+
 .graph-canvas {
   flex: 1 1 auto;
   min-width: 0;

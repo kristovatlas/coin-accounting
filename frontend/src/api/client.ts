@@ -198,7 +198,12 @@ export function btc(sats: number): string {
 // Every txid and script goes in a POST body, never in a URL (T-105).
 
 /** Whose an input or output is, from the user DB; null if nobody has tagged its script. */
-export type GraphOwner = { entity_id: number; tax_account_id: number | null; label: string } | null;
+export type GraphOwner = {
+  entity_id: number;
+  tax_account_id: number | null;
+  label: string;
+  client_ids: number[]; // the wallet apps it lives in: a tag edit sends them back, or they'd be dropped
+} | null;
 export type GraphInput = {
   prevout: { txid: string; vout: number } | null; // null for a coinbase input
   sats: number | null;

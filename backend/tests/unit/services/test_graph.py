@@ -153,6 +153,19 @@ def test_a_confirmed_transaction_is_fetched_cached_and_owned(
     assert cached is not None and cached.confirmations == 11
 
 
+def test_an_owner_carries_the_wallet_apps_so_a_tag_edit_can_keep_them(
+    data: DataDir, conn: sqlite3.Connection
+) -> None:
+    phone = ac.add_client(conn, "Phone", "mobile")
+    wallet = ac.addresses(conn)[0].tax_account_id
+    ac.add_addresses(
+        conn, [(MINE, None)], entity_id=ME, tax_account_id=wallet, source="manual", client_ids=[phone]
+    )
+    cc.put_tx(conn, tx(1), 490, TIP)
+    owner = offline(data, conn).tx(h(1), h(490)).outputs[0].owner
+    assert owner is not None and owner.client_ids == (phone,)
+
+
 def test_a_transaction_carries_the_users_mixing_flag(data: DataDir, conn: sqlite3.Connection) -> None:
     cc.put_tx(conn, tx(1), 490, TIP)
     assert offline(data, conn).tx(h(1), h(490)).mixing is None  # nobody has set one
