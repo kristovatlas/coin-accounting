@@ -1,6 +1,7 @@
 // M3's graph (PLAN §4): open a transaction, flag it as a mix, ask whether an output is spent, and
-// re-label its address from the side panel (backward and spent-forward expansion are #224); each change lands in the change log. The production build
-// under the real CSP, and every image the graph view requests is the bundle's own (ADR 0037).
+// re-label its address from the side panel; each change lands in the change log. Backward and
+// spent-forward expansion are #224. The production build under the real CSP, and every image the
+// graph view requests is the bundle's own (ADR 0037).
 // Synthetic regtest data only: the harness mines to a public test address.
 import { pathToFileURL } from "node:url";
 
@@ -76,6 +77,11 @@ test("a transaction opens in the graph, and its flag and its output's tag are sa
     // the logged tag keeps the import's wallet app and carries the new label
     await expect(page.locator("#graph-history li")).toContainText(/"client_ids":\[\d+\]/);
     await expect(page.locator("#graph-history li")).toContainText('"label":"coinbase"');
+    // the panel opened afresh shows the saved owner, wallet app included (a second edit keeps it)
+    await page.locator(`#graph-nodes [data-node="tx:${txid}"]`).click();
+    await output.click();
+    await expect(page.locator("#graph-panel-owner")).toHaveText("Owner: You (coinbase)");
+    await expect(page.locator(".tag-client").first()).toBeChecked();
     expect(await page.locator("style").count()).toBe(0);
 
     const origin = `http://127.0.0.1:${app.port}/assets/`;

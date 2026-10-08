@@ -84,7 +84,8 @@ def test_an_address_is_tagged_retagged_and_its_history_read(world: World, conn: 
 
 
 def test_the_mixing_flag_is_set_and_logged(world: World) -> None:
-    assert world.post("/api/tags/mixing", {"txid": TXID, "mixing": True}).status == 200
+    reply = world.post("/api/tags/mixing", {"txid": TXID, "mixing": True})
+    assert reply.status == 200 and reply.json() == {"mixing": True}
     [change] = world.post("/api/tags/history", {"kind": "tx_flag", "subject": TXID}).json()["changes"]
     assert change == {
         "at": "2026-10-08T12:00:00+00:00",
