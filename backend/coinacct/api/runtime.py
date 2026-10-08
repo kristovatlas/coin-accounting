@@ -16,7 +16,7 @@ from typing import Any
 from coinacct.api.app import create_app
 from coinacct.api.security import ASGIApp
 from coinacct.api.session import BOOTSTRAP_TTL_SECONDS, Sessions
-from coinacct.services import jobs, startup
+from coinacct.services import imports, jobs, startup
 from coinacct.services.lifecycle import Shutdown
 from coinacct.services.startup import NodeStatus, StorageRefused
 
@@ -85,5 +85,14 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
     )
     starter = None
     if status.online:
-        starter = functools.partial(start_jobs, rpc.host, rpc.port, rpc.user, rpc.password, db=db)
+        # The chain jobs scan what has been imported (services.imports.subjects), read afresh each sync.
+        starter = functools.partial(
+            start_jobs,
+            rpc.host,
+            rpc.port,
+            rpc.user,
+            rpc.password,
+            db=db,
+            subjects=functools.partial(imports.subjects, db),
+        )
     return Runtime(app=app, sessions=sessions, shutdown=shutdown, status=status, start_chain_jobs=starter)

@@ -151,6 +151,7 @@ def test_addresses_are_keyed_by_script_and_a_second_import_adds_only_its_clients
         entity_id=ME,
         tax_account_id=wallet,
         source="manual",
+        start_height=200,  # a later start keeps the earlier one
         client_ids=[phone],
     )
     assert again == ac.Added((), ())
