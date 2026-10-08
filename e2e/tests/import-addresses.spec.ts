@@ -2,17 +2,11 @@
 // preview (including the line that isn't an address), import it, and see a private key refused without
 // being repeated. The production build under the real CSP; any violation fails the test. Synthetic
 // regtest addresses only.
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
-import { expect, type Page, test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
-const python = process.env.COINACCT_E2E_PYTHON;
-const root = resolve(__dirname, "..", "..");
+import { startApp, stop, watchCsp } from "./app";
 
 // BIP173-style regtest P2WPKH addresses for synthetic programs 7001 and 7002.
 const FIRST = "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqx6evpqw46";
@@ -28,57 +22,6 @@ const DERIVED = [
 ];
 // Shaped like a WIF private key (a Base58 alphabet slice), not a real key.
 const WIF_SHAPED = ("K" + "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz").slice(0, 52);
-
-type Started = { proc: ChildProcessWithoutNullStreams; launchFile: string; port: number; workdir: string };
-
-async function startApp(): Promise<Started> {
-  if (!python) throw new Error("COINACCT_E2E_PYTHON is not set: run the E2E tests with `make e2e`");
-  const workdir = mkdtempSync(join(tmpdir(), "coinacct-e2e-"));
-  const proc = spawn(python, ["-m", "harness.app_under_test", workdir], {
-    cwd: join(root, "e2e"),
-    env: {
-      PATH: "/usr/bin:/bin",
-      HOME: workdir,
-      PYTHONPATH: [join(root, "e2e"), join(root, "backend")].join(":"),
-      PYTHONDONTWRITEBYTECODE: "1",
-    },
-  });
-  const line: string = await new Promise((done, fail) => {
-    const lines = createInterface({ input: proc.stdout });
-    lines.once("line", done);
-    proc.once("exit", (code) => fail(new Error(`the harness exited (${code}) before the app served`)));
-  });
-  const info = JSON.parse(line) as { launch_file?: string; port?: number; error?: string };
-  if (!info.launch_file || !info.port) throw new Error(info.error ?? `unexpected harness output: ${line}`);
-  return { proc, launchFile: info.launch_file, port: info.port, workdir };
-}
-
-// Any securitypolicyviolation event or CSP console error fails the test (ENGINEERING §3.1).
-async function watchCsp(page: Page): Promise<() => Promise<string[]>> {
-  const logged: string[] = [];
-  page.on("console", (msg) => {
-    if (msg.type() === "error" && /Content Security Policy/i.test(msg.text())) logged.push(msg.text());
-  });
-  await page.addInitScript(() => {
-    document.addEventListener("securitypolicyviolation", (e) => {
-      (window as unknown as { __csp: string[] }).__csp ??= [];
-      (window as unknown as { __csp: string[] }).__csp.push(`${e.violatedDirective} ${e.blockedURI}`);
-    });
-  });
-  return async () => [
-    ...logged,
-    ...(await page.evaluate(() => (window as unknown as { __csp?: string[] }).__csp ?? [])),
-  ];
-}
-
-async function stop(app: Started): Promise<void> {
-  if (app.proc.exitCode === null) {
-    const exited = new Promise((done) => app.proc.once("exit", done));
-    app.proc.kill("SIGTERM");
-    await exited;
-  }
-  rmSync(app.workdir, { recursive: true, force: true }); // the launch file held a bootstrap token
-}
 
 test("an address list is previewed, imported, and a private key is refused unrepeated", async ({ page }) => {
   const violations = await watchCsp(page);
