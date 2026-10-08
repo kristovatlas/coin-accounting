@@ -41,10 +41,18 @@ def test_a_fraction_of_a_satoshi_or_an_out_of_range_amount_is_refused_t502(btc: 
         btc_to_sats(Decimal(btc))
 
 
-def test_the_conversion_ignores_the_ambient_decimal_context_t502() -> None:
-    with decimal.localcontext() as ctx:
-        ctx.prec = 4
+@pytest.mark.parametrize(
+    "ambient",
+    [
+        decimal.Context(prec=4),
+        decimal.Context(Emax=3),
+        decimal.Context(traps=[decimal.Rounded, decimal.Clamped, decimal.Subnormal]),
+    ],
+)
+def test_the_conversion_ignores_the_ambient_decimal_context_t502(ambient: decimal.Context) -> None:
+    with decimal.localcontext(ambient):
         assert btc_to_sats(Decimal("1.23456789")) == 123_456_789
+        assert btc_to_sats(Decimal("21000000.00000000000000000000000000000000")) == MAX_SATS
 
 
 def test_only_a_decimal_is_converted() -> None:

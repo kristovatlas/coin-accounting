@@ -8,7 +8,19 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from decimal import Decimal, DecimalException, Inexact, Overflow, Underflow, localcontext
+from decimal import (
+    MAX_EMAX,
+    MIN_EMIN,
+    Context,
+    Decimal,
+    DecimalException,
+    DivisionByZero,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    Underflow,
+    localcontext,
+)
 from typing import Final, TypeIs
 
 SATS_PER_BTC: Final = 100_000_000
@@ -16,6 +28,15 @@ MAX_SATS: Final = 21_000_000 * SATS_PER_BTC
 # Core's MAX_SCRIPT_SIZE: a longer output script can never be spent, so it never enters the UTXO set.
 MAX_SCRIPT_BYTES: Final = 10_000
 OP_RETURN: Final = "6a"
+
+# A fresh context, not a copy of the caller's: its precision, exponent limits and traps are all ours.
+_EXACT: Final = Context(
+    prec=60,
+    Emin=MIN_EMIN,
+    Emax=MAX_EMAX,
+    clamp=0,
+    traps=[Inexact, Underflow, Overflow, InvalidOperation, DivisionByZero],
+)
 
 _HASH = re.compile(r"[0-9a-f]{64}")
 _HEX = re.compile(r"(?:[0-9a-f]{2})*")
@@ -38,11 +59,8 @@ def btc_to_sats(value: Decimal) -> int:
     # Range first: an exact comparison, so a huge exponent never reaches the arithmetic.
     if not 0 <= value <= MAX_SATS // SATS_PER_BTC:
         raise ValueError("an amount is out of range")
-    # Then multiply in a context where any rounding is an error, not the default 28-digit one.
-    with localcontext() as ctx:
-        ctx.prec = 60
-        for trap in (Inexact, Underflow, Overflow):
-            ctx.traps[trap] = True
+    # Then multiply in a fixed context, whatever the caller's is, where any rounding is an error.
+    with localcontext(_EXACT):
         try:
             sats = value * SATS_PER_BTC
         except DecimalException:

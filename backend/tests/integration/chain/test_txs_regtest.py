@@ -82,9 +82,18 @@ def test_a_transaction_in_a_reorged_away_block_is_stale_t207(wallet_node: Regtes
     txid = wallet_node.admin("sendtoaddress", [wallet_node.admin("getnewaddress"), "0.1"])
     [blockhash] = wallet_node.mine(1)
     wallet_node.admin("invalidateblock", [blockhash])  # test harness only, never the app
+    rpc = app_client(wallet_node)
     try:
         with pytest.raises(StaleBlockError):
-            fetch_tx(app_client(wallet_node), txid, blockhash)
+            fetch_tx(rpc, txid, blockhash)
+        # Through getblockheader: a tx the node doesn't have in a side-branch block, and an unknown block.
+        with pytest.raises(StaleBlockError):
+            fetch_tx(rpc, "00" * 32, blockhash)
+        with pytest.raises(StaleBlockError):
+            fetch_tx(rpc, txid, "11" * 32)
+        # An active block that doesn't hold the tx: the tx is missing, the block isn't stale.
+        with pytest.raises(TxNotFoundError):
+            fetch_tx(rpc, txid, wallet_node.admin("getblockhash", [5]))
     finally:
         wallet_node.admin("reconsiderblock", [blockhash])
         wallet_node.wait_for_indexes()

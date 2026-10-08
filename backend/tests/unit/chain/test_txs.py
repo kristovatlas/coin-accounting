@@ -1,4 +1,4 @@
-"""The transaction fetch layer, against a fake node (PLAN §1; THREAT_MODEL T-205, T-210)."""
+"""The transaction fetch layer, against a fake node (PLAN §1; THREAT_MODEL T-205, T-207, T-208, T-502)."""
 
 from __future__ import annotations
 
@@ -156,8 +156,9 @@ def test_an_unknown_or_side_branch_block_is_stale_not_a_missing_tx_t207() -> Non
         fetch_tx(FakeNode({}, headers={BLOCK: {"confirmations": -1}}), PARENT, BLOCK)
     with pytest.raises(TxNotFoundError):  # an active block that doesn't hold the tx
         fetch_tx(FakeNode({}, headers={BLOCK: {"confirmations": 4}}), PARENT, BLOCK)
-    with pytest.raises(MalformedTxError, match="getblockheader"):
-        fetch_tx(FakeNode({}, headers={BLOCK: {"height": 4}}), PARENT, BLOCK)
+    for bad in ({"height": 4}, {"confirmations": 0}, {"confirmations": -2}, {"confirmations": "1"}):
+        with pytest.raises(MalformedTxError, match="getblockheader"):
+            fetch_tx(FakeNode({}, headers={BLOCK: bad}), PARENT, BLOCK)
 
 
 def test_other_getblockheader_errors_pass_through() -> None:
@@ -188,6 +189,21 @@ def test_outputs_totalling_more_than_all_bitcoin_are_malformed_t502() -> None:
     raw = confirmed_parent()
     raw["vout"] = [vout(0, "21000000"), vout(1, "0.00000001")]
     with pytest.raises(MalformedTxError, match="21 million"):
+        parse_tx(raw)
+
+
+def test_spent_outputs_totalling_more_than_all_bitcoin_are_malformed_t502() -> None:
+    raw = mempool_child()
+    raw["vin"] = [
+        {
+            "txid": PARENT,
+            "vout": n,
+            "sequence": 0,
+            "prevout": {"value": Decimal("21000000"), "scriptPubKey": P2WPKH},
+        }
+        for n in range(2)
+    ]
+    with pytest.raises(MalformedTxError, match="spent outputs total"):
         parse_tx(raw)
 
 
