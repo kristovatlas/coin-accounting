@@ -15,7 +15,8 @@ from coinacct.storage import tags
 from coinacct.storage.accounts import ME, AccountsError
 from coinacct.storage.chain_state import record_chain
 from coinacct.storage.datadir import open_data_dir
-from coinacct.storage.db import open_db
+from coinacct.storage.db import DbError, open_db
+from coinacct.storage.migrations import STEPS
 
 AT = "2026-10-08T12:00:00+00:00"
 LATER = "2026-10-08T12:05:00+00:00"
@@ -280,3 +281,52 @@ def test_the_mixing_flag_is_set_cleared_and_logged(conn: sqlite3.Connection) -> 
     )
     with pytest.raises(ValueError):
         tags.set_mixing(conn, "not a txid", True, at=AT)
+
+
+@pytest.mark.parametrize("bad_id", [-1, 0])
+def test_a_db_with_an_id_below_1_from_before_m0008_is_refused_at_the_upgrade_t408(
+    tmp_path: Path, bad_id: int
+) -> None:
+    d = tmp_path / "old"
+    d.mkdir(mode=0o700)
+    data = open_data_dir(str(d))
+    old = open_db(data, steps=list(STEPS[:7]))  # schema 7: m0007's guard, no m0008 yet
+    try:
+        old.execute(  # what only an edit outside the app could write
+            "INSERT INTO change_log (id, at, kind, subject, after) VALUES (?, ?, 'tx_flag', ?, '{}')",
+            (bad_id, AT, TXID),
+        )
+    finally:
+        old.close()
+    with pytest.raises(DbError, match="SQLITE_CONSTRAINT_CHECK"):  # the step's CHECK refused it
+        open_db(data)
+    old = open_db(data, steps=list(STEPS[:8]))  # the refused step left the DB at version 8
+    try:
+        assert old.execute("PRAGMA user_version").fetchone() == (8,)
+        assert old.execute("SELECT id FROM change_log").fetchall() == [(bad_id,)]
+    finally:
+        old.close()
+
+
+def test_a_db_from_schema_7_upgrades_and_keeps_appending_t408(tmp_path: Path) -> None:
+    d = tmp_path / "old"
+    d.mkdir(mode=0o700)
+    data = open_data_dir(str(d))
+    old = open_db(data, steps=list(STEPS[:7]))
+    try:
+        record_chain(old, "regtest")
+        tags.set_mixing(old, TXID, True, at=AT)
+    finally:
+        old.close()
+    conn = open_db(data)
+    try:
+        tags.set_mixing(conn, TXID, False, at=LATER)
+        assert [c.id for c in tags.changes(conn, ("tx_flag", TXID))] == [1, 2]
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):  # replacing a row: still refused
+            conn.execute(
+                "INSERT OR REPLACE INTO change_log (id, at, kind, subject, after)"
+                " VALUES (1, ?, 'tx_flag', 'ab', '{}')",
+                (AT,),
+            )
+    finally:
+        conn.close()
