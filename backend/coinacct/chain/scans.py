@@ -14,6 +14,12 @@ Core's `scanblocks` skips a filter range it can't read without saying so: `compl
 5. **A block that left the active chain** during a call is `StaleScanError` (retry the range); any
    other failure is a hard error.
 
+**Busy scripts (T-205):** a tagged third-party script, such as an exchange's hot wallet, can have
+activity in 100k+ blocks, and `getdescriptoractivity` has no paging or abort. So each scan has an
+activity budget: the candidate count `scanblocks` reports comes first, and a range that would take
+the scan past its budget is refused (`ActivityBudgetError`) before any of its blocks is read. The
+caller asks the user, then scans again with a larger budget, or none.
+
 Candidate blocks are read with `getdescriptoractivity` in calls of at most `ACTIVITY_BLOCKS` blocks,
 with `include_mempool` always false: the mempool is a separate, ephemeral pass. Its exact matching
 removes the filters' false positives. Each range's activity and coverage are committed together,
@@ -45,6 +51,7 @@ FILTER_INDEX: Final = "basic block filter index"
 RANGE_BLOCKS: Final = 50_000
 TIP_WINDOW: Final = 100
 ACTIVITY_BLOCKS: Final = 200
+ACTIVITY_BUDGET: Final = 1_000
 # Core's RPC_INVALID_PARAMETER: "Block is not in main chain", and "Scan already in progress".
 RPC_INVALID_PARAMETER: Final = -8
 
@@ -62,6 +69,16 @@ class ScanBusyError(RuntimeError):
     queue is busy; retry with backoff (T-212)."""
 
 
+class ActivityBudgetError(RuntimeError):
+    """The scan would read more candidate blocks than its budget allows (T-205). What was scanned
+    before stays committed. `candidates` is how many blocks the scan has found so far."""
+
+    def __init__(self, candidates: int, budget: int) -> None:
+        super().__init__(f"{candidates} candidate blocks, over the budget of {budget}")
+        self.candidates = candidates
+        self.budget = budget
+
+
 class ScanAbortedError(RuntimeError):
     """The scan was aborted (`scanblocks abort`) before it finished: its results are incomplete."""
 
@@ -69,11 +86,13 @@ class ScanAbortedError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class Scan:
     """What to scan: `subject` names it in the coverage table; `scanobjects` are what Core is given
-    (descriptor strings or `{desc, range}` objects); `start_height` is where its history begins."""
+    (descriptor strings or `{desc, range}` objects); `start_height` is where its history begins;
+    `budget` is how many candidate blocks this scan may read (None: no limit, after the user agreed)."""
 
     subject: str
     scanobjects: tuple[Any, ...]
     start_height: int = 0
+    budget: int | None = ACTIVITY_BUDGET
 
 
 def stop_height(rpc: ChainRpc, target: Tip) -> int:
@@ -144,10 +163,14 @@ def extend(rpc: ChainRpc, conn: Connection, scan: Scan) -> Coverage:
     now = coverage(conn, scan.subject)
     start = scan.start_height if now is None else now.stop_height + 1
     stop = stop_height(rpc, target)
+    candidates = 0
     while start <= stop:
         end = min(start + RANGE_BLOCKS - 1, stop)
         end_hash = _block_hash(rpc, end)
         blocks = scan_range(rpc, scan.scanobjects, start, end, end_hash)
+        candidates += len(blocks)
+        if scan.budget is not None and candidates > scan.budget:
+            raise ActivityBudgetError(candidates, scan.budget)
         _commit(
             conn,
             activity(rpc, blocks, scan.scanobjects),

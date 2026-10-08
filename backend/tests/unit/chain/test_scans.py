@@ -13,6 +13,7 @@ import pytest
 
 from coinacct.chain import scans
 from coinacct.chain.scans import (
+    ActivityBudgetError,
     MalformedScanError,
     Scan,
     ScanAbortedError,
@@ -347,3 +348,27 @@ def test_a_target_that_left_the_chain_stops_the_tip_window(conn: sqlite3.Connect
     cc.set_scan_target(conn, Tip(f"{30 + 7 * 10**9:064x}", 30))  # not the node's block 30
     with pytest.raises(StaleScanError, match="target"):
         extend(node, conn, Scan("s", tuple(DESC)))
+
+
+def test_a_busy_script_stops_at_its_budget_before_reading_blocks_t205(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scans, "RANGE_BLOCKS", 300)
+    node = FakeNode(1000, {h: [receive(h)] for h in [*range(10, 15), *range(400, 410)]})
+    target(conn, node)
+    with pytest.raises(ActivityBudgetError) as e:
+        extend(node, conn, Scan("s", tuple(DESC), budget=12))
+    assert (e.value.candidates, e.value.budget) == (15, 12)
+    # The first range (5 candidates) is committed; the second's blocks were never read.
+    assert cc.coverage(conn, "s") == cc.Coverage("s", 0, 299, bh(299))
+    read = [b for m, p in node.calls if m == "getdescriptoractivity" for b in p[0]]
+    assert read == [bh(h) for h in range(10, 15)]
+    # After the user agrees, the scan resumes without a budget.
+    reached = extend(node, conn, Scan("s", tuple(DESC), budget=None))
+    assert reached.stop_height == 1000 and len(cc.activity_for(conn, SPK)) == 15
+
+
+def test_a_scan_within_its_budget_runs_to_the_end(conn: sqlite3.Connection) -> None:
+    node = FakeNode(1000, {h: [receive(h)] for h in range(10, 15)})
+    target(conn, node)
+    assert extend(node, conn, Scan("s", tuple(DESC), budget=5)).stop_height == 1000
