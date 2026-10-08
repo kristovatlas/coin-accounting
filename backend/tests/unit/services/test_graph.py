@@ -15,7 +15,7 @@ import pytest
 from coinacct.chain import reorg, spenders, txs
 from coinacct.chain.spenders import Spend, SpendState
 from coinacct.domain.chain import Outpoint, Tx, TxIn, TxOut
-from coinacct.services.graph import Graph, NotFound
+from coinacct.services.graph import TIP_RETRIES, Graph, NotFound
 from coinacct.services.imports import ImportRefused, OfflineError
 from coinacct.storage import accounts as ac
 from coinacct.storage import chain_cache as cc
@@ -72,6 +72,7 @@ class FakeChain:
         self.calls: list[str] = []
         self.raise_on_fetch: Exception | None = None
         self.stale: set[str] = set()  # txids whose block has left the active chain
+        self.missing: set[str] = set()  # txids the node doesn't have
 
     def node_tip(self, rpc: Any) -> Tip:
         self.calls.append("node_tip")
@@ -83,6 +84,8 @@ class FakeChain:
             raise self.raise_on_fetch
         if txid in self.stale:
             raise txs.StaleBlockError("that block is no longer in the active chain")
+        if txid in self.missing:
+            raise txs.TxNotFoundError("the node doesn't have this transaction")
         return self.txs[(txid, blockhash)]
 
     def fill_prevouts(self, rpc: Any, t: Tx) -> Tx:
@@ -270,6 +273,7 @@ def test_a_mempool_spend_is_shown_as_unconfirmed_and_never_cached_t207(
 ) -> None:
     cc.put_tx(conn, tx(1), 490, TIP)
     chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.SPENT_UNCONFIRMED, h(3))
+    chain.txs[(h(3), None)] = tx(3, block=None, spends=Outpoint(h(1), 0))
     spend = online(data, conn).spender(h(1), h(490), 0)
     assert (spend.state, spend.spending_txid, spend.blockhash) == ("spent_unconfirmed", h(3), None)
     assert cc.get_spender(conn, Outpoint(h(1), 0)) is None
@@ -306,12 +310,14 @@ def test_the_earlier_bip30_duplicate_coinbase_is_unspendable_before_any_cache_is
     coinbase = Tx(
         dup, earlier, 11, 1_231_000_000, (TxIn(None, 0xFFFFFFFF),), (TxOut(50 * 10**8, MINE, "pubkey"),)
     )
-    chain.txs[(dup, earlier)] = coinbase
-    cc.put_unspent(conn, Outpoint(dup, 0), TIP)  # a row for the later copy, keyed by outpoint only
-    graph = online(data, conn)
+    cc.put_tx(conn, coinbase, 490, TIP)
+    cc.put_tx(conn, tx(2, block=495, confirmations=6, spends=Outpoint(dup, 0)), 495, TIP)
+    # rows for the later copy, keyed by outpoint only: a confirmed spend
+    cc.put_spender(conn, Outpoint(dup, 0), cc.SpentBy(h(2), h(495), 495), TIP)
+    graph = offline(data, conn)  # offline, the cached spend would otherwise be the answer
     assert graph.spender(dup, earlier, 0).state == "unspendable"
     assert graph.tx(dup, earlier).outputs[0].unspendable
-    assert "spend_of 0" not in chain.calls
+    assert chain.calls == []  # decided from the cached coinbase and the BIP30 list alone
 
 
 def test_online_a_cached_unspent_snapshot_never_hides_a_mempool_spend(
@@ -320,6 +326,7 @@ def test_online_a_cached_unspent_snapshot_never_hides_a_mempool_spend(
     cc.put_tx(conn, tx(1), 490, TIP)
     cc.put_unspent(conn, Outpoint(h(1), 0), TIP)  # "unspent" at this tip, from an earlier lookup
     chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.SPENT_UNCONFIRMED, h(3))
+    chain.txs[(h(3), None)] = tx(3, block=None, spends=Outpoint(h(1), 0))
     spend = online(data, conn).spender(h(1), h(490), 0)
     assert (spend.state, spend.spending_txid) == ("spent_unconfirmed", h(3))
 
@@ -363,3 +370,35 @@ def test_a_spender_that_doesnt_spend_the_output_is_refused_and_not_cached(
     with pytest.raises(ImportRefused):
         online(data, conn).spender(h(1), h(490), 0)
     assert cc.get_spender(conn, Outpoint(h(1), 0)) is None
+
+
+def test_a_mempool_spender_that_doesnt_spend_the_output_is_refused(
+    data: DataDir, conn: sqlite3.Connection, chain: FakeChain
+) -> None:
+    cc.put_tx(conn, tx(1), 490, TIP)
+    chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.SPENT_UNCONFIRMED, h(3))
+    chain.txs[(h(3), None)] = tx(3, block=None)  # spends something else
+    with pytest.raises(ImportRefused):
+        online(data, conn).spender(h(1), h(490), 0)
+
+
+def test_a_mempool_spender_that_keeps_disappearing_means_try_again(
+    data: DataDir, conn: sqlite3.Connection, chain: FakeChain
+) -> None:
+    cc.put_tx(conn, tx(1), 490, TIP)
+    chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.SPENT_UNCONFIRMED, h(3))
+    chain.missing.add(h(3))  # replaced or evicted each time it is fetched
+    with pytest.raises(OfflineError):
+        online(data, conn).spender(h(1), h(490), 0)
+    assert chain.calls.count("spend_of 0") == TIP_RETRIES
+
+
+def test_a_confirmed_spender_missing_from_its_active_block_is_refused(
+    data: DataDir, conn: sqlite3.Connection, chain: FakeChain
+) -> None:
+    cc.put_tx(conn, tx(1), 490, TIP)
+    chain.spends[Outpoint(h(1), 0)] = Spend(Outpoint(h(1), 0), SpendState.SPENT, h(2), h(495))
+    chain.missing.add(h(2))  # the node names a spender its own block doesn't hold
+    with pytest.raises(ImportRefused):
+        online(data, conn).spender(h(1), h(490), 0)
+    assert chain.calls.count("spend_of 0") == 1  # a contradiction, not a race: no retry

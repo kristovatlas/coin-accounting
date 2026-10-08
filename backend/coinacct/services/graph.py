@@ -9,14 +9,17 @@ is one call here.
   (`chain.txs.fetch_tx`, with the block hash for a confirmed transaction: BIP30, T-208). An
   unconfirmed transaction gets its spent outputs from its parents (`fill_prevouts`) and is never
   cached: the mempool is ephemeral (T-207).
-- **What spent an output** (`spender`): an unspendable output (OP_RETURN) is terminal without asking
-  the node. Otherwise the cache answers when it holds a confirmed spend, or an "unspent" snapshot at
-  the current reference tip; online, the node does (`chain.spenders`), and a mempool spend is shown
-  as unconfirmed, never cached.
+- **What spent an output** (`spender`): an unspendable output (OP_RETURN, or the earlier copy of a
+  BIP30 duplicate coinbase, T-208) is terminal without asking the node. Otherwise a confirmed spend
+  comes from the cache when it holds one. Online, the node answers everything else
+  (`chain.spenders`), so a mempool spend is never hidden behind a cached "unspent"; offline, an
+  "unspent" snapshot at the current reference tip is the best answer there is. Every spender the
+  node names, confirmed or in the mempool, is fetched and must spend the output (architecture §8.3).
 - **Caching** only ever happens at the app's reference tip (`storage.chain_cache`), and only when
-  the node's tip didn't move while it was asked: a block's height is then that tip's height minus
-  the transaction's confirmations, plus one. Otherwise the answer is shown but not cached; a later
-  call asks again. The cache never holds what the scan protocol didn't vouch for (T-207, T-210).
+  the node's tip held still while it was asked: a block's height is then that tip's height minus
+  the transaction's confirmations, plus one. A spender lookup is asked again while the tip moves
+  (or a mempool spender is replaced), and is "try again" after `TIP_RETRIES`. Nothing about the
+  mempool, or an unconfirmed transaction's outputs, is cached (T-207, T-210).
 - **Whose:** every input and output says which entity and tax account its script belongs to, if the
   user DB knows it, so the graph can colour the user's own coins.
 
@@ -228,18 +231,27 @@ class Graph:
                 spend = spenders.spend_of(rpc, found, n)
                 try:
                     spending = (
-                        txs.fetch_tx(rpc, spend.spending_txid, spend.blockhash)
-                        if spend.state is SpendState.SPENT and spend.spending_txid is not None
-                        else None
+                        None
+                        if spend.spending_txid is None
+                        else txs.fetch_tx(rpc, spend.spending_txid, spend.blockhash)
                     )
-                except (txs.TxNotFoundError, txs.StaleBlockError):
-                    spending = None  # the spender's block left the chain after the node named it
-                    after = None
+                except txs.StaleBlockError:
+                    spending, after = None, None  # the spender's block left the chain since it was named
+                except txs.TxNotFoundError:
+                    if (
+                        spend.blockhash is not None
+                    ):  # an active block without the tx: the node contradicts itself
+                        raise ImportRefused("the node's answer couldn't be read") from None
+                    spending, after = None, None  # a mempool spender replaced or evicted since it was named
                 else:
                     after = reorg.node_tip(rpc)
             if spending is not None and not any(i.prevout == outpoint for i in spending.inputs):
                 raise ImportRefused("the node's answer couldn't be read")
-            if after is not None and before == after:
+            if (
+                after is not None
+                and before == after
+                and (spend.spending_txid is None or spending is not None)
+            ):
                 return spend, spending, after
         raise OfflineError("the chain changed during the lookup; try again in a moment")
 
