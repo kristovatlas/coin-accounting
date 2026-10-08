@@ -93,6 +93,13 @@ def _db_errors() -> Iterator[None]:
 
 
 @contextmanager
+def db_errors() -> Iterator[None]:
+    """The same mapping, for the other read services the API calls (`services.history`)."""
+    with _db_errors():
+        yield
+
+
+@contextmanager
 def _node_errors() -> Iterator[None]:
     """A node that went away, or refused the call outright, after start-up: the import can't run now.
     Node error text never reaches a message (`chain.descriptors`)."""

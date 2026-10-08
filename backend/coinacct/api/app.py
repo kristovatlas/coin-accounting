@@ -21,6 +21,17 @@ Routes:
   A refusal is a 422 with the service's fixed message, which never repeats the upload (T-403,
   T-703); a busy DB is a 503; a descriptor while offline is a 409 (T-203). Upload size is bounded by
   the security layer's body limit, before any of this runs.
+- History (bearer; PLAN §3), through `services.history.History`, from the chain cache only, as of the
+  last finished sync (`as_of`; each address's `scanned_to` says how far its own history is scanned):
+  - `GET /api/addresses[?tax_account_id=N]`: every address, with its owner, balance, UTXO count and
+    activity.
+  - `POST /api/addresses/events` `{"script": …}`: one address's receives and spends (404 if not in
+    the DB; 422 for a script that isn't lowercase hex). A POST, so the script never appears in a URL
+    (T-105).
+  - `GET /api/utxos[?tax_account_id=N]`: the user's own unspent outputs, oldest first, each marked
+    `complete` when its address's history is scanned to `as_of`.
+
+  A busy DB is a 503, and an unusable one a 422 with a fixed message, as for the import routes.
 
 FastAPI's docs, OpenAPI schema and default validation errors are off: the docs page loads
 third-party assets (T-106), and the default error body echoes the request input.
@@ -32,7 +43,7 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -42,6 +53,7 @@ from coinacct.api.security import MAX_BODY_BYTES, SecurityMiddleware
 from coinacct.api.session import ClaimError, Sessions
 from coinacct.domain.keys import PrivateKeyError
 from coinacct.services import imports as import_service
+from coinacct.services.history import History
 from coinacct.services.imports import Busy, ImportRefused, Imports, OfflineError, Owner
 from coinacct.services.startup import NodeStatus
 
@@ -139,6 +151,7 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
     on_quit: Callable[[], None],
     bundle: Mapping[str, bytes] | None = None,
     imports: Imports | None = None,
+    history: History | None = None,
 ) -> SecurityMiddleware:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -218,7 +231,86 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
 
     if imports is not None:
         _import_routes(app, imports, authenticated)
+    if history is not None:
+        _history_routes(app, history, authenticated)
     return SecurityMiddleware(app, port=port)
+
+
+class ScriptQuery(Strict):
+    script: str = Field(pattern=r"^(?:[0-9a-f]{2}){1,10000}$")  # a script, as lowercase hex
+
+
+def _tip(tip: Any) -> dict[str, Any] | None:
+    return None if tip is None else {"blockhash": tip.blockhash, "height": tip.height}
+
+
+def _history_routes(app: FastAPI, history: History, authenticated: list[Any]) -> None:
+    @app.get("/api/addresses", dependencies=authenticated)
+    def addresses(tax_account_id: Annotated[int | None, Query()] = None) -> dict[str, Any]:
+        found = history.addresses(tax_account_id)
+        return {
+            "as_of": _tip(found.as_of),
+            "catching_up": found.catching_up,
+            "addresses": [
+                {
+                    "script": a.script_hex,
+                    "address": a.address,
+                    "entity_id": a.entity_id,
+                    "tax_account_id": a.tax_account_id,
+                    "label": a.label,
+                    "balance": a.balance,
+                    "utxos": a.utxos,
+                    "received": a.received,
+                    "transactions": a.transactions,
+                    "last_height": a.last_height,
+                    "scanned_to": a.scanned_to,
+                }
+                for a in found.addresses
+            ],
+        }
+
+    # POST, with the script in the body: a script in the URL could be kept by the browser, outside the
+    # volume (T-105: sensitive queries use request bodies).
+    @app.post("/api/addresses/events", dependencies=authenticated)
+    def events(body: ScriptQuery) -> Response:
+        found = history.events(body.script)
+        if found is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(
+            {
+                "events": [
+                    {
+                        "kind": e.kind,
+                        "txid": e.txid,
+                        "n": e.n,
+                        "sats": e.sats,
+                        "height": e.height,
+                        "blockhash": e.blockhash,
+                        "prevout": None
+                        if e.prevout is None
+                        else {"txid": e.prevout.txid, "vout": e.prevout.vout},
+                    }
+                    for e in found
+                ]
+            }
+        )
+
+    @app.get("/api/utxos", dependencies=authenticated)
+    def utxos(tax_account_id: Annotated[int | None, Query()] = None) -> dict[str, Any]:
+        return {
+            "utxos": [
+                {
+                    "txid": u.txid,
+                    "vout": u.vout,
+                    "sats": u.sats,
+                    "script": u.script_hex,
+                    "address": u.address,
+                    "height": u.height,
+                    "complete": u.complete,
+                }
+                for u in history.utxos(tax_account_id)
+            ]
+        }
 
 
 def _import_routes(app: FastAPI, imports: Imports, authenticated: list[Any]) -> None:
