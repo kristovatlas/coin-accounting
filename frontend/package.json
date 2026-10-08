@@ -2,8 +2,10 @@
   "name": "coinacct-frontend",
   "private": true,
   "version": "0.0.0",
-  "description": "SPA workspace (M0.3). No lifecycle scripts allowed (ENGINEERING \u00a72.1).",
+  "description": "SPA workspace (M0.3). No lifecycle scripts allowed (ENGINEERING §2.1).",
   "dependencies": {
+    "cytoscape": "3.33.1",
+    "cytoscape-dagre": "2.5.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
