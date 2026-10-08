@@ -2,7 +2,7 @@
 status: proposed
 date: 2026-10-08
 deciders: repository owner (human), drafted by Claude Code
-architecture_sha256: 4eb3a7398277e83517390893e050e264bf83a3e6de5bb026fe997c0bc19754aa
+architecture_sha256: 05ee54c8dabdcda70ef1f7893b7b31fc58e049bf39f8c8cf8b405a1ccd3adc15
 ---
 
 # 0036: The architecture text follows M2's import and discovery as built
@@ -44,10 +44,10 @@ Not changed, because the code is behind the text and must catch up:
 - Good: no security control is relaxed. §3's "long work never in a request" rule gains one exception, for an import's node calls, which the owner accepts with this ADR.
   - A request's node calls are bounded and read-only, and go through the same `rpcwhitelist` and the app's own allowlist (T-203).
   - The 503 fails closed.
-- Bad: a descriptor preview holds a request thread while the node is slow, up to the per-call timeout for a stalled call, and longer across sequential calls, a trickled reply, or a wait for one of the client's 4 slots. The API refuses the import cleanly rather than hanging the jobs, but the user waits.
+- Bad: a descriptor preview holds a request thread while the node is slow, up to the per-operation timeout for each stalled step of a call (connecting, sending, each read), and longer across sequential calls, a trickled reply, or a wait for one of the client's 4 slots. The API refuses the import cleanly rather than hanging the jobs, but the user waits.
 - Bad: each subject rename rescans the subject's whole history, and its scripts show "not scanned yet" until the rescan finishes (#188, #198).
-- Bad: confirmed use by a third party can still grow a window up to the cap. Anyone who knows the xpub can pay addresses at several successive window edges in one transaction, and each rescan then reveals the next, so one fee can drive several growth steps (T-205; #190).
-- Bad: a grown window's new scripts read "not scanned yet" from the moment it grows until the next poll scans them. Growth runs when the sync returns, whether or not the sync recorded its tip as done (T-210 shows it; architecture §8.2, §8.4).
+- Bad: confirmed use by a third party can still grow a window up to the cap. Anyone who knows the xpub can pay addresses at several successive window edges in one transaction, and each rescan then reveals the next, so one fee can drive several growth steps (T-205; #202).
+- Bad: a grown window's new scripts read "not scanned yet" from the moment it grows until the next poll scans them. Growth runs when a sync that wasn't cancelled returns, whether or not it recorded its tip as done (T-210 shows it; architecture §8.2, §8.4).
 
 ## References
 

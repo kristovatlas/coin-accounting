@@ -1,6 +1,6 @@
 """Log redaction rules (THREAT_MODEL T-403). Fixtures are public or synthetic: Core's regtest
-OP_TRUE address, the genesis block's address and hash, BIP32 test-vector extended keys, and the WIF
-of private key 1."""
+OP_TRUE address, the genesis block's address and hash, BIP32 test vector 1's keys, a public testnet
+private key, and the WIF of private key 1."""
 
 from __future__ import annotations
 
