@@ -131,6 +131,7 @@ def test_an_address_text_is_filled_in_once_and_then_kept_t408(
     tag(None)
     assert ac.addresses(conn)[0].text == "bcrt1qx"
     first, second = tags.changes(conn, ("address_tag", SCRIPT))
+    assert second.before is not None
     assert (first.after["text"], second.before["text"], second.after["text"]) == (None, None, "bcrt1qx")
 
 
