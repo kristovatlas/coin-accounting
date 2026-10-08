@@ -67,7 +67,7 @@ def test_start_up_then_syncs_follow_the_chain_through_a_reorg_t207(
     node.mine(2, OTHER)
     reorged = chain_sync.sync(rpc, conn, [subject])
     assert reorged.complete and reorged.change is not None and reorged.change.invalidated is not None
-    assert paid in reorged.invalidated_txids  # its old block was orphaned: flagged for review
+    assert paid in reorged.to_review  # its old block was orphaned: kept for review
     assert last_tip(conn) == Tip(node.admin("getbestblockhash"), node.admin("getblockcount"))
     [event] = cc.activity_for(conn, spk)
     assert event.txid == paid and event.blockhash != block  # found again, in its new block
