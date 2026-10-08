@@ -16,7 +16,7 @@ from typing import Any
 from coinacct.api.app import create_app
 from coinacct.api.security import ASGIApp
 from coinacct.api.session import BOOTSTRAP_TTL_SECONDS, Sessions
-from coinacct.services import jobs, startup
+from coinacct.services import discovery, history, imports, jobs, startup
 from coinacct.services.lifecycle import Shutdown
 from coinacct.services.startup import NodeStatus, StorageRefused
 
@@ -56,9 +56,12 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
     ttl: float = BOOTSTRAP_TTL_SECONDS,
     shutdown: Shutdown | None = None,
     bundle: Mapping[str, bytes] | None = None,
+    open_reader: Callable[[], Any] | None = None,
 ) -> Runtime:
     """`rpc` is `config.RpcConfig`, `volume` is `storage.volume.VolumeStatus` and `db` the open user
-    DB, passed as values (architecture §2: `api/` imports none of them). Raises `StorageRefused` when
+    DB, passed as values (architecture §2: `api/` imports none of them). `open_reader` opens a
+    read-only connection to the same DB (architecture §3); with it, the account and import routes
+    are served. Raises `StorageRefused` when
     the storage policy forbids running (T-401); a node problem, including a chain other than the
     one recorded in the DB (T-206), only means offline mode.
     """
@@ -76,14 +79,42 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
     # Created after the node checks, which can take seconds, so the token's 60 s start just before
     # the bootstrap file is written and the browser opened.
     sessions = Sessions(bootstrap_token, ttl=ttl, on_claimed=on_claimed)
+    import_service = None
+    history_service = None
+    if open_reader is not None:
+        import_service = imports.service(
+            db, open_reader, rpc.host, rpc.port, rpc.user, rpc.password, online=status.online
+        )
+        history_service = history.History(open_reader)
     app = create_app(
         port=port,
         sessions=sessions,
         status=lambda: status,
         on_quit=lambda: shutdown.request(QUIT_REASON),
         bundle=bundle,
+        imports=import_service,
+        history=history_service,
     )
     starter = None
     if status.online:
-        starter = functools.partial(start_jobs, rpc.host, rpc.port, rpc.user, rpc.password, db=db)
+        # The chain jobs scan what has been imported (services.imports.subjects), read afresh each sync.
+        start = functools.partial(
+            start_jobs,
+            rpc.host,
+            rpc.port,
+            rpc.user,
+            rpc.password,
+            db=db,
+            subjects=functools.partial(imports.subjects, db),
+            discover=discovery.extend_windows,
+        )
+        starter = functools.partial(_start_and_connect, start, import_service)
     return Runtime(app=app, sessions=sessions, shutdown=shutdown, status=status, start_chain_jobs=starter)
+
+
+def _start_and_connect(start: Callable[[], Any], import_service: Any) -> Any:
+    """Start the chain jobs, then let imports ask them for a sync (services.imports.Imports)."""
+    chain_jobs = start()
+    if import_service is not None:
+        import_service.jobs_started(chain_jobs.request_sync)
+    return chain_jobs

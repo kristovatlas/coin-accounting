@@ -9,6 +9,16 @@
 - **Checked after the open, too:** SQLite opens by path, so once it has, the DB and its side files
   are checked again: the same inode, regular, private, on the verified device.
 - **Integrity:** `PRAGMA integrity_check` on every open; anything but `ok` refuses the DB (T-408).
+- **One writer, many readers** (architecture §3): `open_db` returns the one writer connection, used
+  only by the job worker (and start-up and shutdown, before and after it runs) and by short API
+  writes. Its `lock` serialises their transactions: `transaction`, and `hold` for a read that opens a
+  transaction of its own, keep it from `BEGIN` to the end, so one thread's statements never land in
+  another's transaction. Waiting for it is bounded by the connection's timeout and ends in a "busy"
+  `DbError`; SQLite's own busy wait, for another process, is bounded by the same timeout after it.
+  A lone statement outside a transaction isn't serialised and would see another thread's
+  uncommitted rows, so API reads never use the writer.
+  They use readers: `open_reader` opens a read-only connection (`mode=ro`, `query_only`) to the same,
+  already-migrated file, with the same file checks, for one thread (one request) at a time.
 - **Schema:** the numbered steps in `migrations/` (`mNNNN_name.py`, each an `SQL` string), applied in
   order, each in its own transaction, with `PRAGMA user_version` recording the last one. A DB from a
   newer app version is refused rather than guessed at.
@@ -20,6 +30,7 @@ import errno
 import os
 import sqlite3
 import stat
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
@@ -36,6 +47,51 @@ SIDE_FILES: Final = ("-wal", "-shm", "-journal")
 
 class DbError(Exception):
     """The user DB can't be used. The message says why; it never contains user data."""
+
+
+class DbBusy(DbError):
+    """The user DB is busy: the writer's lock, or SQLite's own write lock (another process), wasn't
+    free within the connection's timeout. Trying again later can work."""
+
+
+class WriterConnection(sqlite3.Connection):
+    """The one writer connection (architecture §3), with the lock its transactions hold."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.lock = threading.RLock()
+        self.lock_timeout = 5.0  # open_db sets the caller's timeout
+
+
+def writer_lock(conn: sqlite3.Connection) -> threading.RLock | None:
+    """The writer's lock; None for a connection that isn't the writer (a reader, or a test's own)."""
+    return conn.lock if isinstance(conn, WriterConnection) else None
+
+
+def _acquire(conn: sqlite3.Connection) -> threading.RLock | None:
+    """Take the writer's lock (None on another connection), waiting at most its timeout."""
+    if not isinstance(conn, WriterConnection):
+        return None
+    if not conn.lock.acquire(timeout=conn.lock_timeout):
+        raise DbBusy("the user DB is busy; try again in a moment")
+    return conn.lock
+
+
+class hold:
+    """Hold the writer's lock (nothing on another connection) for a read that opens a transaction of
+    its own, such as a snapshot, so it can't start inside another thread's transaction."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        self.lock: threading.RLock | None = None
+
+    def __enter__(self) -> sqlite3.Connection:
+        self.lock = _acquire(self.conn)
+        return self.conn
+
+    def __exit__(self, kind: object, value: object, tb: object) -> None:
+        if self.lock is not None:
+            self.lock.release()
 
 
 def migrations(steps: Sequence[tuple[int, str]] = STEPS) -> list[tuple[int, str]]:
@@ -65,9 +121,13 @@ def open_db(
             isolation_level=None,
             check_same_thread=False,
             timeout=timeout,
+            factory=WriterConnection,
         )
     except sqlite3.Error as e:
         raise DbError(f"can't open the user DB ({type(e).__name__})") from None
+    if isinstance(conn, WriterConnection):
+        # RLock.acquire waits forever for a negative timeout, where SQLite's means "don't wait".
+        conn.lock_timeout = max(timeout, 0.0)
     try:
         conn.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
         # A read makes SQLite open the file now, so the path is checked again before WAL journaling
@@ -104,6 +164,57 @@ def open_db(
         if name.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB")):
             raise DbError(f"the user DB can't be read ({name}); it may be damaged (T-408)") from None
         raise DbError(f"the user DB couldn't be opened or migrated ({name or type(e).__name__})") from None
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def open_reader(data_dir: DataDir, *, timeout: float = 5.0) -> sqlite3.Connection:
+    """A read-only connection to the user DB that `open_db` has already opened and migrated
+    (architecture §3: readers use separate connections). SQLite opens it `mode=ro`, with `query_only`
+    on, after the same file checks as the writer's. It never creates the DB or changes its contents;
+    SQLite may create the WAL side files, which are checked like the writer's. Use it only on the
+    thread that opened it."""
+    path = data_dir.root / DB_NAME
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENXIO, errno.EISDIR):
+            raise DbError(f"{path} must be a regular file, not a link, pipe or directory (T-401)") from None
+        raise DbError(f"can't open {path} ({e.strerror})") from None
+    try:
+        inode = _check_fd(fd, path, data_dir)
+    finally:
+        os.close(fd)
+    _check_side_files(path, data_dir)
+    try:
+        conn = sqlite3.connect(
+            f"{path.as_uri()}?mode=ro",
+            uri=True,
+            isolation_level=None,
+            check_same_thread=True,  # one thread (one request) per reader: its snapshots are its own
+            timeout=timeout,
+        )
+    except sqlite3.Error as e:
+        raise DbError(f"can't open the user DB ({type(e).__name__})") from None
+    try:
+        conn.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
+        for pragma in ("query_only=ON", "temp_store=MEMORY", "trusted_schema=OFF"):
+            conn.execute(f"PRAGMA {pragma}")
+        conn.execute("PRAGMA schema_version").fetchone()
+        _check_still_ours(path, inode, data_dir)
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > len(migrations()):
+            raise DbError("the user DB was written by a newer version of the app; update the app")
+        if version != len(migrations()):
+            raise DbError("the user DB isn't at this app's schema version; open it with open_db first")
+    except sqlite3.DatabaseError as e:
+        conn.close()
+        name = getattr(e, "sqlite_errorname", "")
+        if name.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+            raise DbBusy("the user DB is busy; try again in a moment") from None
+        raise DbError(f"the user DB can't be read ({name or type(e).__name__})") from None
     except BaseException:
         conn.close()
         raise
@@ -172,16 +283,38 @@ class transaction:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
         self.nested = False
+        self.lock: threading.RLock | None = None
 
     def __enter__(self) -> sqlite3.Connection:
+        self.lock = _acquire(self.conn)  # held until __exit__: no other thread's statements join this one
+        try:
+            self._begin()
+        except BaseException:
+            if self.lock is not None:
+                self.lock.release()
+            raise
+        return self.conn
+
+    def __exit__(self, kind: object, value: object, tb: object) -> None:
+        try:
+            self._end(kind)
+        finally:
+            if self.lock is not None:
+                self.lock.release()
+
+    def _begin(self) -> None:
         if self.conn.in_transaction:
             self.nested = True
             self.conn.execute("SAVEPOINT coinacct")
         else:
-            self.conn.execute("BEGIN IMMEDIATE")
-        return self.conn
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as e:
+                if getattr(e, "sqlite_errorname", "").startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+                    raise DbBusy("the user DB is busy; try again in a moment") from None
+                raise
 
-    def __exit__(self, kind: object, value: object, tb: object) -> None:
+    def _end(self, kind: object) -> None:
         if self.nested:
             if kind is None:
                 self.conn.execute("RELEASE coinacct")

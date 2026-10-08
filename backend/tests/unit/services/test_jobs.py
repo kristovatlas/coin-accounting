@@ -15,10 +15,12 @@ import pytest
 
 from coinacct import launcher
 from coinacct.chain import node_checks
+from coinacct.chain.mempool import PendingActivity
 from coinacct.chain.scans import Scan
 from coinacct.domain.secret import Secret
 from coinacct.rpc import RpcTransportError
 from coinacct.services import chain_sync, jobs
+from coinacct.services.discovery import Grown
 from coinacct.services.jobs import JobWorker, State, TipPoller
 from coinacct.services.lifecycle import DEADLINE_SECONDS
 from coinacct.storage import chain_cache as cc
@@ -472,3 +474,108 @@ def test_an_over_budget_sync_remembers_the_tip_it_processed_t205(conn: sqlite3.C
     wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
     assert poller.poll() is None  # 501 was processed already: no rescan of the refused range
     w.stop()
+
+
+def test_a_sync_can_be_requested_without_a_tip_change(conn: sqlite3.Connection) -> None:
+    node = Node(500)
+    w = JobWorker()
+    w.start()
+    poller = TipPoller(node, conn, w, lambda: [], interval=3600)
+    jobs_ = jobs.ChainJobs(node, conn, w, poller)
+    first = poller.poll()
+    assert first is not None
+    wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
+    assert poller.poll() is None  # same tip: nothing to do
+    jobs_.request_sync()  # an import arrived
+    assert poller.poll() is not None
+    w.stop()
+
+
+def test_a_sync_requested_while_one_runs_is_queued_after_it(conn: sqlite3.Connection) -> None:
+    node = Node(500)
+    w = JobWorker()
+    w.start()
+    reading, release = threading.Event(), threading.Event()
+
+    def subjects() -> list[Scan]:
+        reading.set()
+        release.wait(5)  # the running sync has read its subjects: the import comes after
+        return []
+
+    poller = TipPoller(node, conn, w, subjects, interval=3600)
+    first = poller.poll()
+    assert first is not None and reading.wait(5)
+    poller.request_sync()  # an import, while the sync runs
+    assert poller.poll() is None  # one is running: the request waits for it
+    release.set()
+    wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
+    second = poller.poll()
+    assert second is not None  # same tip, but the request is still there
+    wait_for(lambda: w.job(second).state is State.DONE)  # type: ignore[union-attr]
+    assert poller.poll() is None  # served: no further sync until the tip moves or another request
+    w.stop()
+
+
+def test_a_grown_window_is_scanned_at_the_next_poll(conn: sqlite3.Connection) -> None:
+    node = Node(500)
+    w = JobWorker()
+    w.start()
+    calls: list[list[str]] = []
+
+    def discover(rpc: Any, db: Any, unfinished: Any, cancelled: Any) -> Grown:
+        calls.append(sorted(unfinished))
+        return Grown((1,) if len(calls) == 1 else ())  # the first sync grows a window; the second no more
+
+    poller = TipPoller(node, conn, w, lambda: [], interval=3600, discover=discover)
+    first = poller.poll()
+    assert first is not None
+    wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
+    second = poller.poll()  # same tip: the wider window is what's new
+    assert second is not None and calls == [[]]
+    wait_for(lambda: w.job(second).state is State.DONE)  # type: ignore[union-attr]
+    assert poller.poll() is None and len(calls) == 2
+    w.stop()
+
+
+def test_a_failed_window_growth_is_tried_again_at_the_next_poll(
+    conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+    node = Node(500)
+    w = JobWorker()
+    w.start()
+
+    def discover(rpc: Any, db: Any, unfinished: Any, cancelled: Any) -> Grown:
+        raise ValueError("descriptor 1: the node's new addresses can't be used")
+
+    poller = TipPoller(node, conn, w, lambda: [], interval=3600, discover=discover)
+    with caplog.at_level(logging.WARNING):
+        first = poller.poll()
+        assert first is not None
+        wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
+    assert "growing descriptor windows failed: ValueError" in caplog.text
+    assert "descriptor 1" not in caplog.text  # the type only, as every chain-job log line
+    assert poller.poll() is not None  # not done for this tip: the next poll syncs and grows again
+    w.stop()
+
+
+def test_discovery_gets_the_unfinished_subjects(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = (PendingActivity("receive", "0014" + "aa" * 20, "11" * 32, 0, 5),)
+    result = chain_sync.SyncResult(
+        None, Tip("bb" * 32, 9), False, waiting=("desc:a",), over_budget=("desc:b",), pending=pending
+    )
+    monkeypatch.setattr(chain_sync, "sync", lambda *a: result)
+    seen: list[tuple[Any, ...]] = []
+
+    def discover(rpc: Any, db: Any, unfinished: Any, cancelled: Any) -> Grown:
+        seen.append((set(unfinished), cancelled()))
+        return Grown()
+
+    poller = TipPoller(Node(500), conn, JobWorker(), lambda: [], interval=3600, discover=discover)
+    assert poller._sync(threading.Event()) is result
+    assert seen == [({"desc:a", "desc:b"}, False)]  # not the mempool's scripts: confirmed use only
+    cancelled = threading.Event()
+    cancelled.set()
+    poller._sync(cancelled)  # cancelled before the sync: nothing runs
+    assert len(seen) == 1
