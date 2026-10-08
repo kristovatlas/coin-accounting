@@ -2,8 +2,12 @@
 THREAT_MODEL T-408, T-504).
 
 Each change is written together with a `change_log` row, in one transaction, so the log can't miss
-an edit or record one that didn't happen. The log is append-only (the schema refuses any update or
-delete, `migrations/m0006_tags`).
+an edit or record one that didn't happen. The log is append-only: the schema refuses any update or
+delete (`migrations/m0006_tags`) and any insert that would replace a row or take an id below 1
+(`m0007_change_log_ids`, `m0008_change_log_positive_ids`).
+
+An address text passed in must already be checked against the script and the chain (`services.tags`
+does it); this module only refuses private keys, whoever calls.
 
 - `tag_address` sets an address's owner, tax account, label and wallet clients. An address not yet in
   the user DB is added (`source` 'manual'); the schema's own rules still hold: the user's address
@@ -98,8 +102,9 @@ def tag_address(  # noqa: PLR0913 - the address, its owner and account, label, c
                 "entity_id": entity_id,
                 "tax_account_id": tax_account_id,
                 "label": label,
-                # the text is the address's, not the tag's: kept once known, filled in if it wasn't
-                "text": text if before is None or before["text"] is None else before["text"],
+                # a text given is the checked one (`services.tags`): it replaces whatever was stored,
+                # so a text stored before the check (#207) can be corrected; none given keeps it
+                "text": text if text is not None or before is None else before["text"],
                 "source": "manual" if before is None else before["source"],
                 "client_ids": clients,
             }

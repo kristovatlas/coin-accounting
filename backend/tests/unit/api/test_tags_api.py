@@ -126,3 +126,13 @@ def test_a_private_key_in_a_tag_is_refused_without_echo_t703(
     reply = world.post("/api/tags/address", {"script": SCRIPT, "entity_id": exchange, field: wif_shaped})
     assert reply.status == 422 and wif_shaped not in reply.body.decode()
     assert ac.addresses(conn) == []
+
+
+def test_an_address_text_that_isnt_the_scripts_is_a_422_without_echo_t701(
+    world: World, conn: sqlite3.Connection
+) -> None:
+    exchange = ac.add_entity(conn, "Some exchange", "exchange")
+    other = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"  # pays to another script than SCRIPT
+    reply = world.post("/api/tags/address", {"script": SCRIPT, "entity_id": exchange, "address": other})
+    assert reply.status == 422 and other not in reply.body.decode()
+    assert ac.addresses(conn) == []

@@ -3,8 +3,9 @@
 m0006's triggers refuse an UPDATE or DELETE of a logged row. `INSERT OR REPLACE` (or `REPLACE INTO`)
 with an existing id would still replace one: REPLACE deletes the old row without firing delete
 triggers while `recursive_triggers` is off (https://www.sqlite.org/lang_conflict.html). This trigger
-runs before the conflict is resolved and refuses an insert whose id is taken. (An insert that leaves
-the id to SQLite has no id yet in a BEFORE trigger, so it matches no row.)
+runs before the conflict is resolved and refuses an insert whose id is taken. (For an insert that
+leaves the id to SQLite, `NEW.id` is undefined here, in practice -1; m0008 keeps every stored id at 1
+or more, so it matches no row.)
 """
 
 SQL = """
