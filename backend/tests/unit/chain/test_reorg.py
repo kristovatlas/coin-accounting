@@ -11,7 +11,14 @@ from typing import Any
 import pytest
 
 from coinacct.chain import reorg
-from coinacct.chain.reorg import MalformedHeaderError, catch_up, fork_point, node_tip
+from coinacct.chain.reorg import (
+    MalformedHeaderError,
+    NodeSyncingError,
+    TipMovedError,
+    catch_up,
+    fork_point,
+    node_tip,
+)
 from coinacct.domain.chain import Outpoint
 from coinacct.rpc import RpcCallError
 from coinacct.storage import chain_cache as cc
@@ -37,6 +44,8 @@ class FakeNode:
                 self.add(bh(h, 1), h, -1, bh(h - 1, 1) if h > fork + 1 else bh(fork))
         self.best = bh(main)
         self.calls: list[tuple[str, Any]] = []
+        self.info: dict[str, Any] = {"initialblockdownload": False, "blocks": main, "headers": main}
+        self.during_walk: Any = None  # called on each getblockheader, e.g. to switch branches
 
     def add(self, blockhash: str, height: int, confirmations: int, prev: str | None) -> None:
         header: dict[str, Any] = {"hash": blockhash, "height": height, "confirmations": confirmations}
@@ -46,11 +55,15 @@ class FakeNode:
 
     def call(self, method: str, params: Any = ()) -> Any:
         self.calls.append((method, params))
+        if method == "getblockchaininfo":
+            return self.info
         if method == "getbestblockhash":
             return self.best
         if method == "getblockhash":
             return bh(params[0])
         assert method == "getblockheader" and params[1] is True
+        if self.during_walk:
+            self.during_walk(self)
         if params[0] not in self.headers:
             raise RpcCallError(method, -5, "Block not found")
         return self.headers[params[0]]
@@ -86,8 +99,8 @@ def test_an_unknown_recorded_tip_falls_back_to_genesis_t207() -> None:
 def test_the_nodes_tip_must_be_active() -> None:
     node = FakeNode(main=10)
     assert node_tip(node) == Tip(bh(10), 10)
-    node.headers[bh(10)]["confirmations"] = -1
-    with pytest.raises(MalformedHeaderError, match="active chain"):
+    node.headers[bh(10)]["confirmations"] = -1  # reorged away between the two calls
+    with pytest.raises(TipMovedError):
         node_tip(node)
     node.best = "zz"
     with pytest.raises(MalformedHeaderError, match="block hash"):
@@ -142,7 +155,10 @@ def test_the_first_tip_is_recorded_without_a_walk(conn: sqlite3.Connection) -> N
     change = catch_up(node, conn)
     assert change == reorg.TipChange(None, Tip(bh(10), 10), None)
     assert cc.scan_target(conn) == Tip(bh(10), 10) and last_tip(conn) is None  # not caught up yet
-    assert catch_up(node, conn) is None  # nothing moved
+    # Still unfinished: reported again, so the caller resumes it, and nothing is walked.
+    calls = len(node.calls)
+    assert catch_up(node, conn) == reorg.TipChange(None, Tip(bh(10), 10), None)
+    assert [m for m, _ in node.calls[calls:]] == ["getblockchaininfo", "getbestblockhash", "getblockheader"]
     cc.complete_scan_target(conn, Tip(bh(10), 10))
     assert last_tip(conn) == Tip(bh(10), 10) and catch_up(node, conn) is None
 
@@ -179,6 +195,8 @@ def test_an_unfinished_catch_up_is_walked_back_from_its_target_t207(conn: sqlite
     assert change is not None and change.old == target
     assert change.invalidated is not None and change.invalidated.fork == Tip(bh(5), 5)
     assert cc.activity_for(conn, "00") == []
+    assert last_tip(conn) == Tip(bh(4), 4)  # never moved forward by the reorg
+    assert cc.scan_target(conn) == Tip(bh(12), 12)
 
 
 def test_a_tip_moved_by_another_caller_meanwhile_is_left_alone(
@@ -194,7 +212,8 @@ def test_a_tip_moved_by_another_caller_meanwhile_is_left_alone(
         return fork
 
     monkeypatch.setattr(reorg, "fork_point", walk_then_move)
-    assert catch_up(node, conn) is None
+    with pytest.raises(cc.StaleTipError):
+        catch_up(node, conn)
     assert last_tip(conn) == Tip(bh(11), 11) and cc.scan_target(conn) is None
 
 
@@ -211,3 +230,76 @@ def test_a_failed_invalidation_leaves_the_old_tip(
     with pytest.raises(RuntimeError):
         catch_up(FakeNode(main=12, fork=5, side=9), conn)
     assert last_tip(conn) == old and cc.scan_target(conn) is None
+
+
+def test_a_reorg_to_a_shorter_chain_moves_the_tip_back_t207(conn: sqlite3.Connection) -> None:
+    set_tip(conn, Tip(bh(9, 1), 9))
+    cc.put_activity(conn, [cc.Activity("receive", "00", bh(73), 0, 1, bh(8, 1), 8)], Tip(bh(9, 1), 9))
+    change = catch_up(FakeNode(main=7, fork=5, side=9), conn)  # the new chain is 2 blocks shorter
+    assert change is not None and change.new == Tip(bh(7), 7)
+    assert last_tip(conn) == Tip(bh(5), 5) and cc.scan_target(conn) == Tip(bh(7), 7)
+    assert cc.activity_for(conn, "00") == []
+
+
+def test_a_branch_switch_during_the_walk_records_nothing_t207(conn: sqlite3.Connection) -> None:
+    # The cache is on branch 1 (tip 9); the node reports branch 0 (tip 12), then flips back to
+    # branch 1 during the walk, so the walk finds the old tip active and no fork.
+    old = Tip(bh(9, 1), 9)
+    set_tip(conn, old)
+    cc.put_activity(conn, [cc.Activity("receive", "00", bh(74), 0, 1, bh(8, 1), 8)], old)
+    node = FakeNode(main=12, fork=5, side=9)
+
+    def flip(n: FakeNode) -> None:
+        for h in range(6, 10):
+            n.headers[bh(h, 1)]["confirmations"] = 10 - h
+        n.during_walk = None
+
+    node.during_walk = flip
+    with pytest.raises(TipMovedError, match="switched branches"):
+        catch_up(node, conn)
+    assert last_tip(conn) == old and cc.scan_target(conn) is None  # nothing recorded against branch 0
+    assert len(cc.activity_for(conn, "00")) == 1
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        {"initialblockdownload": True, "blocks": 12, "headers": 12},
+        {"initialblockdownload": False, "blocks": 7, "headers": 12},
+    ],
+)
+def test_a_syncing_node_is_refused_before_anything_is_invalidated(
+    conn: sqlite3.Connection, info: dict[str, Any]
+) -> None:
+    set_tip(conn, Tip(bh(9), 9))
+    cc.put_activity(conn, [cc.Activity("receive", "00", bh(75), 0, 1, bh(8), 8)], Tip(bh(9), 9))
+    node = FakeNode(main=12)
+    node.info = info
+    with pytest.raises(NodeSyncingError):
+        catch_up(node, conn)
+    assert [m for m, _ in node.calls] == ["getblockchaininfo"]
+    assert last_tip(conn) == Tip(bh(9), 9) and len(cc.activity_for(conn, "00")) == 1
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        None,
+        {},
+        {"initialblockdownload": "no", "blocks": 1, "headers": 1},
+        {"initialblockdownload": False, "blocks": True, "headers": 1},
+    ],
+)
+def test_a_malformed_sync_state_is_refused(info: Any) -> None:
+    node = FakeNode(main=3)
+    node.info = info
+    with pytest.raises(MalformedHeaderError, match="sync state"):
+        node_tip(node)
+
+
+def test_a_genesis_header_with_a_previous_block_is_refused() -> None:
+    node = FakeNode(main=3)
+    node.headers[bh(0)]["previousblockhash"] = bh(9)
+    node.headers[bh(0)]["confirmations"] = -1
+    with pytest.raises(MalformedHeaderError, match="previous block"):
+        fork_point(node, Tip(bh(0), 0))

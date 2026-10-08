@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from coinacct.chain.reorg import catch_up
+from coinacct.chain.reorg import TipChange, catch_up
 from coinacct.storage import chain_cache as cc
 from coinacct.storage.chain_state import Tip, last_tip, record_chain, set_tip
 from coinacct.storage.datadir import open_data_dir
@@ -68,9 +68,10 @@ def test_a_reorg_while_the_app_was_away_invalidates_above_the_fork_t207(
     assert change.new == Tip(node.admin("getbestblockhash"), top + 1)
     assert cc.activity_for(conn, "51") == [kept]
     assert cc.scan_target(conn) == change.new
-    assert catch_up(rpc, conn) is None
+    assert catch_up(rpc, conn) == TipChange(None, change.new, None)  # still pending: reported again
     cc.complete_scan_target(conn, change.new)
     assert last_tip(conn) == change.new
+    assert catch_up(rpc, conn) is None  # caught up
 
 
 def test_new_blocks_without_a_reorg_keep_the_cache(node: RegtestNode, conn: sqlite3.Connection) -> None:
@@ -95,3 +96,5 @@ def test_a_recorded_tip_the_node_doesnt_know_invalidates_everything_t207(
     assert change is not None and change.invalidated is not None
     assert change.invalidated.fork == Tip(node.admin("getblockhash", [0]), 0)
     assert cc.activity_for(conn, "51") == []
+    assert change.new == Tip(node.admin("getbestblockhash"), node.admin("getblockcount"))
+    assert cc.scan_target(conn) == change.new and last_tip(conn) == change.invalidated.fork
