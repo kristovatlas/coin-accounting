@@ -27,7 +27,8 @@ fails, and the next sync recovers).
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+import traceback
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -104,13 +105,26 @@ def at_startup(rpc: ChainRpc, conn: Connection) -> str | None:
         log.error("the start-up catch-up stopped on the user DB: %s", e)
         return f"the user DB stopped the start-up catch-up: {e}"
     except Exception as e:  # a bug: offline mode, not a failed start, with its traceback in the log
-        log.exception("the start-up catch-up failed")
+        # The frames, not the message: a bug's message can carry a txid or a script (T-403).
+        log.error(
+            "the start-up catch-up failed (%s):\n%s",
+            type(e).__name__,
+            "".join(traceback.format_tb(e.__traceback__)),
+        )
         return f"the chain catch-up at start-up failed ({type(e).__name__})"
     return None
 
 
-def sync(rpc: ChainRpc, conn: Connection, subjects: Sequence[Scan]) -> SyncResult:
-    """The tip-change job (§8.4). `subjects` are the scripts and descriptors whose history is kept."""
+def never() -> bool:
+    return False
+
+
+def sync(
+    rpc: ChainRpc, conn: Connection, subjects: Sequence[Scan], cancelled: Callable[[], bool] = never
+) -> SyncResult:
+    """The tip-change job (§8.4). `subjects` are the scripts and descriptors whose history is kept.
+    `cancelled` is checked before each subject, each range and the mempool pass: a cancelled sync
+    stops there, unfinished, and never starts a scan after the shutdown abort (§3 step 2, T-212)."""
     scans.recover(rpc, conn)
     change = reorg.catch_up(rpc, conn)
     target = change.new if change is not None else reference_tip(conn)
@@ -119,18 +133,20 @@ def sync(rpc: ChainRpc, conn: Connection, subjects: Sequence[Scan]) -> SyncResul
     for i, subject in enumerate(subjects):
         if _nothing_to_scan(conn, subject, target):
             continue
-        outcome = _extend(rpc, conn, subject)
+        outcome = _extend(rpc, conn, subject, cancelled)
         if outcome == "over budget":
             over_budget.append(subject.subject)
         elif outcome != "done":
             waiting.append(subject.subject)
-            if outcome == "chain moved":
+            if outcome in ("chain moved", "cancelled"):
                 waiting.extend(s.subject for s in subjects[i + 1 :] if not _nothing_to_scan(conn, s, target))
                 break
     complete = not waiting and not over_budget
     pending: tuple[PendingActivity, ...] | None = None
     refused: list[str] = []
-    if target is not None:
+    if cancelled():
+        complete = False
+    elif target is not None:
         pending, refused = _mempool_pass(rpc, subjects, target)
         complete = complete and pending is not None
     if complete and change is not None:
@@ -177,12 +193,23 @@ def _mempool_pass(
             log.warning("the mempool pass failed (%s); unconfirmed activity isn't shown", type(e).__name__)
             refused.extend(s.subject for s in subjects[i:])
             break
-    return tuple(pending), refused
+    # Subjects can share scripts, so the same event can come back twice; across subjects the
+    # mempool still never holds two spends of one output (`chain.mempool`'s per-call check).
+    unique = list(dict.fromkeys(pending))
+    spends = [p.prevout for p in unique if p.prevout is not None]
+    if len(spends) != len(set(spends)):
+        log.warning("the mempool pass reported two spends of one output; unconfirmed activity isn't shown")
+        return (), [s.subject for s in subjects]
+    return tuple(unique), refused
 
 
-def _extend(rpc: ChainRpc, conn: Connection, subject: Scan) -> str:
+def _extend(  # noqa: PLR0911 - one outcome per way a range can end
+    rpc: ChainRpc, conn: Connection, subject: Scan, cancelled: Callable[[], bool] = never
+) -> str:
     """Extend one subject: "done", "over budget", or why it waits for the next sync."""
     for _ in range(RANGE_RETRIES):
+        if cancelled():
+            return "cancelled"
         try:
             scans.extend(rpc, conn, subject)
         except scans.FilterIndexBehindError:
@@ -190,7 +217,9 @@ def _extend(rpc: ChainRpc, conn: Connection, subject: Scan) -> str:
         except ChainMovedError:
             return "chain moved"
         except (StaleScanError, ScanAbortedError):
-            continue  # the chain moved under a range, or another client aborted it: retry
+            # The chain moved under a range, or a client aborted it; after our own shutdown abort
+            # the cancel check above ends the loop, so no scan starts after it (T-212).
+            continue
         except ScanBusyError:
             return "scan slot busy"
         except ScanInFlightError:

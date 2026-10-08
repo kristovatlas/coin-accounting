@@ -476,7 +476,7 @@ def test_a_shorter_chain_stops_the_sync_after_one_attempt(conn: sqlite3.Connecti
     node = Shorter(500)
     result = chain_sync.sync(node, conn, [SUBJECT, Scan("t", ("addr(bcrt1qother)",))])
     assert not result.complete and result.waiting == ("s", "t")
-    assert len([c for c in node.calls if c[0] == "scanblocks" and c[1][0] == "start"]) <= 1  # not retried
+    assert len([c for c in node.calls if c[0] == "getblockhash" and c[1][0] > 400]) == 1  # not retried
 
 
 def test_the_waiting_tail_leaves_out_subjects_with_nothing_to_scan(
@@ -506,9 +506,74 @@ def test_a_damaged_cache_at_start_up_names_the_remedy_t408(
 def test_a_bug_at_start_up_means_offline_mode_with_its_traceback_logged(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    value = "bcrt1q" + "secretscript"  # a runtime value, as a bug's message would carry
+
     def bug(*_args: Any) -> Any:
-        raise TypeError("a programming error")
+        raise TypeError(value)
 
     monkeypatch.setattr(reorg, "catch_up", bug)
     assert chain_sync.at_startup(Node(500), conn) == "the chain catch-up at start-up failed (TypeError)"
-    assert any(r.exc_info is not None for r in caplog.records)
+    assert "in bug" in caplog.text and "TypeError" in caplog.text  # the frames are logged
+    assert "bcrt1qsecretscript" not in caplog.text  # not the message (T-403)
+
+
+def test_the_same_pending_event_from_two_subjects_is_kept_once(conn: sqlite3.Connection) -> None:
+    twin = Scan("twin", SUBJECT.scanobjects)  # another subject with the same script
+    result = chain_sync.sync(Mempool(500), conn, [SUBJECT, twin])
+    assert result.pending is not None and [p.txid for p in result.pending] == [f"{1:064x}"]
+
+
+def test_two_spends_of_one_output_across_subjects_hide_the_pass(conn: sqlite3.Connection) -> None:
+    class Conflict(Node):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "getdescriptoractivity" and params[0] == [] and params[2] is True:
+                spender = "aa" if params[1] == list(SUBJECT.scanobjects) else "bb"
+                return {
+                    "activity": [
+                        {
+                            "type": "spend",
+                            "amount": Decimal("0.1"),
+                            "spend_txid": spender * 32,
+                            "spend_vin": 0,
+                            "prevout_txid": "cc" * 32,
+                            "prevout_vout": 0,
+                            "prevout_spk": {"hex": SPK},
+                        }
+                    ]
+                }
+            return super().call(method, params)
+
+    result = chain_sync.sync(Conflict(500), conn, [SUBJECT, Scan("t", ("addr(bcrt1qother)",))])
+    assert result.complete and result.pending == () and result.mempool_refused == ("s", "t")
+
+
+def test_a_cancelled_sync_stops_before_the_next_subject_and_skips_the_mempool_pass(
+    conn: sqlite3.Connection,
+) -> None:
+    node = Mempool(500)
+
+    def cancelled() -> bool:
+        return cc.coverage(conn, "s") is not None  # cancelled once the first subject is done
+
+    result = chain_sync.sync(node, conn, [SUBJECT, Scan("t", ("addr(bcrt1qother)",))], cancelled)
+    assert not result.complete and result.waiting == ("t",) and result.pending is None
+    assert cc.coverage(conn, "t") is None
+    assert not [c for c in node.calls if c[0] == "getdescriptoractivity" and c[1][0] == []]
+
+
+def test_our_own_abort_is_never_followed_by_another_scan_t212(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    starts = []
+    flag = {"cancelled": False}
+
+    def aborted(*_args: Any) -> Any:
+        starts.append(1)
+        flag["cancelled"] = True  # shutdown set the cancel and sent the abort while we scanned
+        raise scans.ScanAbortedError("aborted")
+
+    monkeypatch.setattr(scans, "extend", aborted)
+    result = chain_sync.sync(
+        Node(500), conn, [SUBJECT, Scan("t", ("addr(bcrt1qother)",))], lambda: flag["cancelled"]
+    )
+    assert starts == [1] and not result.complete and result.waiting == ("s", "t")

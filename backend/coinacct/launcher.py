@@ -442,6 +442,8 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
     servers: list[Any] = []
     dbs: list[Any] = []  # the user DB, once open
     chain_jobs: list[Any] = []  # the job worker and tip poller, once started (§3)
+    jobs_lock = threading.Lock()  # a start after the stop step has run starts nothing
+    jobs_stopping: list[bool] = []
     db_path = data.root / DB_NAME
     server_running = threading.Event()  # set just before uvicorn runs
     server_stopped = threading.Event()  # set once it has returned
@@ -481,8 +483,15 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
 
     def stop_chain_jobs() -> None:
         # §3 step 2: cancel the current job; abort the node's scan if ours may be running.
-        for jobs in chain_jobs:
-            jobs.stop()
+        with jobs_lock:
+            jobs_stopping.append(True)
+            for jobs in chain_jobs:
+                jobs.stop()
+
+    def start_chain_jobs(start: Callable[[], Any]) -> None:
+        with jobs_lock:
+            if not jobs_stopping:
+                chain_jobs.append(start())
 
     def end_a_stalled_start_up() -> None:
         # Shutdown was asked for before uvicorn ran, and start-up hasn't taken over the report: the
@@ -582,8 +591,6 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
                     shutdown=shutdown,
                     bundle=bundle,
                 )
-                if rt.chain_jobs is not None:
-                    chain_jobs.append(rt.chain_jobs)
             finally:
                 with phase_lock:
                     ended = phase[0] == "ended"
@@ -595,6 +602,8 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
                 raise refuse(lost)
             if shutdown.requested:
                 raise refuse(shutdown.reason or "shutdown was requested")
+            if rt.start_chain_jobs is not None:  # background chain work only after every check (§8.1)
+                start_chain_jobs(rt.start_chain_jobs)
             # Only now, after the node checks and the storage policy (§8.1). From here a browser that
             # is quicker than uvicorn's start waits in the backlog instead of being refused.
             sock.listen(LISTEN_BACKLOG)

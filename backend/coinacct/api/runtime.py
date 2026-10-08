@@ -8,6 +8,7 @@ network or the filesystem: the listening socket, uvicorn, the bootstrap file and
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -36,8 +37,9 @@ class Runtime:
     sessions: Sessions
     shutdown: Shutdown
     status: NodeStatus
-    # The job worker and tip poller (§3), online only; the launcher stops them at shutdown.
-    chain_jobs: Any = None
+    # Starts the job worker and tip poller (§3), online only. The launcher calls it after its last
+    # start-up checks, and stops what it returns at shutdown.
+    start_chain_jobs: Callable[[], Any] | None = None
 
 
 def build(  # noqa: PLR0913 - each value comes from a different part of start-up
@@ -81,7 +83,7 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
         on_quit=lambda: shutdown.request(QUIT_REASON),
         bundle=bundle,
     )
-    chain_jobs = None
+    starter = None
     if status.online:
-        chain_jobs = start_jobs(rpc.host, rpc.port, rpc.user, rpc.password, db=db)
-    return Runtime(app=app, sessions=sessions, shutdown=shutdown, status=status, chain_jobs=chain_jobs)
+        starter = functools.partial(start_jobs, rpc.host, rpc.port, rpc.user, rpc.password, db=db)
+    return Runtime(app=app, sessions=sessions, shutdown=shutdown, status=status, start_chain_jobs=starter)

@@ -795,7 +795,7 @@ def test_the_chain_jobs_start_online_and_stop_after_the_server_before_the_db_clo
     assert h.serve(prepared) == 0
     assert h.events.index("check") < h.events.index("chain jobs started")
     assert h.events.index("server stopped") < h.events.index("chain jobs stopped")
-    assert h.runtime is not None and h.runtime.chain_jobs is not None
+    assert h.runtime is not None and h.runtime.start_chain_jobs is not None
 
 
 def test_a_chain_job_that_never_stops_keeps_the_db_open(
@@ -819,6 +819,21 @@ def test_a_chain_job_that_never_stops_keeps_the_db_open(
     db = h.db
     assert db is not None
     db.execute("SELECT 1")  # not closed under the job
+
+
+def test_no_chain_jobs_start_when_shutdown_is_asked_for_during_start_up(prepared: Prepared) -> None:
+    h = Harness()
+    real = h.build
+
+    def build_then_quit(**kwargs: Any) -> runtime.Runtime:
+        rt = real(**kwargs)
+        rt.shutdown.request("SIGTERM during start-up")
+        return rt
+
+    h.build = build_then_quit  # type: ignore[method-assign]
+    with pytest.raises(LaunchError):
+        h.serve(prepared)
+    assert "chain jobs started" not in h.events  # §8.1: background chain work only after every check
 
 
 def test_offline_mode_starts_no_chain_jobs(prepared: Prepared) -> None:

@@ -13,12 +13,14 @@ from typing import Any
 
 import pytest
 
+from coinacct import launcher
 from coinacct.chain import node_checks
 from coinacct.chain.scans import Scan
 from coinacct.domain.secret import Secret
 from coinacct.rpc import RpcTransportError
 from coinacct.services import chain_sync, jobs
 from coinacct.services.jobs import JobWorker, State, TipPoller
+from coinacct.services.lifecycle import DEADLINE_SECONDS
 from coinacct.storage import chain_cache as cc
 from coinacct.storage.chain_state import Tip, last_tip, record_chain
 from coinacct.storage.datadir import open_data_dir
@@ -265,15 +267,122 @@ def test_start_chain_jobs_polls_at_once_and_stops_cleanly(
     node = Node(500)
     seen: list[tuple[str, int, str]] = []
 
-    def connect(host: str, port: int, user: str, password: Secret) -> Node:
+    timeouts: list[float | None] = []
+
+    def connect(host: str, port: int, user: str, password: Secret, *, timeout: float | None = None) -> Node:
         seen.append((host, port, user))
+        timeouts.append(timeout)
         return node
 
     monkeypatch.setattr(node_checks, "connect", connect)
     running = jobs.start_chain_jobs("127.0.0.1", 18443, "ro-client", Secret("pw"), db=conn)
-    assert seen == [("127.0.0.1", 18443, "ro-client")]
+    assert seen == [("127.0.0.1", 18443, "ro-client")] * 2
+    assert timeouts == [None, jobs.ABORT_SECONDS]  # the shutdown abort's client has a short timeout
     wait_for(lambda: last_tip(conn) == Tip(bh(500), 500))  # the first poll caught up
     assert not running.stopped  # the launcher keeps the DB open until this is true
     running.stop()
     assert running.stopped
     assert not running.poller._thread.is_alive() and not running.worker._thread.is_alive()
+
+
+class BlockingScan(Node):
+    """`scanblocks start` blocks until `scanblocks abort`, which makes it return incomplete."""
+
+    def __init__(self, tip: int) -> None:
+        super().__init__(tip, {10: 1})
+        self.aborted = threading.Event()
+        self.started = threading.Event()
+        self.starts = 0
+
+    def call(self, method: str, params: Any = ()) -> Any:
+        if method == "scanblocks" and params and params[0] == "start":
+            self.calls.append((method, params))
+            self.starts += 1
+            self.started.set()
+            self.running = True
+            self.aborted.wait(5)
+            self.running = False
+            return {
+                "from_height": params[2],
+                "to_height": params[3],
+                "relevant_blocks": [],
+                "completed": False,
+            }
+        if method == "scanblocks" and params == ["abort"]:
+            self.calls.append((method, params))
+            was = self.running
+            self.aborted.set()
+            return was
+        return super().call(method, params)
+
+
+def test_shutdown_aborts_a_running_scan_and_no_scan_starts_after_it_t212(conn: sqlite3.Connection) -> None:
+    node = BlockingScan(500)
+    w = JobWorker()
+    w.start()
+    poller = TipPoller(node, conn, w, lambda: [SUBJECT, Scan("t", ("addr(bcrt1qother)",))], interval=3600)
+    job_id = poller.poll()
+    assert job_id is not None and node.started.wait(5)
+    t0 = time.monotonic()
+    jobs.stop_chain_jobs(node, conn, poller, w)
+    assert time.monotonic() - t0 < jobs.SHUTDOWN_STEP_SECONDS + 1
+    assert ("scanblocks", ["abort"]) in node.calls
+    wait_for(lambda: w.stopped)
+    assert node.starts == 1  # the aborted scan wasn't retried, and "t" never started (T-212)
+    assert w.job(job_id).state is State.CANCELLED  # type: ignore[union-attr]
+
+
+def test_the_shutdown_step_fits_well_inside_the_shutdown_deadline_t405() -> None:
+    assert jobs.SHUTDOWN_STEP_SECONDS + launcher_server_stop() < DEADLINE_SECONDS
+
+
+def launcher_server_stop() -> float:
+    return launcher.SERVER_STOP_SECONDS
+
+
+def test_a_sync_that_raises_is_queued_again_at_the_same_tip(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    node = Node(500)
+    w = JobWorker()
+    w.start()
+    poller = TipPoller(node, conn, w, lambda: [], interval=3600)
+    real = chain_sync.sync
+    fails = [True]
+
+    def flaky(*args: Any) -> Any:
+        if fails.pop() if fails else False:
+            raise RpcTransportError("getbestblockhash: connection reset")
+        return real(*args)
+
+    monkeypatch.setattr(chain_sync, "sync", flaky)
+    first = poller.poll()
+    assert first is not None
+    wait_for(lambda: w.job(first).state is State.FAILED)  # type: ignore[union-attr]
+    again = poller.poll()  # the tip hasn't moved, but the sync failed
+    assert again is not None
+    wait_for(lambda: w.job(again).state is State.DONE)  # type: ignore[union-attr]
+    assert last_tip(conn) == Tip(bh(500), 500)
+    w.stop()
+
+
+def test_a_subject_over_its_budget_alone_waits_for_the_next_tip_t205(conn: sqlite3.Connection) -> None:
+    node = Node(500, {h: h for h in range(1, 400)})  # far more candidate blocks than the budget
+    w = JobWorker()
+    w.start()
+    poller = TipPoller(node, conn, w, lambda: [Scan("busy", ("addr(bcrt1qbusy)",), budget=10)], interval=3600)
+    first = poller.poll()
+    assert first is not None
+    wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
+    result = w.job(first).result  # type: ignore[union-attr]
+    assert isinstance(result, chain_sync.SyncResult) and result.over_budget == ("busy",)
+    assert poller.poll() is None  # no rescan of the refused range every 30 s
+    node.tip = 501
+    assert poller.poll() is not None  # the next tip tries again
+    w.stop()
+
+
+def test_only_a_bounded_number_of_finished_jobs_is_kept(worker: JobWorker) -> None:
+    ids = [worker.submit("j", lambda _c: "x" * 10) for _ in range(jobs.KEEP_FINISHED + 20)]
+    wait_for(lambda: worker.job(ids[-1]) is not None and worker.job(ids[-1]).state is State.DONE)  # type: ignore[union-attr]
+    assert worker.job(ids[0]) is None and worker.job(ids[-1]) is not None

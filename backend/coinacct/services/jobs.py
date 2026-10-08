@@ -7,9 +7,11 @@
 - **The tip poller** calls `getbestblockhash` every `POLL_SECONDS` and queues one tip-change job
   (`chain_sync.sync`) when the tip moves, unless one is already queued. It uses no ZMQ, which would
   be a new flow (§5).
-- **At shutdown** (§3 step 2): the poller stops, the queue is cancelled, and if the app's in-flight
-  scan marker is set, `scanblocks abort` is sent, so the node isn't left scanning for a client
-  that's gone. Both threads stop within a bounded time: the steps never wait on the node.
+- **At shutdown** (§3 step 2): the poller stops, every job is cancelled (a running sync stops at its
+  next check and never starts a scan after this), and if the app's in-flight scan marker is set,
+  `scanblocks abort` is sent on a client with a short timeout, so the node isn't left scanning for
+  a client that's gone. Then the worker gets a short join. The whole step stays within
+  `SHUTDOWN_STEP_SECONDS`, well inside the shutdown deadline (T-405).
 
 A failed job is logged by its exception's class name only: node replies and errors can name the
 user's scripts (T-201, T-403).
@@ -37,7 +39,13 @@ from coinacct.storage.db import Connection
 log = logging.getLogger(__name__)
 
 POLL_SECONDS: Final = 30.0
+KEEP_FINISHED: Final = 50  # finished jobs kept for `job()`; older ones (and their results) go
 STOP_SECONDS: Final = 2.0
+# The shutdown step's waits: the poller's join, the abort call, the worker's join (T-405).
+POLLER_JOIN_SECONDS: Final = 0.5
+ABORT_SECONDS: Final = 1.0
+WORKER_JOIN_SECONDS: Final = 1.0
+SHUTDOWN_STEP_SECONDS: Final = POLLER_JOIN_SECONDS + ABORT_SECONDS + WORKER_JOIN_SECONDS
 
 
 class State(enum.Enum):
@@ -116,6 +124,11 @@ class JobWorker:
     def stop(self, timeout: float = STOP_SECONDS) -> None:
         """Cancel everything and stop, waiting at most `timeout` for a running job (a daemon
         thread: one stuck on the node doesn't hold up the process)."""
+        self.request_stop()
+        self.join(timeout)
+
+    def request_stop(self) -> None:
+        """Cancel every job and refuse new ones, without waiting."""
         with self._lock:
             self._stopping.set()
             for job in self._jobs.values():
@@ -123,6 +136,8 @@ class JobWorker:
                 if job.state is State.QUEUED:
                     job.state = State.CANCELLED
         self._queue.put(None)
+
+    def join(self, timeout: float) -> None:
         if self._thread.is_alive() and self._thread is not threading.current_thread():
             self._thread.join(timeout)
 
@@ -149,6 +164,12 @@ class JobWorker:
             finally:
                 with self._lock:
                     self._current = None
+                    self._forget_old()
+
+    def _forget_old(self) -> None:
+        done = [i for i, j in self._jobs.items() if j.state not in (State.QUEUED, State.RUNNING)]
+        for i in done[: max(0, len(done) - KEEP_FINISHED)]:
+            del self._jobs[i]
 
 
 class TipPoller:
@@ -191,10 +212,18 @@ class TipPoller:
 
     def _sync(self, cancelled: threading.Event) -> chain_sync.SyncResult | None:
         if cancelled.is_set():
+            self._last = None
             return None
-        result = chain_sync.sync(self._rpc, self._conn, self._subjects())
-        if not result.complete:
-            self._last = None  # unfinished: the next poll queues the sync again
+        try:
+            result = chain_sync.sync(self._rpc, self._conn, self._subjects(), cancelled.is_set)
+        except BaseException:
+            self._last = None  # failed: the next poll queues the sync again, tip moved or not
+            raise
+        if not result.complete and (result.waiting or not result.over_budget):
+            # Unfinished: the next poll queues the sync again. A subject over its budget alone
+            # waits for the next tip instead: rescanning its refused range every poll would hold
+            # Core's one scan slot (T-205, T-212) until the user decides (M2).
+            self._last = None
         return result
 
     def _loop(self) -> None:
@@ -207,29 +236,35 @@ class TipPoller:
                 return
 
 
-def stop_chain_jobs(rpc: ChainRpc, conn: Connection, poller: TipPoller, worker: JobWorker) -> None:
-    """The shutdown step (§3 step 2): stop polling, cancel the jobs, and abort the node's scan if
-    the app's in-flight marker says one of ours may be running (T-212)."""
-    poller.stop()
-    worker.stop()
+def stop_chain_jobs(abort_rpc: ChainRpc, conn: Connection, poller: TipPoller, worker: JobWorker) -> None:
+    """The shutdown step (§3 step 2): stop polling, cancel the jobs, abort the node's scan if the
+    app's in-flight marker says one of ours may be running (T-212), then a short join. `abort_rpc`
+    is a client with a short timeout (`ABORT_SECONDS`): a hung node can't hold up shutdown.
+
+    The marker is read on the shared connection while a cancelled job may still be running: one
+    SELECT, serialised by SQLite, which also sees a marker that job has just set. Without a marker
+    nothing is aborted, since the running scan may be another client's (§8.1)."""
+    poller.stop(POLLER_JOIN_SECONDS)
+    worker.request_stop()
     if scan_marker(conn) is not None:
         try:
-            rpc.call("scanblocks", ["abort"])
+            abort_rpc.call("scanblocks", ["abort"])
         except Exception as e:  # the node may be gone; the marker makes the next start recover
             log.warning("couldn't abort the node's scan at shutdown: %s", type(e).__name__)
+    worker.join(WORKER_JOIN_SECONDS)
 
 
 @dataclass
 class ChainJobs:
     """The running worker and poller, for the shutdown step."""
 
-    rpc: ChainRpc
+    abort_rpc: ChainRpc
     conn: Connection
     worker: JobWorker
     poller: TipPoller
 
     def stop(self) -> None:
-        stop_chain_jobs(self.rpc, self.conn, self.poller, self.worker)
+        stop_chain_jobs(self.abort_rpc, self.conn, self.poller, self.worker)
 
     @property
     def stopped(self) -> bool:
@@ -253,8 +288,9 @@ def start_chain_jobs(  # noqa: PLR0913 - the endpoint, its credentials, the DB a
 ) -> ChainJobs:
     """Start the job worker and the tip poller against the configured node (online mode only)."""
     rpc = node_checks.connect(host, port, user, password)
+    abort_rpc = node_checks.connect(host, port, user, password, timeout=ABORT_SECONDS)
     worker = JobWorker()
     poller = TipPoller(rpc, db, worker, subjects)
     worker.start()
     poller.start()
-    return ChainJobs(rpc, db, worker, poller)
+    return ChainJobs(abort_rpc, db, worker, poller)
