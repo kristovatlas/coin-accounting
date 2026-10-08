@@ -42,6 +42,7 @@ def call(  # noqa: PLR0913 - mirrors the parts of an HTTP request
         hdrs.append((b"content-type", b"application/json"))
     hdrs += [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
     hdrs += raw_headers or []
+    path, _, query = path.partition("?")  # as a server splits the request target
     scope = {
         "type": "http",
         "asgi": {"version": "3.0"},
@@ -50,7 +51,7 @@ def call(  # noqa: PLR0913 - mirrors the parts of an HTTP request
         "scheme": "http",
         "path": path,
         "raw_path": path.encode(),
-        "query_string": b"",
+        "query_string": query.encode(),
         "root_path": "",
         "headers": hdrs,
         "client": ("127.0.0.1", 40000),

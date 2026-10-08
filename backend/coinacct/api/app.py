@@ -18,6 +18,11 @@ Routes:
   - `POST /api/imports/addresses` and `/api/imports/descriptor`: import it (the UI sends this only
     after the user confirmed the preview of the same upload).
 
+- History (bearer; PLAN §3), through `services.history.History`, from the chain cache only:
+  - `GET /api/addresses[?tax_account_id=N]`: each address with its balance, UTXO count and activity.
+  - `GET /api/addresses/<script>/events`: one address's receives and spends (404 if not in the DB).
+  - `GET /api/utxos[?tax_account_id=N]`: the unspent outputs, oldest first.
+
   A refusal is a 422 with the service's fixed message, which never repeats the upload (T-403,
   T-703); a busy DB is a 503; a descriptor while offline is a 409 (T-203). Upload size is bounded by
   the security layer's body limit, before any of this runs.
@@ -32,7 +37,7 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -42,6 +47,7 @@ from coinacct.api.security import MAX_BODY_BYTES, SecurityMiddleware
 from coinacct.api.session import ClaimError, Sessions
 from coinacct.domain.keys import PrivateKeyError
 from coinacct.services import imports as import_service
+from coinacct.services.history import History
 from coinacct.services.imports import Busy, ImportRefused, Imports, OfflineError, Owner
 from coinacct.services.startup import NodeStatus
 
@@ -139,6 +145,7 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
     on_quit: Callable[[], None],
     bundle: Mapping[str, bytes] | None = None,
     imports: Imports | None = None,
+    history: History | None = None,
 ) -> SecurityMiddleware:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -218,7 +225,80 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
 
     if imports is not None:
         _import_routes(app, imports, authenticated)
+    if history is not None:
+        _history_routes(app, history, authenticated)
     return SecurityMiddleware(app, port=port)
+
+
+SCRIPT = r"^(?:[0-9a-f]{2}){1,10000}$"  # a script, as lowercase hex
+
+
+def _tip(tip: Any) -> dict[str, Any] | None:
+    return None if tip is None else {"blockhash": tip.blockhash, "height": tip.height}
+
+
+def _history_routes(app: FastAPI, history: History, authenticated: list[Any]) -> None:
+    @app.get("/api/addresses", dependencies=authenticated)
+    def addresses(tax_account_id: Annotated[int | None, Query()] = None) -> dict[str, Any]:
+        found = history.addresses(tax_account_id)
+        return {
+            "as_of": _tip(found.as_of),
+            "addresses": [
+                {
+                    "script": a.script_hex,
+                    "address": a.address,
+                    "entity_id": a.entity_id,
+                    "tax_account_id": a.tax_account_id,
+                    "label": a.label,
+                    "balance": a.balance,
+                    "utxos": a.utxos,
+                    "received": a.received,
+                    "transactions": a.transactions,
+                    "last_height": a.last_height,
+                }
+                for a in found.addresses
+            ],
+        }
+
+    @app.get("/api/addresses/{script}/events", dependencies=authenticated)
+    def events(script: Annotated[str, Path(pattern=SCRIPT)]) -> Response:
+        found = history.events(script)
+        if found is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(
+            {
+                "events": [
+                    {
+                        "kind": e.kind,
+                        "txid": e.txid,
+                        "n": e.n,
+                        "sats": e.sats,
+                        "height": e.height,
+                        "blockhash": e.blockhash,
+                        "prevout": None
+                        if e.prevout is None
+                        else {"txid": e.prevout.txid, "vout": e.prevout.vout},
+                    }
+                    for e in found
+                ]
+            }
+        )
+
+    @app.get("/api/utxos", dependencies=authenticated)
+    def utxos(tax_account_id: Annotated[int | None, Query()] = None) -> dict[str, Any]:
+        return {
+            "utxos": [
+                {
+                    "txid": u.txid,
+                    "vout": u.vout,
+                    "sats": u.sats,
+                    "script": u.script_hex,
+                    "address": u.address,
+                    "height": u.height,
+                }
+                for u in history.utxos(tax_account_id)
+            ]
+        }
 
 
 def _import_routes(app: FastAPI, imports: Imports, authenticated: list[Any]) -> None:

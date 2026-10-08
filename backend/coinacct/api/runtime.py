@@ -16,7 +16,7 @@ from typing import Any
 from coinacct.api.app import create_app
 from coinacct.api.security import ASGIApp
 from coinacct.api.session import BOOTSTRAP_TTL_SECONDS, Sessions
-from coinacct.services import discovery, imports, jobs, startup
+from coinacct.services import discovery, history, imports, jobs, startup
 from coinacct.services.lifecycle import Shutdown
 from coinacct.services.startup import NodeStatus, StorageRefused
 
@@ -80,10 +80,12 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
     # the bootstrap file is written and the browser opened.
     sessions = Sessions(bootstrap_token, ttl=ttl, on_claimed=on_claimed)
     import_service = None
+    history_service = None
     if open_reader is not None:
         import_service = imports.service(
             db, open_reader, rpc.host, rpc.port, rpc.user, rpc.password, online=status.online
         )
+        history_service = history.History(open_reader)
     app = create_app(
         port=port,
         sessions=sessions,
@@ -91,6 +93,7 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
         on_quit=lambda: shutdown.request(QUIT_REASON),
         bundle=bundle,
         imports=import_service,
+        history=history_service,
     )
     starter = None
     if status.online:
