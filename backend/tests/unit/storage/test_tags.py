@@ -330,3 +330,28 @@ def test_a_db_from_schema_7_upgrades_and_keeps_appending_t408(tmp_path: Path) ->
             )
     finally:
         conn.close()
+
+
+def test_a_reimport_that_adds_a_wallet_client_is_logged_once_t408(
+    conn: sqlite3.Connection, wallet: int
+) -> None:
+    phone = ac.add_client(conn, "Phone", "mobile")
+
+    def reimport(clients: list[int]) -> None:
+        ac.add_addresses(
+            conn,
+            [(SCRIPT, None)],
+            entity_id=ME,
+            tax_account_id=wallet,
+            source="import",
+            client_ids=clients,
+            at=AT,
+        )
+
+    reimport([])  # new: an import, not an edit
+    assert tags.changes(conn) == []
+    reimport([phone])  # a known address gains a client: an edit
+    reimport([phone])  # nothing new
+    [change] = tags.changes(conn, ("address_tag", SCRIPT))
+    assert change.at == AT and change.before is not None
+    assert (change.before["client_ids"], change.after["client_ids"]) == ([], [phone])
