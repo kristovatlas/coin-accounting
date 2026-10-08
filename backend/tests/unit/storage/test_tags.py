@@ -290,7 +290,7 @@ def test_a_db_with_an_id_below_1_from_before_m0008_is_refused_at_the_upgrade_t40
     d = tmp_path / "old"
     d.mkdir(mode=0o700)
     data = open_data_dir(str(d))
-    old = open_db(data, steps=STEPS[:7])  # schema 7: m0007's guard, no m0008 yet
+    old = open_db(data, steps=list(STEPS[:7]))  # schema 7: m0007's guard, no m0008 yet
     try:
         old.execute(  # what only an edit outside the app could write
             "INSERT INTO change_log (id, at, kind, subject, after) VALUES (?, ?, 'tx_flag', ?, '{}')",
@@ -300,7 +300,7 @@ def test_a_db_with_an_id_below_1_from_before_m0008_is_refused_at_the_upgrade_t40
         old.close()
     with pytest.raises(DbError, match="SQLITE_CONSTRAINT_CHECK"):  # the step's CHECK refused it
         open_db(data)
-    old = open_db(data, steps=STEPS[:8])  # the refused step left the DB at version 8
+    old = open_db(data, steps=list(STEPS[:8]))  # the refused step left the DB at version 8
     try:
         assert old.execute("PRAGMA user_version").fetchone() == (8,)
         assert old.execute("SELECT id FROM change_log").fetchall() == [(bad_id,)]
@@ -312,7 +312,7 @@ def test_a_db_from_schema_7_upgrades_and_keeps_appending_t408(tmp_path: Path) ->
     d = tmp_path / "old"
     d.mkdir(mode=0o700)
     data = open_data_dir(str(d))
-    old = open_db(data, steps=STEPS[:7])
+    old = open_db(data, steps=list(STEPS[:7]))
     try:
         record_chain(old, "regtest")
         tags.set_mixing(old, TXID, True, at=AT)
