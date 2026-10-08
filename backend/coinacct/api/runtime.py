@@ -15,7 +15,7 @@ from typing import Any
 from coinacct.api.app import create_app
 from coinacct.api.security import ASGIApp
 from coinacct.api.session import BOOTSTRAP_TTL_SECONDS, Sessions
-from coinacct.services import startup
+from coinacct.services import jobs, startup
 from coinacct.services.lifecycle import Shutdown
 from coinacct.services.startup import NodeStatus, StorageRefused
 
@@ -36,6 +36,8 @@ class Runtime:
     sessions: Sessions
     shutdown: Shutdown
     status: NodeStatus
+    # The job worker and tip poller (§3), online only; the launcher stops them at shutdown.
+    chain_jobs: Any = None
 
 
 def build(  # noqa: PLR0913 - each value comes from a different part of start-up
@@ -48,6 +50,7 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
     allow_unencrypted: bool,
     on_claimed: Callable[[], None],
     check: Callable[..., NodeStatus] = startup.check_configured_node,
+    start_jobs: Callable[..., Any] = jobs.start_chain_jobs,
     ttl: float = BOOTSTRAP_TTL_SECONDS,
     shutdown: Shutdown | None = None,
     bundle: Mapping[str, bytes] | None = None,
@@ -78,4 +81,7 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
         on_quit=lambda: shutdown.request(QUIT_REASON),
         bundle=bundle,
     )
-    return Runtime(app=app, sessions=sessions, shutdown=shutdown, status=status)
+    chain_jobs = None
+    if status.online:
+        chain_jobs = start_jobs(rpc.host, rpc.port, rpc.user, rpc.password, db=db)
+    return Runtime(app=app, sessions=sessions, shutdown=shutdown, status=status, chain_jobs=chain_jobs)

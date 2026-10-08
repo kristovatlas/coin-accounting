@@ -372,7 +372,7 @@ def _block_hash(rpc: ChainRpc, height: int) -> str:
     except RpcCallError as e:
         if e.code == RPC_INVALID_PARAMETER and "out of range" in e.node_message:
             # The active chain got shorter (a reorg to a higher-work, shorter chain).
-            raise StaleScanError("the chain is shorter than the scan expected") from None
+            raise ChainMovedError("the chain is shorter than the scan expected") from None
         raise
     if not is_hash(blockhash):
         raise MalformedScanError("getblockhash didn't return a block hash")

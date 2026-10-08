@@ -11,8 +11,11 @@ T-207, T-210, T-212).
 - What a reorg removed is kept in the user DB's review queue (`chain_cache.pending_review`) until
   the events built on it are flagged, so a crash or a failed sync never loses it (T-207, T-506).
   Every `SyncResult` reports the whole queue.
-- Before the target becomes the last-seen tip, the mempool pass is rebuilt for every subject at that
-  tip (§8.4; `chain.mempool`); a pass that finds the tip moved leaves the catch-up unfinished.
+- Before the target becomes the last-seen tip, the mempool pass is rebuilt at that tip, one subject
+  at a time (§8.4; `chain.mempool`), so one busy script over the limit only hides its own unconfirmed
+  activity (T-205); `mempool_refused` names the subjects without a pass. The pass is display-only:
+  a refused or failed pass never holds up confirmed progress. Only a tip that moved during it leaves
+  the catch-up unfinished.
 
 The job runs on the one job worker (§3): Core runs one `scanblocks` at a time, so subjects are
 scanned one after another. A stale range is retried a few times (§8.2) before the subject waits for
@@ -34,13 +37,14 @@ from coinacct.chain.reorg import NodeSyncingError, TipChange, TipMovedError
 from coinacct.chain.scans import (
     ActivityBudgetError,
     ChainMovedError,
+    MalformedScanError,
     Scan,
     ScanAbortedError,
     ScanBusyError,
     ScanInFlightError,
     StaleScanError,
 )
-from coinacct.chain.txs import ChainRpc
+from coinacct.chain.txs import ChainRpc, NodeError
 from coinacct.storage.chain_cache import (
     StaleTipError,
     complete_scan_target,
@@ -49,7 +53,7 @@ from coinacct.storage.chain_cache import (
     reference_tip,
 )
 from coinacct.storage.chain_state import Tip
-from coinacct.storage.db import Connection
+from coinacct.storage.db import Connection, DbError
 
 log = logging.getLogger(__name__)
 
@@ -70,8 +74,10 @@ class SyncResult:
     waiting: tuple[str, ...] = ()
     over_budget: tuple[str, ...] = ()
     to_review: frozenset[str] = field(default_factory=frozenset)
-    # The rebuilt mempool pass at `target`, or None if it couldn't be rebuilt this time.
+    # The rebuilt mempool pass at `target` (None: the tip moved during it), and the subjects it
+    # couldn't cover (over the limit, or the node refused or garbled the pass).
     pending: tuple[PendingActivity, ...] | None = None
+    mempool_refused: tuple[str, ...] = ()
 
 
 def at_startup(rpc: ChainRpc, conn: Connection) -> str | None:
@@ -91,7 +97,14 @@ def at_startup(rpc: ChainRpc, conn: Connection) -> str | None:
     except (TipMovedError, StaleTipError):
         # The fork-point check didn't finish, and §8.1 says any failed node step means offline mode.
         return "the node's tip kept moving during the start-up catch-up"
-    except Exception as e:  # a node or DB problem here means offline mode, not a failed start
+    except (NodeError, MalformedScanError, reorg.MalformedHeaderError) as e:
+        return f"the chain catch-up at start-up failed ({type(e).__name__})"  # only the class (T-201)
+    except DbError as e:
+        # The message is the app's own and says what to do (e.g. a damaged cache, T-408).
+        log.error("the start-up catch-up stopped on the user DB: %s", e)
+        return f"the user DB stopped the start-up catch-up: {e}"
+    except Exception as e:  # a bug: offline mode, not a failed start, with its traceback in the log
+        log.exception("the start-up catch-up failed")
         return f"the chain catch-up at start-up failed ({type(e).__name__})"
     return None
 
@@ -103,39 +116,68 @@ def sync(rpc: ChainRpc, conn: Connection, subjects: Sequence[Scan]) -> SyncResul
     target = change.new if change is not None else reference_tip(conn)
     waiting: list[str] = []
     over_budget: list[str] = []
-    for subject in subjects:
-        if (
-            target is not None
-            and coverage(conn, subject.subject) is None
-            and subject.start_height > target.height
-        ):
-            continue  # its history starts above the tip: nothing to scan yet
+    for i, subject in enumerate(subjects):
+        if _nothing_to_scan(conn, subject, target):
+            continue
         outcome = _extend(rpc, conn, subject)
         if outcome == "over budget":
             over_budget.append(subject.subject)
         elif outcome != "done":
             waiting.append(subject.subject)
             if outcome == "chain moved":
-                waiting.extend(s.subject for s in subjects[subjects.index(subject) + 1 :])
+                waiting.extend(s.subject for s in subjects[i + 1 :] if not _nothing_to_scan(conn, s, target))
                 break
     complete = not waiting and not over_budget
-    pending = None
+    pending: tuple[PendingActivity, ...] | None = None
+    refused: list[str] = []
     if target is not None:
-        objects = [o for s in subjects for o in s.scanobjects]
-        try:
-            pending = tuple(mempool.pending_activity(rpc, objects, target)) if objects else ()
-        except StaleScanError:
-            complete = False  # the tip moved: the next sync catches up first
-        except ActivityBudgetError:
-            log.warning("the mempool pass is over its limit; unconfirmed activity isn't shown (T-205)")
+        pending, refused = _mempool_pass(rpc, subjects, target)
+        complete = complete and pending is not None
     if complete and change is not None:
         try:
             complete_scan_target(conn, change.new)
         except StaleTipError:
             complete = False  # another catch-up moved the target meanwhile: the next sync goes on
     return SyncResult(
-        change, target, complete, tuple(waiting), tuple(over_budget), pending_review(conn), pending
+        change,
+        target,
+        complete,
+        tuple(waiting),
+        tuple(over_budget),
+        pending_review(conn),
+        pending,
+        tuple(refused),
     )
+
+
+def _nothing_to_scan(conn: Connection, subject: Scan, target: Tip | None) -> bool:
+    """A new subject whose history starts above the tip: nothing to scan yet."""
+    return (
+        target is not None
+        and coverage(conn, subject.subject) is None
+        and subject.start_height > target.height
+    )
+
+
+def _mempool_pass(
+    rpc: ChainRpc, subjects: Sequence[Scan], target: Tip
+) -> tuple[tuple[PendingActivity, ...] | None, list[str]]:
+    """The mempool pass at `target`, one subject at a time. None if the tip moved during it."""
+    pending: list[PendingActivity] = []
+    refused: list[str] = []
+    for i, subject in enumerate(subjects):
+        try:
+            pending.extend(mempool.pending_activity(rpc, subject.scanobjects, target))
+        except StaleScanError:
+            return None, refused  # the tip moved: the next sync catches up first
+        except ActivityBudgetError:
+            refused.append(subject.subject)  # a busy script: only its own pass is hidden (T-205)
+        except (MalformedScanError, NodeError) as e:
+            # Display-only: never hold up confirmed progress. Only the class: node text can name scripts.
+            log.warning("the mempool pass failed (%s); unconfirmed activity isn't shown", type(e).__name__)
+            refused.extend(s.subject for s in subjects[i:])
+            break
+    return tuple(pending), refused
 
 
 def _extend(rpc: ChainRpc, conn: Connection, subject: Scan) -> str:

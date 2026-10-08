@@ -228,7 +228,11 @@ def test_the_deadline_and_the_steps_start_before_anything_is_logged_t405(
     ran: list[str] = []
     armed_when_logging: list[bool] = []
 
+    reason = "SIGTERM (this test's)"
+
     def stuck_critical(*args: object, **kwargs: object) -> None:
+        if reason not in args:
+            return  # another test's coordinator, logging late from its own thread
         armed_when_logging.append(bool(timers.made) and timers.made[0].started)
         logged.set()
         release.wait(WAIT)  # a log write stuck on the volume
@@ -236,7 +240,7 @@ def test_the_deadline_and_the_steps_start_before_anything_is_logged_t405(
     monkeypatch.setattr(f"{LOGGER}.log.critical", stuck_critical)
     shutdown.add_step("stop server", lambda: ran.append("stop server"))
     try:
-        shutdown.request("SIGTERM")
+        shutdown.request(reason)
         assert logged.wait(WAIT)
         assert shutdown.wait(WAIT)  # the steps ran while the log write was stuck
         assert armed_when_logging == [True]

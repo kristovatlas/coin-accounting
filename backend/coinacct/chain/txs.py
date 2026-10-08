@@ -24,7 +24,7 @@ from decimal import Decimal
 from typing import Any, Final, Protocol, TypeIs
 
 from coinacct.domain.chain import MAX_SATS, Outpoint, Tx, TxIn, TxOut, btc_to_sats, is_hash, is_hex
-from coinacct.rpc import RpcCallError
+from coinacct.rpc import RpcCallError, RpcError
 
 # Core's RPC_INVALID_ADDRESS_OR_KEY, returned when getrawtransaction doesn't know the txid.
 RPC_NOT_FOUND: Final = -5
@@ -38,6 +38,10 @@ class ChainRpc(Protocol):
     """The part of `coinacct.rpc.RpcClient` this module uses."""
 
     def call(self, method: str, params: Any = ()) -> Any: ...
+
+
+# Any error from the node or the RPC client, for the services that can't import `rpc` (§2).
+NodeError = RpcError
 
 
 class MalformedTxError(ValueError):
