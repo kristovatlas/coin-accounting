@@ -10,8 +10,9 @@ end, the window grows:
 
 Only confirmed use grows a window. Anyone who knows the xpub can pay its addresses: an unconfirmed
 transaction costs nothing to broadcast and replace, so mempool use would let a third party grow the
-window, and force a full rescan, at will (T-205, T-207). Confirmed use costs them a fee per step, and
-`AUTO_RANGE_END` bounds the steps: beyond it the window is reported as full for the user to decide
+window, and force a full rescan, at will (T-205, T-207). Confirmed use costs them a fee (though one
+transaction paying successive window edges can drive several steps, #202), and `AUTO_RANGE_END`
+bounds the steps: beyond it the window is reported as full for the user to decide
 (the schema allows up to 100,000). The cap is provisional until the M1 perf check sizes it (PLAN §1).
 
 Each wider window is a new scan subject, scanned from the descriptor's start over the whole window

@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Version | 0.2.6 (status: see ADR 0014, ADR 0029, ADR 0034, ADR 0035) |
+| Version | 0.2.7 (status: see ADR 0014, ADR 0029, ADR 0034, ADR 0035, ADR 0036) |
 | Last updated | 2026-10-08 |
 | Scope | v1: Bitcoin (Bitcoin Core), single user, Linux + macOS |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) (IDs such as TB1, T-203, F2 refer to it) · [`ENGINEERING.md`](ENGINEERING.md) |
@@ -38,7 +38,7 @@ flowchart LR
       DOXX["doxx/<br/>pure rule engine"]
       TAX["tax/<br/>pure lot engine · rules per tax year ·<br/>report builders"]
       DOM["domain/<br/>pure types + helpers"]
-      CHAIN["chain/<br/>node checks · scan protocol ·<br/>spenders · mempool · cache · reorg"]
+      CHAIN["chain/<br/>node checks · descriptors · scan protocol ·<br/>spenders · mempool · cache · reorg"]
       RPC["rpc.py<br/>method allowlist · loopback only"]
       PRC["prices/<br/>bulk fetch · CSV parse · validation"]
       STORE["storage/<br/>volume check · DB · config file ·<br/>exports · watchdog"]
@@ -86,7 +86,7 @@ flowchart LR
 | **`doxx/`** | Pure doxx rule engine: graph and tag values in, doxx tags out | Do I/O; read the clock |
 | **`tax/`** | Pure, deterministic lot engine; rule sets per tax year; report builders that return report **values** (rows) | Do I/O; use floats; read the clock (dates are inputs) |
 | **`domain/`** | Pure shared types (Sats, Outpoint, ScriptHash, Descriptor, Event, Lot, errors) and helpers (address and script parsing, private-key detection for T-703) | Do I/O; import any other project module |
-| **`chain/`** | Node requirement checks, including the canary (through `rpc.py`); the scan protocol; spender lookups; the mempool pass; the chain cache; coverage and snapshots; fork-point reorg handling (PLAN §1). Returns invalidation sets to `services/` | Call RPC methods outside the allowlist; import `services/` |
+| **`chain/`** | Node requirement checks, including the canary (through `rpc.py`); descriptor normalisation and derivation (`getdescriptorinfo`, `deriveaddresses`); the scan protocol; spender lookups; the mempool pass; the chain cache; coverage and snapshots; fork-point reorg handling (PLAN §1). Returns invalidation sets to `services/` | Call RPC methods outside the allowlist; import `services/` |
 | **`rpc.py`** | The only JSON-RPC client: loopback-only endpoint check, client-side method allowlist, counter request ids, concurrency cap | Accept a non-loopback endpoint; retry non-idempotent calls blindly |
 | **`prices/`** | The only internet-facing code. Fetches full price/FX histories on a manual trigger, optionally via a local SOCKS5 proxy; parses and validates downloaded files and uploaded CSVs | Build requests from user records (T-301) |
 | **`storage/`** | All user-data filesystem access: DB and migrations, `config.toml` reading, export writing (type-aware CSV), log file handler, dismount watchdog. Every path must resolve under the verified data directory | Write outside the data directory (§6) |
@@ -100,14 +100,16 @@ backend/coinacct/
   config.py        # pure: parses config text into values (no file access)
   domain/          # pure types and helpers
   api/             # FastAPI routers + security middleware
-  services/        # orchestration, job worker, tip poller
+  services/        # orchestration, job worker, tip poller; imports.py (import, scan subjects),
+                   # discovery.py (descriptor window growth), history.py (history views)
   doxx/            # pure doxx rules
   tax/             # engine.py, rules/<year>.py, reports.py (pure)
-  chain/           # node_checks.py, txs.py, scans.py, spenders.py, mempool.py, reorg.py
+  chain/           # node_checks.py, descriptors.py, txs.py, scans.py, spenders.py, mempool.py, reorg.py
   rpc.py
   prices/          # fetch.py, bitstamp.py, fx.py, csv_import.py
-  storage/         # volume.py (VeraCrypt detection; macOS via diskutil), db.py, models.py,
-                   # migrations/, chain_cache.py, chain_state.py (the chain cache's tables),
+  storage/         # volume.py (VeraCrypt detection; macOS via diskutil), datadir.py, db.py,
+                   # migrations/, accounts.py (entities, tax accounts, clients, addresses, descriptors),
+                   # chain_cache.py, chain_state.py (the chain cache's tables),
                    # config_file.py, exports.py, logfile.py, watchdog.py
 backend/tests/
   unit/<module>/   # e.g. unit/tax/, unit/doxx/, unit/chain/
@@ -160,11 +162,13 @@ flowchart TD
   | Thread | Job |
   |---|---|
   | Event loop (uvicorn) | Serves the API. Long work is handed to the job worker, never run in a request |
+  | **Request workers** (the framework's thread pool) | Run the synchronous route handlers: DB reads and short writes, and the node calls an import needs to answer (a descriptor's `getdescriptorinfo` and `deriveaddresses`, at most 1,000 indexes, never `scanblocks`), through the API's own node client. Each call has a 120 s per-operation timeout, and the import client runs at most 4 calls at once; a stalled or trickling node can hold a request longer (ADR 0036) |
   | **Job worker** (1 thread) | Runs queued jobs one at a time: scan ranges, activity batches, price refreshes, report generation. Sequential, because Core allows one `scanblocks` at a time. Jobs have ids, progress and cancel |
-  | **Tip poller** | Calls `getbestblockhash` every 30 s. A change queues a tip-change job (§8.4). No ZMQ, because that would be a new flow |
+  | **Tip poller** | Calls `getbestblockhash` every 30 s. A change queues a tip-change job (§8.4). An import, or a descriptor window that grew (§8.2), requests a sync at the same tip, which the next poll queues. No ZMQ, because that would be a new flow |
   | **Watchdog** | Checks every 2 s that the data directory still exists on the verified device. If not, it starts shutdown |
 
-- **Database:** SQLite in WAL mode. **One writer connection**, used only by the job worker and by short API writes through a lock. Readers use separate connections.
+- **Database:** SQLite in WAL mode. **One writer connection**, used only by the job worker and by short API writes through a lock (and by start-up and shutdown). A write that waits more than 5 s for the lock is refused as busy: the API answers 503. Readers use separate connections, opened per request, read-only and query-only, after the same file checks as the writer (T-401, T-402).
+- **Node clients:** the job worker's, shutdown's abort client, and the API's import client (online only). Each allows at most 4 calls at once, 12 in all, below Core's default `rpcthreads` (16).
 - **Progress:** the SPA polls `GET /api/jobs/<id>` (authenticated).
 - **Offline mode:** if the node is unreachable or fails its checks, the app still starts, read-only for chain data. Tags, events, lots and reports work from the cache, and chain actions are disabled with a clear message.
 - **Shutdown** (SIGINT/SIGTERM, watchdog, or quit from the UI):
@@ -226,7 +230,7 @@ This is the exhaustive list; it mirrors THREAT_MODEL §6. Any other runtime conn
 | App config | `<data>/config.toml` | **Only** the RPC endpoint and `rpcauth` credentials | Mode 0600; credentials never logged (T-201) |
 | Logs | `<data>/logs/` | Redacted operational logs, including uvicorn logs and tracebacks | All loggers and exception hooks go through the redacting handler; access log off (T-403) |
 | Exports | `<data>/exports/` | 8949 CSV, income, summaries, audit trail | Type-aware CSV escaping (T-702) |
-| Temp | `<data>/tmp/` | Upload spooling, SQLite temp files | Cleared at start and at shutdown |
+| Temp | `<data>/tmp/` | SQLite temp files. Uploads are request bodies of at most 64 KiB, held in memory and never spooled | Cleared at start and at shutdown |
 | Bootstrap | `$XDG_RUNTIME_DIR` or `<data>` | One-time launch token | Deleted after claim or 60 s (§4) |
 | **Not ours** | Bitcoin Core datadir | Chain, indexes, `debug.log` | Contains the canary warning line (T-209); managed by the user |
 | **Not ours** | The user's browser profile (plain disk) | Whatever the browser keeps despite `no-store` | Accepted risk R-5. Browser extensions can read the app's pages (R-7) |
@@ -236,8 +240,9 @@ This is the exhaustive list; it mirrors THREAT_MODEL §6. Any other runtime conn
 ```mermaid
 flowchart LR
   I1[/"Upload: address list /<br/>public descriptor"/] --> V["services: validate import<br/>reject private keys (T-703)"]
-  V --> D["chain: discovery<br/>scan protocol → activity"]
+  V --> D["services: scan subjects · window growth<br/>chain: scan protocol → activity"]
   D --> C[("Chain cache<br/>activity · txs · spenders · coverage")]
+  C --> H["History views (api → services)<br/>balances · UTXOs · events,<br/>as of the last finished sync"]
   C --> G["Graph in the SPA<br/>(via api → services → chain)"]
   G --> T["Tagging<br/>owner entity · tax account · clients ·<br/>mixing flag · accepted suggestions"]
   T --> E["Events<br/>buy · income · deposit · withdrawal ·<br/>sell (identified_at) · spend · gift …"]
@@ -326,6 +331,10 @@ sequenceDiagram
 
 Progress for the user comes from the job's range counter. `scanblocks status` needs a second connection, and is used only for diagnostics.
 
+**Scan subjects.** Each imported descriptor is one subject: its window (indexes 0 to its end) from its start height. Imported addresses are grouped into `raw(<script>)` subjects, at most 16 per start height, by a hash of each script. An address that a descriptor already derives, from the same or an earlier start height, gets no subject of its own. A subject's name is a digest of what it scans, so a wider window, a new address in a group, or an earlier start height is a new subject, scanned from its start (T-210).
+
+**Window growth.** After each sync, every ranged descriptor whose own scan finished, and whose highest **confirmed** used index is within its gap limit of the window's end, grows: to at least that index plus the gap limit, and at least to double its size, by at most 1,000 indexes at once, and never past index 10,000 by itself (provisional until the perf check; beyond it the window is reported as full). A descriptor still waiting, or over its budget, isn't grown. Growth runs once a sync that wasn't cancelled returns with a target, whether or not every subject reached it (so a finished descriptor can grow while another subject keeps the target unfinished), and the wider window is scanned at the next poll; until then its new scripts read "not scanned yet" (T-210). Unconfirmed use never grows a window: anyone who knows the xpub could otherwise grow it, and force a rescan, at will (T-205, ADR 0036).
+
 The scan target is the tip the last catch-up (§8.4) recorded. A subject that can't be extended now (a range that failed its guard three times, a busy scan slot, a lagging filter index, a budget the user hasn't agreed to) doesn't fail the job: it leaves the catch-up unfinished, and the tip poller queues the sync again. A subject over its budget alone waits for the next tip instead, so its refused range isn't rescanned every poll (ADR 0035).
 
 ### 8.3 Forward expansion (click on an output)
@@ -370,6 +379,7 @@ sequenceDiagram
   C-->>P: invalidation set
   P->>P: extend coverage to the scan target (8.2), rebuild mempool pass, flag changed events for review
   C->>C: once every subject reaches it, the scan target becomes the last-seen tip
+  P->>P: when the sync returns (finished or not; not after a cancel), grow the windows of descriptors whose own scan finished (8.2); if any grew, request a sync at the same tip
 ```
 
 The reference tip is the unfinished scan target if there is one, otherwise the last-seen tip. The review queue keeps the removed txids in the user DB until their events have been flagged, so a crash or a failed sync never loses them (ADR 0035).
@@ -410,3 +420,4 @@ flowchart LR
 | 2026-10-02 | 0.2.4 | §1, §8.1: the minimum Bitcoin Core version is 31.1 (ADR 0029) |
 | 2026-10-06 | 0.2.5 | §1, §2: the launcher reads the built frontend into memory at start-up; `api/` serves it from memory (ADR 0034) |
 | 2026-10-08 | 0.2.6 | M1 as built (ADR 0035): §2 module tree (`chain/txs.py`; the chain cache's tables in `storage/`); §3 a stuck job keeps the DB open at shutdown; §8.2 the scan target, the cancel check before each range, a subject that waits instead of failing the job, a refused budget that waits for the user; §8.4 two tips (the scan target and the last-seen tip) and the review queue |
+| 2026-10-08 | 0.2.7 | M2 as built (ADR 0036): §2 module tree (`chain/descriptors.py`, `storage/accounts.py` and `datadir.py`, the M2 services; no `models.py`); §3 the request workers, and an import's node calls on them through the API's node client, imports and grown windows request a same-tip sync, the writer lock's 5 s wait ends in 503, readers per request, the node clients and their caps; §6 uploads aren't spooled; §7 subjects and window growth in `services/`, the history views; §8.2 scan subjects and window growth; §8.4 window growth after a sync |
