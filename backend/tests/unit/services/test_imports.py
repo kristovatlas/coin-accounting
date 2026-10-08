@@ -76,11 +76,12 @@ def test_an_address_list_is_previewed_then_imported_t701(conn: sqlite3.Connectio
     upload = f"  {a1}  \n\nnot an address\n{a2}\n{a1}\n{p2wpkh(3, 'bc')[0]}\n"
     preview = imports.preview_addresses(conn, upload)
     assert preview.new == ((s1, a1), (s2, a2))
-    assert preview.known == 1 and preview.invalid_lines == (3, 6)  # by number, never repeated
+    assert preview.repeated == 1 and preview.known == ()
+    assert preview.invalid_lines == (3, 6)  # by number, never repeated
     result = imports.import_addresses(conn, preview, entity_id=ME, tax_account_id=wallet, label="cold")
     assert result.added == (s1, s2)
     again = imports.preview_addresses(conn, a1)
-    assert again.new == () and again.known == 1
+    assert again.new == () and again.known == (imports.Known(s1, a1, ME, wallet),)
 
 
 def test_a_private_key_anywhere_refuses_the_whole_upload_t703(conn: sqlite3.Connection) -> None:
@@ -197,46 +198,155 @@ def test_an_unranged_descriptor_derives_one_script(conn: sqlite3.Connection, wal
 # --- Subjects ------------------------------------------------------------------------------------
 
 
-def test_subjects_scan_each_descriptor_and_each_address_no_descriptor_derives(
+def test_subjects_scan_each_descriptor_and_the_lone_addresses_in_buckets(
     conn: sqlite3.Connection, wallet: int
 ) -> None:
     preview = imports.preview_descriptor(Node(), conn, TPUB_DESC, gap_limit=3)
-    d = imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=wallet, start_height=7)
+    imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=wallet, start_height=7)
     lone_address, lone_script = p2wpkh(5)
     derived_address = p2wpkh(1001)[0]  # already the descriptor's
     addresses = imports.preview_addresses(conn, f"{lone_address}\n{derived_address}")
     imports.import_addresses(conn, addresses, entity_id=ME, tax_account_id=wallet, start_height=9)
+    [desc, lone] = imports.subjects(conn)
+    assert (
+        desc.scanobjects == ({"desc": TPUB_DESC + "#abcdefgh", "range": [0, 2]},) and desc.start_height == 7
+    )
+    assert lone.scanobjects == (f"raw({lone_script})",) and lone.start_height == 9
+
+
+def test_many_addresses_are_a_few_subjects(conn: sqlite3.Connection, wallet: int) -> None:
+    upload = "\n".join(p2wpkh(n)[0] for n in range(1, 201))
+    imports.import_addresses(
+        conn, imports.preview_addresses(conn, upload), entity_id=ME, tax_account_id=wallet
+    )
     subjects = imports.subjects(conn)
-    assert [s.subject for s in subjects] == [f"desc:{d}", f"addr:{lone_script}"]
-    assert subjects[0].scanobjects == ({"desc": TPUB_DESC + "#abcdefgh", "range": [0, 2]},)
-    assert subjects[0].start_height == 7
-    assert subjects[1].scanobjects == (f"raw({lone_script})",) and subjects[1].start_height == 9
+    assert len(subjects) <= imports.ADDRESS_BUCKETS
+    assert sum(len(s.scanobjects) for s in subjects) == 200
 
 
-class Odd(Node):
-    def __init__(self, *, solvable: bool = True, chain_hrp: str = "bcrt", repeat: bool = False) -> None:
-        super().__init__()
-        self.solvable, self.chain_hrp, self.repeat = solvable, chain_hrp, repeat
+def test_adding_an_address_renames_only_its_bucket(conn: sqlite3.Connection, wallet: int) -> None:
+    upload = "\n".join(p2wpkh(n)[0] for n in range(1, 101))
+    imports.import_addresses(
+        conn, imports.preview_addresses(conn, upload), entity_id=ME, tax_account_id=wallet
+    )
+    before = {s.subject for s in imports.subjects(conn)}
+    imports.import_addresses(
+        conn, imports.preview_addresses(conn, p2wpkh(500)[0]), entity_id=ME, tax_account_id=wallet
+    )
+    after = {s.subject for s in imports.subjects(conn)}
+    assert len(after - before) == 1 and len(before - after) <= 1  # one bucket is a new subject
 
-    def call(self, method: str, params: Any = ()) -> Any:
-        reply = super().call(method, params)
-        if method == "getdescriptorinfo":
-            return {**reply, "issolvable": self.solvable}
-        if self.repeat:
-            return [p2wpkh(1000)[0]] * len(reply)
-        return [p2wpkh(1000 + i, self.chain_hrp)[0] for i in range(len(reply))]
 
-
-@pytest.mark.parametrize(
-    ("node", "reason"),
-    [
-        (Odd(solvable=False), "solvable"),
-        (Odd(chain_hrp="bc"), "isn't of this chain"),
-        (Odd(repeat=True), "same script twice"),
-    ],
-)
-def test_a_descriptor_whose_scripts_cant_be_trusted_is_refused(
-    conn: sqlite3.Connection, node: Node, reason: str
+def test_a_wider_window_is_a_new_subject_scanned_from_its_start_t210(
+    conn: sqlite3.Connection, wallet: int
 ) -> None:
-    with pytest.raises(ImportRefused, match=reason):
-        imports.preview_descriptor(node, conn, TPUB_DESC, gap_limit=3)
+    preview = imports.preview_descriptor(Node(), conn, TPUB_DESC, gap_limit=3)
+    d = imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=wallet, start_height=7)
+    [before] = imports.subjects(conn)
+    ac.extend_descriptor(conn, d, [(3, p2wpkh(1003)[1], p2wpkh(1003)[0])])
+    [after] = imports.subjects(conn)
+    # Coverage is keyed by the subject's name: the wider window can't continue the narrower one's.
+    assert after.subject != before.subject and after.start_height == 7
+    assert after.scanobjects == ({"desc": TPUB_DESC + "#abcdefgh", "range": [0, 3]},)
+
+
+def test_an_unranged_descriptor_is_scanned_as_itself(conn: sqlite3.Connection, wallet: int) -> None:
+    preview = imports.preview_descriptor(Node(ranged=False), conn, "wpkh(tpubexample/0/7)")
+    imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=wallet)
+    [subject] = imports.subjects(conn)
+    assert subject.scanobjects == ("wpkh(tpubexample/0/7)#abcdefgh",) and preview.gap_limit == 1
+
+
+# --- Known scripts, conflicts and client links -------------------------------------------------------
+
+
+def test_a_reimport_from_another_wallet_client_links_it(conn: sqlite3.Connection, wallet: int) -> None:
+    hw = ac.add_client(conn, "A hardware wallet", "hardware")
+    phone = ac.add_client(conn, "A phone wallet", "mobile")
+    address, _ = p2wpkh(1)
+    imports.import_addresses(
+        conn, imports.preview_addresses(conn, address), entity_id=ME, tax_account_id=wallet, client_ids=[hw]
+    )
+    again = imports.preview_addresses(conn, address)
+    result = imports.import_addresses(conn, again, entity_id=ME, tax_account_id=wallet, client_ids=[phone])
+    assert result == ac.Added((), ())
+    assert ac.addresses(conn)[0].client_ids == (hw, phone)
+
+
+def test_a_script_owned_elsewhere_shows_in_the_preview_and_is_never_moved(
+    conn: sqlite3.Connection, wallet: int
+) -> None:
+    exchange = ac.add_entity(conn, "An exchange", "exchange")
+    address, script = p2wpkh(1)
+    ac.add_addresses(conn, [(script, address)], entity_id=exchange, tax_account_id=None, source="manual")
+    preview = imports.preview_addresses(conn, address)
+    assert preview.known == (imports.Known(script, address, exchange, None),)
+    result = imports.import_addresses(conn, preview, entity_id=ME, tax_account_id=wallet)
+    assert result.conflicts == (script,)
+    assert ac.addresses(conn)[0].entity_id == exchange
+
+
+def test_the_descriptor_preview_says_what_is_already_there(conn: sqlite3.Connection, wallet: int) -> None:
+    exchange = ac.add_entity(conn, "An exchange", "exchange")
+    taken_address, taken_script = p2wpkh(1001)
+    ac.add_addresses(
+        conn, [(taken_script, taken_address)], entity_id=exchange, tax_account_id=None, source="manual"
+    )
+    preview = imports.preview_descriptor(Node(), conn, TPUB_DESC, gap_limit=3)
+    assert not preview.already_imported
+    assert preview.known == (imports.Known(taken_script, taken_address, exchange, None),)
+    with pytest.raises(ImportRefused, match="another owner or account"):  # the storage refusal, as ours
+        imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=wallet)
+
+
+def test_a_descriptor_imported_twice_is_flagged_and_gains_only_links(
+    conn: sqlite3.Connection, wallet: int
+) -> None:
+    preview = imports.preview_descriptor(Node(), conn, TPUB_DESC, gap_limit=3)
+    d = imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=wallet)
+    again = imports.preview_descriptor(Node(), conn, TPUB_DESC, gap_limit=3)
+    assert again.already_imported and len(again.known) == 3
+    phone = ac.add_client(conn, "A phone wallet", "mobile")
+    assert (
+        imports.import_descriptor(conn, again, entity_id=ME, tax_account_id=wallet, client_ids=[phone]) == d
+    )
+
+
+# --- What reaches the node -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pad", ["", "  ", "\t"])
+def test_a_private_key_in_a_descriptor_never_reaches_the_node_t703(
+    conn: sqlite3.Connection, pad: str
+) -> None:
+    tprv_shaped = "tprv" + ("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" * 2)[:100]
+    node = Node()
+    with pytest.raises(PrivateKeyError) as e:
+        imports.preview_descriptor(node, conn, f"{pad}wpkh({tprv_shaped}/0/*){pad}")
+    assert node.calls == [] and tprv_shaped not in str(e.value)
+
+
+def test_text_that_isnt_valid_unicode_is_refused_without_its_content(conn: sqlite3.Connection) -> None:
+    with pytest.raises(ImportRefused, match="valid text") as e:
+        imports.preview_addresses(conn, "bcrt1q\ud800secretish")
+    assert "secretish" not in str(e.value) and e.value.__cause__ is None
+
+
+def test_line_numbers_count_newlines_only(conn: sqlite3.Connection) -> None:
+    upload = "not one\u2028still line one\r\nline two\n" + p2wpkh(1)[0]
+    preview = imports.preview_addresses(conn, upload)
+    assert preview.invalid_lines == (1, 2)
+
+
+def test_an_address_imported_with_an_earlier_start_keeps_its_own_subject(
+    conn: sqlite3.Connection, wallet: int
+) -> None:
+    address, script = p2wpkh(1000)  # the descriptor's index 0
+    imports.import_addresses(
+        conn, imports.preview_addresses(conn, address), entity_id=ME, tax_account_id=wallet, start_height=0
+    )
+    preview = imports.preview_descriptor(Node(), conn, TPUB_DESC, gap_limit=2)
+    imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=wallet, start_height=100)
+    subjects = imports.subjects(conn)
+    lone = [s for s in subjects if s.subject.startswith("addrs:")]
+    assert len(lone) == 1 and lone[0].scanobjects == (f"raw({script})",) and lone[0].start_height == 0

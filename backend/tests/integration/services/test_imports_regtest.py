@@ -59,8 +59,9 @@ def test_a_wallets_public_descriptor_derives_the_wallets_own_addresses_t701(
     for _, script, address in preview.derived:
         assert node.admin("getaddressinfo", [address])["scriptPubKey"] == script
     account = ac.add_tax_account(conn, f"Wallet {kind}", "self_custody")
-    d = imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=account)
-    assert [s.subject for s in imports.subjects(conn)] == [f"desc:{d}"]
+    imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=account)
+    [subject] = imports.subjects(conn)
+    assert subject.scanobjects == ({"desc": preview.info.text, "range": [0, 4]},)
 
 
 def test_a_descriptor_the_node_cant_read_is_refused_without_its_text_t403(

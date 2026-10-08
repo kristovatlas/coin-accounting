@@ -197,6 +197,10 @@ class TipPoller:
     def start(self) -> None:
         self._thread.start()
 
+    def request_sync(self) -> None:
+        """Queue a sync at the next poll even if the tip hasn't moved (new imports to scan)."""
+        self._last = None
+
     def poll(self) -> int | None:
         """One poll: the queued job's id, or None if the tip hasn't moved or a sync is pending."""
         best = self._rpc.call("getbestblockhash")
@@ -285,6 +289,10 @@ class ChainJobs:
     conn: Connection
     worker: JobWorker
     poller: TipPoller
+
+    def request_sync(self) -> None:
+        """Something to scan was imported: sync at the next poll, tip moved or not (PLAN §3)."""
+        self.poller.request_sync()
 
     def stop(self) -> None:
         stop_chain_jobs(self.abort_rpc, self.conn, self.poller, self.worker)

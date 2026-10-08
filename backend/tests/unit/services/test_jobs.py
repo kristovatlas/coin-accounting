@@ -472,3 +472,18 @@ def test_an_over_budget_sync_remembers_the_tip_it_processed_t205(conn: sqlite3.C
     wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
     assert poller.poll() is None  # 501 was processed already: no rescan of the refused range
     w.stop()
+
+
+def test_a_sync_can_be_requested_without_a_tip_change(conn: sqlite3.Connection) -> None:
+    node = Node(500)
+    w = JobWorker()
+    w.start()
+    poller = TipPoller(node, conn, w, lambda: [], interval=3600)
+    jobs_ = jobs.ChainJobs(node, conn, w, poller)
+    first = poller.poll()
+    assert first is not None
+    wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
+    assert poller.poll() is None  # same tip: nothing to do
+    jobs_.request_sync()  # an import arrived
+    assert poller.poll() is not None
+    w.stop()

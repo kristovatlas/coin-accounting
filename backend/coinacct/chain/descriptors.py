@@ -5,9 +5,9 @@ ADR 0019; THREAT_MODEL T-701, T-703).
 checksum). `derive` asks `deriveaddresses` for the addresses at a range of indexes; the caller turns
 them into scripts with `domain.addresses`. No node wallet is used (ADR 0004).
 
-The text must already have passed `domain.keys.refuse_private`: both calls accept private keys.
-`describe` also refuses a descriptor the node says has private keys, as a second check. A node error
-never reaches a message or a log: Core quotes the descriptor, and so its keys, back in its errors
+Both calls accept private keys, so `describe` runs `domain.keys.refuse_private` on the text before
+anything is sent, and also refuses a descriptor the node says has private keys, as a second check.
+A node error never reaches a message or a log: Core quotes the descriptor, and so its keys, back in its errors
 (`rpc.RpcCallError.node_message`), so every error here names only what kind of problem it was.
 """
 
@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from coinacct.chain.txs import ChainRpc
+from coinacct.domain.keys import refuse_private
 from coinacct.rpc import RpcCallError
 
 # The most indexes one `deriveaddresses` call derives (PLAN §1: windows are sized by the perf check).
@@ -38,6 +39,7 @@ class DescriptorInfo:
 def describe(rpc: ChainRpc, text: str) -> DescriptorInfo:
     if not text or len(text) > MAX_DESCRIPTOR_CHARS or not text.isascii() or not text.isprintable():
         raise DescriptorError("not a descriptor")
+    refuse_private(text)  # never sent to the node otherwise (T-703), whoever calls
     if text.lstrip().startswith("combo("):
         # deriveaddresses returns combo()'s several addresses per index without their indexes.
         raise DescriptorError("a combo() descriptor: import each of its script types as its own descriptor")
