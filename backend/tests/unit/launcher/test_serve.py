@@ -355,12 +355,17 @@ def test_an_existing_mainnet_db_on_plain_disk_is_refused_before_anything_writes_
     assert "check" not in h.events and db_file.read_bytes() == before
 
 
-def test_a_db_made_on_plain_disk_for_a_refused_chain_is_removed_again_t401(unencrypted: Prepared) -> None:
+def test_a_first_start_on_plain_disk_for_a_refused_chain_is_refused_and_records_nothing_t401(
+    unencrypted: Prepared,
+) -> None:
     h = Harness()
     h.check = through_the_real_checks(Node(chain="main"))  # type: ignore[method-assign]
     with pytest.raises(LaunchError, match="never accepted on mainnet"):
         h.serve(unencrypted)
-    assert not list(unencrypted.data_dir.root.glob("db.sqlite*"))
+    # The DB it created is kept (a concurrent launch may be using it), with no chain recorded.
+    conn = open_db(unencrypted.data_dir)
+    assert recorded_chain(conn) is None
+    conn.close()
 
 
 def test_a_db_that_fails_during_the_node_checks_refuses_with_its_reason(prepared: Prepared) -> None:

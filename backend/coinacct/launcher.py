@@ -59,7 +59,7 @@ from coinacct import config
 from coinacct.api import runtime
 from coinacct.storage import config_file, datadir, volume
 from coinacct.storage.chain_state import peek_recorded_chain
-from coinacct.storage.db import DB_NAME, SIDE_FILES, DbError, open_db
+from coinacct.storage.db import DB_NAME, DbError, open_db
 from coinacct.storage.logfile import open_log_handler
 from coinacct.storage.watchdog import Watchdog
 
@@ -442,7 +442,6 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
     servers: list[Any] = []
     dbs: list[Any] = []  # the user DB, once open
     db_path = data.root / DB_NAME
-    created = False  # whether this start created the DB file
     server_running = threading.Event()  # set just before uvicorn runs
     server_stopped = threading.Event()  # set once it has returned
     phase_lock = threading.Lock()
@@ -474,11 +473,6 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
             return
         for conn in dbs:
             conn.close()
-
-    def close_db_now() -> None:
-        for conn in dbs:
-            conn.close()
-        dbs.clear()
 
     def end_a_stalled_start_up() -> None:
         # Shutdown was asked for before uvicorn ran, and start-up hasn't taken over the report: the
@@ -551,8 +545,7 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
         try:
             # §8.1: the user DB (its checks, integrity check and migrations), then the watchdog, then
             # the node checks, which compare the node's chain with the DB's (T-206).
-            created = not db_path.exists()
-            if prepared.needs_test_chain and not created:
+            if prepared.needs_test_chain and db_path.exists():
                 # Unencrypted storage is allowed only on a test chain (T-401): an existing DB that
                 # records another chain is refused before anything writes to it.
                 recorded = peek_recorded_chain(db_path)
@@ -596,11 +589,9 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
             if shutdown.requested:  # asked for while the server was being made
                 raise refuse(shutdown.reason or "shutdown was requested")
         except runtime.StorageRefused as e:
-            if created:  # a DB this start made on plain disk for a chain that refuses it: remove it
-                close_db_now()
-                for path in [db_path, *(db_path.with_name(DB_NAME + s) for s in SIDE_FILES)]:
-                    with suppress(FileNotFoundError):
-                        path.unlink()
+            # A DB this start created is left as it is (schema only, no chain recorded): telling it
+            # apart from one another launch is using at the same time isn't possible here, and
+            # deleting a DB in use would lose data.
             raise refuse(str(e)) from None
         except DbError as e:  # the DB failed during the node checks (recording the chain)
             raise refuse(str(e)) from None
