@@ -15,10 +15,10 @@ from typing import Any
 
 import pytest
 
-from coinacct.chain.node_checks import REQUIRED_INDEXES
+from coinacct.chain.node_checks import KNOWN_CHAINS, REQUIRED_INDEXES
 from coinacct.rpc import RpcAuthError, RpcTransportError
 from coinacct.services.startup import StorageRefused, check_at_startup, check_recorded
-from coinacct.storage.chain_state import record_chain, recorded_chain
+from coinacct.storage.chain_state import CHAINS, record_chain, recorded_chain
 from coinacct.storage.datadir import open_data_dir
 from coinacct.storage.db import open_db
 from coinacct.storage.volume import Encryption, VolumeStatus
@@ -166,14 +166,10 @@ def db(tmp_path: Path) -> Iterator[sqlite3.Connection]:
     conn.close()
 
 
-def recorded(node: Node, db: sqlite3.Connection, **kwargs: Any) -> Any:
-    return check_recorded(
-        node,
-        db=db,
-        volume=kwargs.get("volume", ENCRYPTED),
-        allow_unencrypted=kwargs.get("allow", False),
-        sync_attempts=1,
-    )
+def recorded(
+    node: Node, db: sqlite3.Connection, *, volume: VolumeStatus = ENCRYPTED, allow: bool = False
+) -> Any:
+    return check_recorded(node, db=db, volume=volume, allow_unencrypted=allow, sync_attempts=1)
 
 
 def test_a_new_data_directory_records_the_nodes_chain_once_every_check_passes_t206(
@@ -197,3 +193,7 @@ def test_the_recorded_chain_decides_the_storage_policy_t401(db: sqlite3.Connecti
     record_chain(db, "main")
     with pytest.raises(StorageRefused):  # a regtest node can't make unencrypted mainnet data acceptable
         recorded(Node(chain="regtest"), db, volume=PLAIN, allow=True)
+
+
+def test_the_node_checks_and_the_db_know_the_same_chains_t206() -> None:
+    assert KNOWN_CHAINS == CHAINS  # a chain the checks accept can always be recorded

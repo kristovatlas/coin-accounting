@@ -97,8 +97,8 @@ def check_recorded(
     **gather_options: Any,
 ) -> NodeStatus:
     """`check_at_startup` against the chain recorded in the user DB (T-206). A data directory with
-    no recorded chain records the node's, but only once every check has passed: a node that is
-    misconfigured, or on the wrong chain, must never decide it."""
+    no recorded chain records the node's, but only once every check has passed: a node that fails a
+    check never decides it."""
     expected = chain_state.recorded_chain(db)
     status = check_at_startup(
         client, expected_chain=expected, volume=volume, allow_unencrypted=allow_unencrypted, **gather_options

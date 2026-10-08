@@ -26,12 +26,16 @@ import pytest
 from coinacct import config, launcher
 from coinacct.api import runtime
 from coinacct.launcher import LaunchError, Prepared
+from coinacct.services import startup
 from coinacct.services.lifecycle import DEADLINE_SECONDS
 from coinacct.services.startup import NodeStatus, StorageRefused
 from coinacct.storage import datadir
+from coinacct.storage.chain_state import record_chain, recorded_chain
+from coinacct.storage.db import DbError, open_db
 from coinacct.storage.volume import Encryption, VolumeStatus
 from coinacct.storage.watchdog import Watchdog
 from tests.unit.api.asgi import call
+from tests.unit.services.test_startup import Node
 
 CONFIG = '[rpc]\nhost = "127.0.0.1"\nport = 18443\nuser = "ro-client"\npassword = "serve-test-password"\n'
 ONLINE = NodeStatus(online=True, chain="regtest", reasons=())
@@ -295,6 +299,103 @@ def test_a_user_db_that_cant_be_used_stops_start_up_before_the_node_checks_t408(
         h.serve(prepared)
     assert "check" not in h.events
     assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
+
+
+def through_the_real_checks(node: Node) -> Callable[..., NodeStatus]:
+    """`startup.check_recorded` on a fake node: the launcher's DB, the real recording logic."""
+
+    def check(*_args: Any, db: Any, volume: VolumeStatus, allow_unencrypted: bool) -> NodeStatus:
+        return startup.check_recorded(
+            node, db=db, volume=volume, allow_unencrypted=allow_unencrypted, sync_attempts=1
+        )
+
+    return check
+
+
+def test_the_first_start_records_the_chain_and_a_later_node_on_another_chain_is_offline_t206(
+    prepared: Prepared,
+) -> None:
+    first = Harness()
+    first.check = through_the_real_checks(Node(chain="regtest"))  # type: ignore[method-assign]
+    first.during = quitting(first)
+    assert first.serve(prepared) == 0
+    conn = open_db(prepared.data_dir)
+    assert recorded_chain(conn) == "regtest"
+    conn.close()
+
+    second = Harness()
+    second.check = through_the_real_checks(Node(chain="signet"))  # type: ignore[method-assign]
+    second.during = quitting(second)
+    assert second.serve(prepared) == 0
+    assert second.runtime is not None and not second.runtime.status.online
+    assert any("different chain" in r for r in second.runtime.status.reasons)
+    conn = open_db(prepared.data_dir)
+    assert recorded_chain(conn) == "regtest"
+    conn.close()
+
+
+@pytest.fixture
+def unencrypted(prepared: Prepared, monkeypatch: pytest.MonkeyPatch) -> Prepared:
+    monkeypatch.setattr(datadir, "detect", lambda root: VolumeStatus(Encryption.NONE, "plain disk", "ext4"))
+    data = datadir.open_data_dir(str(prepared.data_dir.root))
+    return Prepared(data, prepared.config, needs_test_chain=True, open_browser=False)
+
+
+def test_an_existing_mainnet_db_on_plain_disk_is_refused_before_anything_writes_to_it_t401(
+    unencrypted: Prepared,
+) -> None:
+    conn = open_db(unencrypted.data_dir)
+    record_chain(conn, "main")
+    conn.close()
+    db_file = unencrypted.data_dir.root / "db.sqlite"
+    before = db_file.read_bytes()
+    h = Harness()
+    with pytest.raises(LaunchError, match="never runs on unencrypted storage"):
+        h.serve(unencrypted)
+    assert "check" not in h.events and db_file.read_bytes() == before
+
+
+def test_a_db_made_on_plain_disk_for_a_refused_chain_is_removed_again_t401(unencrypted: Prepared) -> None:
+    h = Harness()
+    h.check = through_the_real_checks(Node(chain="main"))  # type: ignore[method-assign]
+    with pytest.raises(LaunchError, match="never accepted on mainnet"):
+        h.serve(unencrypted)
+    assert not list(unencrypted.data_dir.root.glob("db.sqlite*"))
+
+
+def test_a_db_that_fails_during_the_node_checks_refuses_with_its_reason(prepared: Prepared) -> None:
+    def check(*args: Any, **kwargs: Any) -> NodeStatus:
+        raise DbError("the user DB couldn't record its chain (SQLITE_BUSY)")
+
+    with pytest.raises(LaunchError, match="couldn't record its chain"):
+        launcher.serve(
+            prepared,
+            env={},
+            build=functools.partial(runtime.build, check=check),
+            announce=lambda s: None,
+            exit_process=no_exit,
+        )
+
+
+def test_shutdown_during_the_node_checks_leaves_the_db_to_the_start_up_thread(prepared: Prepared) -> None:
+    exits: list[int] = []
+    used: list[int] = []
+
+    def check_then_signal(*args: Any, db: Any, **kwargs: Any) -> NodeStatus:
+        signal.raise_signal(signal.SIGTERM)
+        assert wait_for(lambda: exits == [launcher.LAUNCH_ERROR_EXIT])  # the steps have all run
+        used.append(db.execute("SELECT 1").fetchone()[0])  # still open: no ProgrammingError
+        return ONLINE
+
+    with pytest.raises(LaunchError, match="SIGTERM"):
+        launcher.serve(
+            prepared,
+            env={},
+            build=functools.partial(runtime.build, check=check_then_signal),
+            announce=no_announcement,
+            exit_process=exits.append,
+        )
+    assert used == [1]
 
 
 def test_offline_mode_still_serves(prepared: Prepared) -> None:
