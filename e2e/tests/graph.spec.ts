@@ -63,7 +63,7 @@ test("a transaction opens in the graph, and its flag and its output's tag are sa
     await expect(page.locator("#tag-account option:checked")).toHaveText("Miner");
     await expect(page.locator(".tag-client").first()).toBeChecked(); // the import's wallet app
     await page.locator("#graph-spender").click();
-    await expect(page.locator("#graph-spender-state")).toHaveText("Unspent");
+    await expect(page.locator("#graph-spender-state")).toHaveText(/^Unspent as of block \d+$/);
 
     // A new label for its address is saved and logged.
     await page.locator("#tag-label").fill("coinbase");
