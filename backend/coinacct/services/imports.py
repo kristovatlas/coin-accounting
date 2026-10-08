@@ -347,6 +347,11 @@ class Imports:
     def jobs_started(self, request_sync: Callable[[], None]) -> None:
         self._request_sync = request_sync
 
+    def request_sync(self) -> None:
+        """Ask the chain jobs for a sync (a no-op until they have started), for another service that
+        added something to scan (`services.tags`)."""
+        self._request_sync()
+
     @property
     def online(self) -> bool:
         return self._rpc is not None

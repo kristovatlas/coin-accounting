@@ -57,6 +57,7 @@ from coinacct.services.graph import Graph, NotFound
 from coinacct.services.history import History
 from coinacct.services.imports import Busy, ImportRefused, Imports, OfflineError, Owner
 from coinacct.services.startup import NodeStatus
+from coinacct.services.tags import Tagging
 
 log = logging.getLogger(__name__)
 
@@ -154,6 +155,7 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
     imports: Imports | None = None,
     history: History | None = None,
     graph: Graph | None = None,
+    tagging: Tagging | None = None,
 ) -> SecurityMiddleware:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -241,6 +243,8 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
         _history_routes(app, history, authenticated)
     if graph is not None:
         _graph_routes(app, graph, authenticated)
+    if tagging is not None:
+        _tag_routes(app, tagging, authenticated)
     return SecurityMiddleware(app, port=port)
 
 
@@ -412,6 +416,7 @@ def _graph_routes(app: FastAPI, graph: Graph, authenticated: list[Any]) -> None:
             "blockhash": found.blockhash,
             "confirmations": found.confirmations,
             "block_time": found.block_time,
+            "mixing": found.mixing,
             "inputs": [
                 {
                     "prevout": None
@@ -445,4 +450,51 @@ def _graph_routes(app: FastAPI, graph: Graph, authenticated: list[Any]) -> None:
             "spending_txid": found.spending_txid,
             "blockhash": found.blockhash,
             "as_of": _tip(found.as_of),
+        }
+
+
+class AddressTag(Strict):
+    script: str = Field(pattern=r"^(?:[0-9a-f]{2}){1,10000}$")
+    address: str | None = Field(default=None, min_length=1, max_length=90)
+    entity_id: int = Field(ge=1)
+    tax_account_id: int | None = Field(default=None, ge=1)
+    label: str = Field(default="", max_length=200)
+    client_ids: list[int] = Field(default_factory=list, max_length=100)
+
+
+class MixingFlag(Strict):
+    txid: str = Field(pattern=HASH)
+    mixing: bool
+
+
+class Subject(Strict):
+    subject: str = Field(pattern=r"^(?:[0-9a-f]{2}){1,10000}$")  # a script or a txid
+
+
+# POST bodies, as for the graph: scripts and txids stay out of URLs (T-105).
+def _tag_routes(app: FastAPI, tagging: Tagging, authenticated: list[Any]) -> None:
+    @app.post("/api/tags/address", dependencies=authenticated)
+    def tag_address(body: AddressTag) -> dict[str, Any]:
+        new = tagging.tag_address(
+            body.script,
+            text=body.address,
+            entity_id=body.entity_id,
+            tax_account_id=body.tax_account_id,
+            label=body.label,
+            client_ids=body.client_ids,
+        )
+        return {"new": new}
+
+    @app.post("/api/tags/mixing", dependencies=authenticated)
+    def set_mixing(body: MixingFlag) -> dict[str, Any]:
+        tagging.set_mixing(body.txid, body.mixing)
+        return {"mixing": body.mixing}
+
+    @app.post("/api/tags/history", dependencies=authenticated)
+    def history(body: Subject) -> dict[str, Any]:
+        return {
+            "changes": [
+                {"at": c.at, "kind": c.kind, "before": c.before, "after": c.after}
+                for c in tagging.changes(body.subject)
+            ]
         }

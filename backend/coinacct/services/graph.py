@@ -30,6 +30,7 @@ text never reaches a message (T-403).
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -40,7 +41,7 @@ from coinacct.chain.spenders import BIP30_OVERWRITTEN, Spend, SpendState
 from coinacct.chain.txs import ChainRpc, NodeError
 from coinacct.domain.chain import Outpoint, Tx, TxOut
 from coinacct.services.imports import ImportRefused, OfflineError, db_errors
-from coinacct.storage import accounts, chain_cache
+from coinacct.storage import accounts, chain_cache, tags
 from coinacct.storage.chain_cache import SpentBy, StaleTipError, reference_tip
 from coinacct.storage.chain_state import Tip
 from coinacct.storage.db import Connection
@@ -87,6 +88,7 @@ class TxView:
     block_time: int | None
     inputs: tuple[InputView, ...]
     outputs: tuple[OutputView, ...]
+    mixing: bool | None = None  # the user's mixing flag (PLAN §3), None if nobody has set one
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,8 +180,8 @@ class Graph:
     def tx(self, txid: str, blockhash: str | None) -> TxView:
         """One transaction, with its inputs' and outputs' owners."""
         found = self._fetch(txid, blockhash)
-        owners = self._read(_owners)
-        return _view(found, owners)
+        owners, flag = self._read(lambda r: (_owners(r), tags.mixing(r, found.txid)))
+        return dataclasses.replace(_view(found, owners), mixing=flag)
 
     def spender(self, txid: str, blockhash: str | None, n: int) -> SpendView:
         """What spent output `n` of the transaction. A confirmed spend comes from the cache when it
