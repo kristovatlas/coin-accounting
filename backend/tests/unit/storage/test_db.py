@@ -201,10 +201,52 @@ def test_a_negative_schema_version_is_refused_t408(dd: DataDir) -> None:
 
 def test_a_failing_step_leaves_no_open_transaction(dd: DataDir) -> None:
     conn = open_db(dd)
+    shipped = len(migrations())
     try:
         with pytest.raises(sqlite3.OperationalError):
-            migrate(conn, [(1, "SELECT 1;"), (2, "CREATE TABLE z (x INTEGER) STRICT; SELECT nosuch();")])
+            migrate(
+                conn, [*migrations(), (shipped + 1, "CREATE TABLE z (x INTEGER) STRICT; SELECT nosuch();")]
+            )
         assert not conn.in_transaction
+        assert conn.execute("SELECT count(*) FROM sqlite_schema WHERE name = 'z'").fetchone() == (0,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (shipped,)
+        assert conn.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("statement", ["COMMIT", "END", "ROLLBACK", "SAVEPOINT s", "RELEASE s", "BEGIN"])
+def test_a_step_cant_end_the_runners_transaction(dd: DataDir, statement: str) -> None:
+    steps = [
+        (1, "CREATE TABLE a (x INTEGER) STRICT;"),
+        (2, f"CREATE TABLE b (x INTEGER) STRICT; {statement}; CREATE TABLE z (x INTEGER) STRICT;"),
+    ]
+    with pytest.raises(DbError):
+        open_db(dd, steps=steps)
+    conn = open_db(dd, steps=steps[:1])
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone() == (1,)
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")}
+        assert names == {"a"}  # nothing of step 2 was committed
+    finally:
+        conn.close()
+
+
+def test_a_step_may_create_a_trigger_and_omit_its_last_semicolon(dd: DataDir) -> None:
+    steps = [
+        (
+            1,
+            "CREATE TABLE a (x INTEGER) STRICT;"
+            " CREATE TRIGGER a_kept BEFORE DELETE ON a BEGIN SELECT RAISE(ABORT, 'kept'); END;"
+            " CREATE TABLE b (x INTEGER) STRICT",
+        )
+    ]
+    conn = open_db(dd, steps=steps)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone() == (1,)
+        assert conn.execute(
+            "SELECT count(*) FROM sqlite_schema WHERE name IN ('a', 'a_kept', 'b')"
+        ).fetchone() == (3,)
     finally:
         conn.close()
 
@@ -231,6 +273,38 @@ def test_the_bodys_exception_wins_over_a_failed_rollback(dd: DataDir) -> None:
     try:
         with pytest.raises(KeyError), transaction(conn):
             conn.execute("ROLLBACK")  # the transaction is already gone when the body fails
+            raise KeyError("the body's error")
+        assert not conn.in_transaction
+
+        class FailingRollback:
+            """The connection, except that ROLLBACK fails (as it can on a disk error)."""
+
+            def __init__(self, inner: sqlite3.Connection) -> None:
+                self.inner = inner
+
+            @property
+            def in_transaction(self) -> bool:
+                return self.inner.in_transaction
+
+            def execute(self, sql: str) -> sqlite3.Cursor:
+                if sql == "ROLLBACK":
+                    raise sqlite3.OperationalError("disk I/O error")
+                return self.inner.execute(sql)
+
+        proxy = FailingRollback(conn)
+        with pytest.raises(KeyError), transaction(proxy):  # type: ignore[arg-type]
+            raise KeyError("the body's error")
+        conn.execute("ROLLBACK")
+    finally:
+        conn.close()
+
+
+def test_a_nested_transactions_error_survives_a_rollback_sqlite_already_did(dd: DataDir) -> None:
+    conn = open_db(dd)
+    try:
+        record_chain(conn, "regtest")
+        with pytest.raises(KeyError), transaction(conn), transaction(conn):
+            conn.execute("ROLLBACK")  # SQLite ended everything, savepoint included
             raise KeyError("the body's error")
         assert not conn.in_transaction
     finally:
@@ -323,6 +397,10 @@ def test_the_schema_keeps_the_recorded_chain_t206(dd: DataDir) -> None:
             conn.execute("UPDATE chain_state SET chain = 'main'")
         with pytest.raises(sqlite3.IntegrityError, match="never removed"):
             conn.execute("DELETE FROM chain_state")
+        # REPLACE deletes the old row without firing a delete trigger (#163).
+        for replace in ("REPLACE INTO", "INSERT OR REPLACE INTO", "INSERT OR IGNORE INTO"):
+            with pytest.raises(sqlite3.IntegrityError, match="never changes"):
+                conn.execute(f"{replace} chain_state (id, chain) VALUES (1, 'main')")
         assert recorded_chain(conn) == "regtest"
     finally:
         conn.close()
@@ -334,7 +412,8 @@ def test_a_busy_db_is_reported_as_in_use_not_damaged(dd: DataDir) -> None:
     holder.execute("BEGIN EXCLUSIVE")
     try:
         with pytest.raises(DbError, match="in use"):
-            open_db(dd, steps=[(1, "SELECT 1;"), (2, "CREATE TABLE later (x INTEGER) STRICT;")], timeout=0.1)
+            later = (len(migrations()) + 1, "CREATE TABLE later (x INTEGER) STRICT;")
+            open_db(dd, steps=[*migrations(), later], timeout=0.1)
     finally:
         holder.rollback()
         holder.close()
