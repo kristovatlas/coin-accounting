@@ -441,6 +441,9 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
     launch_file: list[Path] = []
     servers: list[Any] = []
     dbs: list[Any] = []  # the user DB, once open
+    chain_jobs: list[Any] = []  # the job worker and tip poller, once started (§3)
+    jobs_lock = threading.Lock()  # a start after the stop step has run starts nothing
+    jobs_stopping: list[bool] = []
     db_path = data.root / DB_NAME
     server_running = threading.Event()  # set just before uvicorn runs
     server_stopped = threading.Event()  # set once it has returned
@@ -466,13 +469,29 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
     def close_db() -> None:
         # Only once nothing else can be using it (§3): not while start-up may still be in the node
         # checks (the last step ends that process), and not if the server failed to stop in time.
+        # Nor while a chain job that ignored its cancel may still be writing to it.
         # An unclosed DB is safe: WAL and synchronous=FULL roll an open transaction back on reopen.
         with phase_lock:
             starting = phase[0] in ("starting", "ended")
         if starting or (server_running.is_set() and not server_stopped.is_set()):
             return
+        if not all(jobs.stopped for jobs in chain_jobs):
+            log.warning("a chain job didn't stop in time; the user DB is left for the OS to close")
+            return
         for conn in dbs:
             conn.close()
+
+    def stop_chain_jobs() -> None:
+        # §3 step 2: cancel the current job; abort the node's scan if ours may be running.
+        with jobs_lock:
+            jobs_stopping.append(True)
+            for jobs in chain_jobs:
+                jobs.stop()
+
+    def start_chain_jobs(start: Callable[[], Any]) -> None:
+        with jobs_lock:
+            if not jobs_stopping:
+                chain_jobs.append(start())
 
     def end_a_stalled_start_up() -> None:
         # Shutdown was asked for before uvicorn ran, and start-up hasn't taken over the report: the
@@ -506,6 +525,7 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
     watchdog = make_watchdog(data, shutdown.request)
     shutdown.add_step("report the reason", lambda: stderr_line(f"shutting down: {shutdown.reason}"))
     shutdown.add_step("stop the server", stop_server)
+    shutdown.add_step("stop the chain jobs", stop_chain_jobs)
     shutdown.add_step("close the user DB", close_db)
     shutdown.add_step("stop the watchdog", watchdog.stop)
     shutdown.add_step("remove the launch file", remove_launch_file)
@@ -582,6 +602,8 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
                 raise refuse(lost)
             if shutdown.requested:
                 raise refuse(shutdown.reason or "shutdown was requested")
+            if rt.start_chain_jobs is not None:  # background chain work only after every check (§8.1)
+                start_chain_jobs(rt.start_chain_jobs)
             # Only now, after the node checks and the storage policy (§8.1). From here a browser that
             # is quicker than uvicorn's start waits in the backlog instead of being refused.
             sock.listen(LISTEN_BACKLOG)

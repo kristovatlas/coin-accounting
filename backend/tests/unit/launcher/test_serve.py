@@ -109,6 +109,7 @@ class Harness:
         self.make_watchdog: Callable[..., Watchdog] = Watchdog
         self.exits: list[int] = []
         self.opened_while_started: list[bool] = []
+        self.db: sqlite3.Connection | None = None
 
     def check(self, *args: Any, **kwargs: Any) -> NodeStatus:
         assert self.data is not None
@@ -119,8 +120,22 @@ class Harness:
     def build(self, **kwargs: Any) -> runtime.Runtime:
         self.port = kwargs["port"]
         self.listening_at_check = can_connect(kwargs["port"])
-        self.runtime = runtime.build(check=self.check, ttl=self.ttl, **kwargs)
+        self.runtime = runtime.build(check=self.check, ttl=self.ttl, start_jobs=self.start_jobs, **kwargs)
         return self.runtime
+
+    def start_jobs(self, *args: Any, db: sqlite3.Connection, **kwargs: Any) -> Any:
+        events = self.events
+        self.db = db
+
+        class Jobs:
+            stopped = True
+
+            def stop(self) -> None:
+                db.execute("SELECT 1")  # the user DB is still open (§3: jobs stop before it closes)
+                events.append("chain jobs stopped")
+
+        self.events.append("chain jobs started")
+        return Jobs()
 
     def make_server(self, app: Any) -> FakeServer:
         self.server = FakeServer(app, self.events)
@@ -746,7 +761,9 @@ def test_a_volume_found_lost_right_after_the_checks_stops_start_up(prepared: Pre
         launcher.serve(
             prepared,
             env={},
-            build=functools.partial(runtime.build, check=lambda *a, **k: ONLINE),
+            build=functools.partial(
+                runtime.build, check=lambda *a, **k: ONLINE, start_jobs=lambda *a, **k: None
+            ),
             make_watchdog=functools.partial(LostNow, interval=3600),
             announce=lambda s: None,
             exit_process=no_exit,
@@ -764,6 +781,70 @@ def test_a_server_that_stops_by_itself_still_runs_the_shutdown_steps(prepared: P
     assert h.serve(prepared) == 0
     assert h.runtime is not None and h.runtime.shutdown.reason == "the server stopped"
     assert not launch_file(h.announced).exists()
+
+
+def test_the_chain_jobs_start_online_and_stop_after_the_server_before_the_db_closes(
+    prepared: Prepared,
+) -> None:
+    h = Harness()
+
+    def stop(server: FakeServer) -> None:
+        server.should_exit = True
+
+    h.during = stop
+    assert h.serve(prepared) == 0
+    assert h.events.index("check") < h.events.index("chain jobs started")
+    assert h.events.index("server stopped") < h.events.index("chain jobs stopped")
+    assert h.runtime is not None and h.runtime.start_chain_jobs is not None
+
+
+def test_a_chain_job_that_never_stops_keeps_the_db_open(
+    prepared: Prepared, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = Harness()
+    real = h.start_jobs
+
+    def stuck(*args: Any, **kwargs: Any) -> Any:
+        jobs = real(*args, **kwargs)
+        type(jobs).stopped = False  # a job stuck on the node past its stop timeout
+        return jobs
+
+    monkeypatch.setattr(h, "start_jobs", stuck)
+
+    def stop(server: FakeServer) -> None:
+        server.should_exit = True
+
+    h.during = stop
+    assert h.serve(prepared) == 0
+    db = h.db
+    assert db is not None
+    db.execute("SELECT 1")  # not closed under the job
+
+
+def test_no_chain_jobs_start_when_shutdown_is_asked_for_during_start_up(prepared: Prepared) -> None:
+    h = Harness()
+    real = h.build
+
+    def build_then_quit(**kwargs: Any) -> runtime.Runtime:
+        rt = real(**kwargs)
+        rt.shutdown.request("SIGTERM during start-up")
+        return rt
+
+    h.build = build_then_quit  # type: ignore[method-assign]
+    with pytest.raises(LaunchError):
+        h.serve(prepared)
+    assert "chain jobs started" not in h.events  # §8.1: background chain work only after every check
+
+
+def test_offline_mode_starts_no_chain_jobs(prepared: Prepared) -> None:
+    h = Harness(status=NodeStatus(online=False, chain=None, reasons=("the node is down",)))
+
+    def stop(server: FakeServer) -> None:
+        server.should_exit = True
+
+    h.during = stop
+    assert h.serve(prepared) == 0
+    assert "chain jobs started" not in h.events and "chain jobs stopped" not in h.events
 
 
 # --- The real server's settings and signals -----------------------------------------------------

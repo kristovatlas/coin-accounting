@@ -94,10 +94,13 @@ class MalformedReplyError(ValueError):
     """A reply didn't have the expected shape."""
 
 
-def connect(host: str, port: int, user: str, password: Secret) -> NodeRpc:
+def connect(host: str, port: int, user: str, password: Secret, *, timeout: float | None = None) -> NodeRpc:
     """The node's RPC client. Only `chain/` reaches `rpc` (architecture §2), so the services that run
-    the checks get their client here; the endpoint was checked to be loopback by `config`."""
-    return RpcClient(host, port, user, password)
+    the checks get their client here; the endpoint was checked to be loopback by `config`. `timeout`
+    replaces the default per-call timeout (the shutdown abort's must be short)."""
+    if timeout is None:
+        return RpcClient(host, port, user, password)
+    return RpcClient(host, port, user, password, timeout=timeout)
 
 
 def evaluate(facts: NodeFacts, expected_chain: str | None) -> list[Finding]:

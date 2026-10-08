@@ -11,14 +11,14 @@ from typing import Any
 
 import pytest
 
-from coinacct.chain import scans
+from coinacct.chain import mempool, reorg, scans
 from coinacct.chain.scans import Scan
 from coinacct.rpc import RpcCallError, RpcForbiddenError, RpcTransportError
 from coinacct.services import chain_sync
 from coinacct.storage import chain_cache as cc
 from coinacct.storage.chain_state import Tip, last_tip, record_chain, set_tip
 from coinacct.storage.datadir import open_data_dir
-from coinacct.storage.db import open_db
+from coinacct.storage.db import DbError, open_db
 
 SPK = "0014" + "11" * 20
 
@@ -341,10 +341,6 @@ def test_a_tip_moving_during_the_mempool_pass_leaves_the_catch_up_unfinished(
     conn: sqlite3.Connection,
 ) -> None:
     class Moves(Node):
-        def __init__(self, tip: int) -> None:
-            super().__init__(tip)
-            self.bests = 0
-
         def call(self, method: str, params: Any = ()) -> Any:
             if method == "getdescriptoractivity" and params[0] == []:
                 self.tip += 1  # a block arrives during the pass
@@ -413,3 +409,208 @@ def test_a_tip_that_moves_once_during_start_up_is_caught_up_on_the_retry(conn: s
 
     assert chain_sync.at_startup(MovesOnce(500), conn) is None
     assert cc.scan_target(conn) == Tip(bh(500), 500)  # the retry caught up
+
+
+# --- #178: the mempool pass per subject, shorter chains, start-up errors ----------------------------
+
+BUSY = Scan("busy", ("addr(bcrt1qbusy)",))
+
+
+class Mempool(Node):
+    """Each subject's mempool reply; `busy` is over the limit, `bad` makes the reply malformed."""
+
+    def __init__(self, tip: int, *, bad: bool = False, refuse: bool = False) -> None:
+        super().__init__(tip)
+        self.bad, self.refuse = bad, refuse
+
+    def call(self, method: str, params: Any = ()) -> Any:
+        if method == "getdescriptoractivity" and params[0] == [] and params[2] is True:
+            self.calls.append((method, params))
+            if self.refuse:
+                raise RpcCallError(method, -1, "addr(bcrt1qexample) refused")
+            if self.bad:
+                return {"activity": "garbled"}
+            n = mempool.MAX_PENDING + 1 if params[1] == list(BUSY.scanobjects) else 1
+            return {
+                "activity": [
+                    {
+                        "type": "receive",
+                        "amount": Decimal("0.2"),
+                        "txid": f"{i + 1:064x}",
+                        "vout": 1,
+                        "output_spk": {"hex": SPK},
+                    }
+                    for i in range(n)
+                ]
+            }
+        return super().call(method, params)
+
+
+def test_a_busy_subject_over_the_mempool_limit_hides_only_its_own_pass_t205(conn: sqlite3.Connection) -> None:
+    result = chain_sync.sync(Mempool(500), conn, [BUSY, SUBJECT])
+    assert result.complete and result.mempool_refused == ("busy",)
+    assert result.pending is not None and [p.txid for p in result.pending] == [f"{1:064x}"]  # SUBJECT's
+    assert last_tip(conn) == Tip(bh(500), 500)
+
+
+@pytest.mark.parametrize(
+    "node", [Mempool(500, bad=True), Mempool(500, refuse=True)], ids=["malformed", "refused"]
+)
+def test_a_failed_mempool_pass_never_holds_up_confirmed_progress(
+    conn: sqlite3.Connection, node: Mempool, caplog: pytest.LogCaptureFixture
+) -> None:
+    result = chain_sync.sync(node, conn, [SUBJECT, BUSY])
+    assert result.complete and last_tip(conn) == Tip(bh(500), 500)  # display-only: the tip still moves
+    assert result.mempool_refused == ("s", "busy") and result.pending == ()
+    assert "bcrt1qexample" not in caplog.text  # only the class (T-201)
+
+
+def test_a_shorter_chain_stops_the_sync_after_one_attempt(conn: sqlite3.Connection) -> None:
+    class Shorter(Node):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "getblockhash" and params[0] > 400:
+                self.calls.append((method, params))
+                raise RpcCallError(method, -8, "Block height out of range")
+            return super().call(method, params)
+
+    node = Shorter(500)
+    result = chain_sync.sync(node, conn, [SUBJECT, Scan("t", ("addr(bcrt1qother)",))])
+    assert not result.complete and result.waiting == ("s", "t")
+    assert len([c for c in node.calls if c[0] == "getblockhash" and c[1][0] > 400]) == 1  # not retried
+
+
+def test_the_waiting_tail_leaves_out_subjects_with_nothing_to_scan(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def moved(*_args: Any) -> Any:
+        raise scans.ChainMovedError("catch up first")
+
+    monkeypatch.setattr(scans, "extend", moved)
+    later = Scan("later", ("addr(bcrt1qlater)",), start_height=900)
+    result = chain_sync.sync(Node(500), conn, [SUBJECT, SUBJECT, later])
+    assert result.waiting == ("s", "s")  # by position, not by equality; "later" has nothing to scan
+
+
+def test_a_damaged_cache_at_start_up_names_the_remedy_t408(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def damaged(*_args: Any) -> Any:
+        raise DbError("a cached transaction is damaged; remove the user DB's cache")
+
+    monkeypatch.setattr(reorg, "catch_up", damaged)
+    reason = chain_sync.at_startup(Node(500), conn)
+    assert reason is not None and reason.startswith("the user DB stopped the start-up catch-up: ")
+    assert reason.endswith("remove the user DB's cache")
+
+
+def test_a_bug_at_start_up_means_offline_mode_with_its_traceback_logged(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    value = "bcrt1q" + "secretscript"  # a runtime value, as a bug's message would carry
+
+    def bug(*_args: Any) -> Any:
+        raise TypeError(value)
+
+    monkeypatch.setattr(reorg, "catch_up", bug)
+    assert chain_sync.at_startup(Node(500), conn) == "the chain catch-up at start-up failed (TypeError)"
+    assert "in bug" in caplog.text and "TypeError" in caplog.text  # the frames are logged
+    assert "bcrt1qsecretscript" not in caplog.text  # not the message (T-403)
+
+
+def test_the_same_pending_event_from_two_subjects_is_kept_once(conn: sqlite3.Connection) -> None:
+    twin = Scan("twin", SUBJECT.scanobjects)  # another subject with the same script
+    result = chain_sync.sync(Mempool(500), conn, [SUBJECT, twin])
+    assert result.pending is not None and [p.txid for p in result.pending] == [f"{1:064x}"]
+
+
+def test_two_spends_of_one_output_across_subjects_hide_the_pass(conn: sqlite3.Connection) -> None:
+    class Conflict(Node):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "getdescriptoractivity" and params[0] == [] and params[2] is True:
+                spender = "aa" if params[1] == list(SUBJECT.scanobjects) else "bb"
+                return {
+                    "activity": [
+                        {
+                            "type": "spend",
+                            "amount": Decimal("0.1"),
+                            "spend_txid": spender * 32,
+                            "spend_vin": 0,
+                            "prevout_txid": "cc" * 32,
+                            "prevout_vout": 0,
+                            "prevout_spk": {"hex": SPK},
+                        }
+                    ]
+                }
+            return super().call(method, params)
+
+    result = chain_sync.sync(Conflict(500), conn, [SUBJECT, Scan("t", ("addr(bcrt1qother)",))])
+    assert result.complete and result.pending == () and result.mempool_refused == ("s", "t")
+
+
+def test_a_cancelled_sync_stops_before_the_next_subject_and_skips_the_mempool_pass(
+    conn: sqlite3.Connection,
+) -> None:
+    node = Mempool(500)
+
+    def cancelled() -> bool:
+        return cc.coverage(conn, "s") is not None  # cancelled once the first subject is done
+
+    result = chain_sync.sync(node, conn, [SUBJECT, Scan("t", ("addr(bcrt1qother)",))], cancelled)
+    assert not result.complete and result.waiting == ("t",) and result.pending is None
+    assert cc.coverage(conn, "t") is None
+    assert not [c for c in node.calls if c[0] == "getdescriptoractivity" and c[1][0] == []]
+
+
+def test_our_own_abort_is_never_followed_by_another_scan_t212(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    starts = []
+    flag = {"cancelled": False}
+
+    def aborted(*_args: Any) -> Any:
+        starts.append(1)
+        flag["cancelled"] = True  # shutdown set the cancel and sent the abort while we scanned
+        raise scans.ScanAbortedError("aborted")
+
+    monkeypatch.setattr(scans, "extend", aborted)
+    result = chain_sync.sync(
+        Node(500), conn, [SUBJECT, Scan("t", ("addr(bcrt1qother)",))], lambda: flag["cancelled"]
+    )
+    assert starts == [1] and not result.complete and result.waiting == ("s", "t")
+
+
+def test_a_cancel_between_two_ranges_starts_no_further_range_t212(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scans, "RANGE_BLOCKS", 100)  # several ranges below the tip window
+    node = Node(500, {10: 1, 250: 2})
+
+    def cancelled() -> bool:  # shutdown lands while the first range's activity is committed
+        return cc.coverage(conn, "s") is not None
+
+    result = chain_sync.sync(node, conn, [SUBJECT], cancelled)
+    starts = [c for c in node.calls if c[0] == "scanblocks" and c[1][0] == "start"]
+    assert len(starts) == 1 and not result.complete and result.waiting == ("s",)
+    assert cc.scan_marker(conn) is None  # nothing left in flight
+
+
+def test_one_pending_event_reported_two_ways_hides_the_pass_t205(conn: sqlite3.Connection) -> None:
+    class Inconsistent(Node):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "getdescriptoractivity" and params[0] == [] and params[2] is True:
+                amount = Decimal("0.1") if params[1] == list(SUBJECT.scanobjects) else Decimal("0.2")
+                return {
+                    "activity": [
+                        {
+                            "type": "receive",
+                            "amount": amount,
+                            "txid": "ee" * 32,
+                            "vout": 0,
+                            "output_spk": {"hex": SPK},
+                        }
+                    ]
+                }
+            return super().call(method, params)
+
+    result = chain_sync.sync(Inconsistent(500), conn, [SUBJECT, Scan("t", ("addr(bcrt1qother)",))])
+    assert result.pending == () and result.mempool_refused == ("s", "t")
