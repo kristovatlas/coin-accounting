@@ -4,6 +4,8 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { claimSession, getStatus, quit, SessionError, takeBootstrapToken, type NodeStatus } from "./api/client";
+import { Holdings } from "./views/Holdings";
+import { Imports } from "./views/Imports";
 
 // Before anything renders: the token leaves the address bar at once (T-110), and the claim runs
 // exactly once, however often React runs the effect below (StrictMode runs it twice in development).
@@ -65,6 +67,8 @@ function App() {
           <button id="quit" type="button" disabled={quitting} onClick={() => onQuit(state.session)}>
             Quit
           </button>
+          <Holdings session={state.session} />
+          <Imports session={state.session} />
         </>
       )}
     </main>

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import functools
 import html
 import logging
 import os
@@ -59,7 +60,7 @@ from coinacct import config
 from coinacct.api import runtime
 from coinacct.storage import config_file, datadir, volume
 from coinacct.storage.chain_state import peek_recorded_chain
-from coinacct.storage.db import DB_NAME, DbError, open_db
+from coinacct.storage.db import DB_NAME, DbError, open_db, open_reader
 from coinacct.storage.logfile import open_log_handler
 from coinacct.storage.watchdog import Watchdog
 
@@ -590,6 +591,7 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
                     on_claimed=remove_launch_file,
                     shutdown=shutdown,
                     bundle=bundle,
+                    open_reader=functools.partial(open_reader, data),
                 )
             finally:
                 with phase_lock:
