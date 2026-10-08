@@ -26,7 +26,7 @@ import itertools
 import logging
 import queue
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -35,6 +35,7 @@ from coinacct.chain.scans import Scan
 from coinacct.chain.txs import ChainRpc
 from coinacct.domain.secret import Secret
 from coinacct.services import chain_sync
+from coinacct.services.discovery import Grown
 from coinacct.storage.chain_cache import scan_marker
 from coinacct.storage.db import Connection
 
@@ -176,10 +177,15 @@ class JobWorker:
             del self._jobs[i]
 
 
+# After a sync: (rpc, db, the subjects it didn't finish, cancelled) -> what grew
+# (services.discovery.extend_windows).
+Discover = Callable[[ChainRpc, Connection, Collection[str], Callable[[], bool]], Grown]
+
+
 class TipPoller:
     """Polls the node's tip and queues a tip-change job when it moves (§3, §8.4)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - the node, the DB, the worker, what to scan, and discovery
         self,
         rpc: ChainRpc,
         conn: Connection,
@@ -187,8 +193,10 @@ class TipPoller:
         subjects: Callable[[], Sequence[Scan]],
         *,
         interval: float = POLL_SECONDS,
+        discover: Discover | None = None,
     ) -> None:
         self._rpc, self._conn, self._worker, self._subjects = rpc, conn, worker, subjects
+        self._discover = discover
         self._interval = interval
         self._last: object = None
         self._requested = threading.Event()
@@ -240,7 +248,27 @@ class TipPoller:
             # over its budget alone waits for the tip after it: rescanning its refused range every
             # poll would hold Core's one scan slot (T-205, T-212) until the user decides (M2).
             self._last = result.target.blockhash
+        if result.target is not None and self._discover is not None and not cancelled.is_set():
+            self._grow_windows(self._discover, result, cancelled)
         return result
+
+    def _grow_windows(
+        self, discover: Discover, result: chain_sync.SyncResult, cancelled: threading.Event
+    ) -> None:
+        """After a sync: grow the windows of the finished descriptors whose used indexes near their
+        end, and scan the wider windows at the next poll (services.discovery)."""
+        unfinished = {*result.waiting, *result.over_budget}
+        try:
+            grown = discover(self._rpc, self._conn, unfinished, cancelled.is_set)
+        except Exception as e:
+            # The node went away, or a bug: the next poll queues the sync again, tip moved or not, so
+            # the windows are grown before the tip counts as done (ENGINEERING §5.3). A descriptor
+            # that can't be grown (its `failed`) is reported instead, and tried again at the next tip.
+            log.warning("growing descriptor windows failed: %s", type(e).__name__)
+            self._last = None
+            return
+        if grown.grown:
+            self.request_sync()
 
     def _loop(self) -> None:
         while True:
@@ -315,7 +343,7 @@ def no_subjects() -> Sequence[Scan]:
     return ()
 
 
-def start_chain_jobs(  # noqa: PLR0913 - the endpoint, its credentials, the DB and the subjects
+def start_chain_jobs(  # noqa: PLR0913 - the endpoint, its credentials, the DB, the subjects and discovery
     host: str,
     port: int,
     user: str,
@@ -323,12 +351,13 @@ def start_chain_jobs(  # noqa: PLR0913 - the endpoint, its credentials, the DB a
     *,
     db: Connection,
     subjects: Callable[[], Sequence[Scan]] = no_subjects,
+    discover: Discover | None = None,
 ) -> ChainJobs:
     """Start the job worker and the tip poller against the configured node (online mode only)."""
     rpc = node_checks.connect(host, port, user, password)
     abort_rpc = node_checks.connect(host, port, user, password, timeout=ABORT_SECONDS)
     worker = JobWorker()
-    poller = TipPoller(rpc, db, worker, subjects)
+    poller = TipPoller(rpc, db, worker, subjects, discover=discover)
     worker.start()
     poller.start()
     return ChainJobs(abort_rpc, db, worker, poller)

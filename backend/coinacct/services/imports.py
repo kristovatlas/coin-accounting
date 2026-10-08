@@ -248,6 +248,11 @@ def _digest(*parts: str) -> str:
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
+def descriptor_subject(d: accounts.Descriptor) -> str:
+    """The scan subject of a descriptor's current window (see the module docstring)."""
+    return f"desc:{_digest(d.text, str(d.range_end), str(d.start_height))}"
+
+
 def subjects(conn: Connection) -> list[Scan]:
     """What the chain jobs scan (architecture §8.2): each descriptor over its derived window, and the
     addresses no descriptor derives, in buckets (see the module docstring for the names)."""
@@ -258,8 +263,7 @@ def subjects(conn: Connection) -> list[Scan]:
             derived_from[script] = min(derived_from.get(script, d.start_height), d.start_height)
         ranged = "*" in d.text
         scanobject: object = {"desc": d.text, "range": [0, d.range_end]} if ranged else d.text
-        name = f"desc:{_digest(d.text, str(d.range_end), str(d.start_height))}"
-        scans.append(Scan(name, (scanobject,), start_height=d.start_height))
+        scans.append(Scan(descriptor_subject(d), (scanobject,), start_height=d.start_height))
     buckets: dict[tuple[int, int], list[str]] = {}
     for a in accounts.addresses(conn):
         # Covered by a descriptor only from its start: an address imported with an earlier start

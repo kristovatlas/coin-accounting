@@ -26,7 +26,7 @@ import pytest
 from coinacct import config, launcher
 from coinacct.api import runtime
 from coinacct.launcher import LaunchError, Prepared
-from coinacct.services import startup
+from coinacct.services import discovery, startup
 from coinacct.services.lifecycle import DEADLINE_SECONDS
 from coinacct.services.startup import NodeStatus, StorageRefused
 from coinacct.storage import datadir
@@ -127,6 +127,7 @@ class Harness:
         events = self.events
         self.db = db
         self.subjects_at_start = kwargs["subjects"]()  # what the chain jobs scan: the imports, from the DB
+        self.discover = kwargs["discover"]  # how they grow descriptor windows after a sync
 
         class Jobs:
             stopped = True
@@ -798,6 +799,7 @@ def test_the_chain_jobs_start_online_and_stop_after_the_server_before_the_db_clo
     assert h.events.index("server stopped") < h.events.index("chain jobs stopped")
     assert h.runtime is not None and h.runtime.start_chain_jobs is not None
     assert h.subjects_at_start == []  # nothing imported yet
+    assert h.discover is discovery.extend_windows
 
 
 def test_a_chain_job_that_never_stops_keeps_the_db_open(

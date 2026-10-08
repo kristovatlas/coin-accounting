@@ -472,3 +472,14 @@ def script_index(conn: sqlite3.Connection, script_hex: str) -> list[tuple[int, i
         (script_hex,),
     )
     return [(int(d), int(i)) for d, i in rows]
+
+
+def highest_active_index(conn: sqlite3.Connection, descriptor_id: int) -> int | None:
+    """The highest index of the descriptor's window whose scripts have recorded chain activity, or
+    None (one query, for the window growth after each sync)."""
+    row = conn.execute(
+        "SELECT max(ds.idx) FROM descriptor_script ds WHERE ds.descriptor_id = ?"
+        " AND EXISTS (SELECT 1 FROM activity a WHERE a.script_hex = ds.script_hex)",
+        (descriptor_id,),
+    ).fetchone()
+    return None if row is None or row[0] is None else int(row[0])
