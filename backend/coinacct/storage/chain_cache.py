@@ -122,6 +122,27 @@ def complete_scan_target(conn: sqlite3.Connection, target: Tip) -> None:
         conn.execute("UPDATE chain_state SET target_hash = NULL, target_height = NULL WHERE id = 1")
 
 
+def set_scan_marker(conn: sqlite3.Connection, subject: str) -> None:
+    """Record that a `scanblocks` call for `subject` is about to start (architecture §8.2, T-212)."""
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO scan_marker (id, subject) VALUES (1, ?)"
+            " ON CONFLICT DO UPDATE SET subject = excluded.subject",
+            (subject,),
+        )
+
+
+def clear_scan_marker(conn: sqlite3.Connection) -> None:
+    with transaction(conn):
+        conn.execute("DELETE FROM scan_marker")
+
+
+def scan_marker(conn: sqlite3.Connection) -> str | None:
+    """The subject of a `scanblocks` call the node may still be running, or None."""
+    row = conn.execute("SELECT subject FROM scan_marker WHERE id = 1").fetchone()
+    return None if row is None else str(row[0])
+
+
 def _at(conn: sqlite3.Connection, at: Tip, height: int, blockhash: str) -> None:
     if reference_tip(conn) != at:
         raise StaleTipError("the tip moved while chain data was read from the node; read it again (T-207)")

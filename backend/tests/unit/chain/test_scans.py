@@ -21,11 +21,12 @@ from coinacct.chain.scans import (
     StaleScanError,
     activity,
     extend,
+    recover,
     scan_range,
     stop_height,
 )
 from coinacct.domain.chain import Outpoint
-from coinacct.rpc import RpcCallError
+from coinacct.rpc import RpcCallError, RpcTransportError
 from coinacct.storage import chain_cache as cc
 from coinacct.storage.chain_state import Tip, record_chain
 from coinacct.storage.datadir import open_data_dir
@@ -55,6 +56,9 @@ class FakeNode:
         self.calls: list[tuple[str, Any]] = []
         self.scan_reply: Any = None  # overrides the honest reply
         self.after_scan: Any = None  # run after each scanblocks, e.g. to move the chain
+        self.running = False  # what `scanblocks abort` reports
+        self.conn: sqlite3.Connection | None = None
+        self.markers: list[str | None] = []  # the in-flight marker at each scanblocks start
 
     def hash_at(self, height: int) -> str:
         return bh(height)
@@ -65,7 +69,11 @@ class FakeNode:
             return {scans.FILTER_INDEX: {"synced": True, "best_block_height": self.filter_height}}
         if method == "getblockhash":
             return self.hash_at(params[0])
+        if method == "scanblocks" and params == ["abort"]:
+            return self.running
         if method == "scanblocks":
+            if self.conn is not None:
+                self.markers.append(cc.scan_marker(self.conn))
             action, objects, start, stop, kind = params
             assert action == "start" and objects == DESC and kind == "basic"
             reply = (
@@ -372,3 +380,52 @@ def test_a_scan_within_its_budget_runs_to_the_end(conn: sqlite3.Connection) -> N
     node = FakeNode(1000, {h: [receive(h)] for h in range(10, 15)})
     target(conn, node)
     assert extend(node, conn, Scan("s", tuple(DESC), budget=5)).stop_height == 1000
+
+
+def test_each_scan_call_runs_inside_the_in_flight_marker_t212(conn: sqlite3.Connection) -> None:
+    node = FakeNode(1000, {5: [receive(1)]})
+    node.conn = conn
+    target(conn, node)
+    extend(node, conn, Scan("s", tuple(DESC)))
+    assert node.markers == ["s"] and cc.scan_marker(conn) is None
+
+
+def test_a_node_error_clears_the_marker_a_lost_connection_keeps_it_t212(conn: sqlite3.Connection) -> None:
+    class Busy(FakeNode):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "scanblocks":
+                raise RpcCallError(method, -8, "Scan already in progress")
+            return super().call(method, params)
+
+    class Lost(FakeNode):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "scanblocks":
+                raise RpcTransportError("scanblocks: timed out")
+            return super().call(method, params)
+
+    target(conn, FakeNode(1000, {}))
+    with pytest.raises(ScanBusyError):
+        extend(Busy(1000, {}), conn, Scan("s", tuple(DESC)))
+    assert cc.scan_marker(conn) is None  # the node answered: nothing of ours is running
+    with pytest.raises(RpcTransportError):
+        extend(Lost(1000, {}), conn, Scan("s", tuple(DESC)))
+    assert cc.scan_marker(conn) == "s"  # the node may still be scanning
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_recovery_aborts_a_scan_the_app_left_running_t212(conn: sqlite3.Connection, running: bool) -> None:
+    node = FakeNode(10, {})
+    node.running = running
+    assert recover(node, conn) is False and node.calls == []  # no marker: never touch others' scans
+    cc.set_scan_marker(conn, "s")
+    assert recover(node, conn) is running
+    assert ("scanblocks", ["abort"]) in node.calls and cc.scan_marker(conn) is None
+
+
+def test_a_malformed_abort_reply_keeps_the_marker(conn: sqlite3.Connection) -> None:
+    node = FakeNode(10, {})
+    node.running = "yes"  # type: ignore[assignment]
+    cc.set_scan_marker(conn, "s")
+    with pytest.raises(MalformedScanError):
+        recover(node, conn)
+    assert cc.scan_marker(conn) == "s"

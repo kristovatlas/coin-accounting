@@ -20,6 +20,12 @@ activity budget: the candidate count `scanblocks` reports comes first, and a ran
 the scan past its budget is refused (`ActivityBudgetError`) before any of its blocks is read. The
 caller asks the user, then scans again with a larger budget, or none.
 
+**Scans the app left running (T-212):** Core runs one `scanblocks` at a time for all RPC users, and
+a scan keeps running after the client disconnects. So an in-flight marker is written just before
+each `scanblocks` call and cleared once the node has answered (with results or an error). A marker
+left behind by a crash or a client timeout makes `recover` abort the node's scan at the next
+start-up. Core can't say whose scan is running, so the marker is what makes it ours.
+
 Candidate blocks are read with `getdescriptoractivity` in calls of at most `ACTIVITY_BLOCKS` blocks,
 with `include_mempool` always false: the mempool is a separate, ephemeral pass. Its exact matching
 removes the filters' false positives. Each range's activity and coverage are committed together,
@@ -38,10 +44,13 @@ from coinacct.rpc import RpcCallError
 from coinacct.storage.chain_cache import (
     Activity,
     Coverage,
+    clear_scan_marker,
     coverage,
     extend_coverage,
     put_activity,
     reference_tip,
+    scan_marker,
+    set_scan_marker,
 )
 from coinacct.storage.chain_state import Tip
 from coinacct.storage.db import Connection, transaction
@@ -167,7 +176,7 @@ def extend(rpc: ChainRpc, conn: Connection, scan: Scan) -> Coverage:
     while start <= stop:
         end = min(start + RANGE_BLOCKS - 1, stop)
         end_hash = _block_hash(rpc, end)
-        blocks = scan_range(rpc, scan.scanobjects, start, end, end_hash)
+        blocks = _marked_scan(rpc, conn, scan, Coverage(scan.subject, start, end, end_hash))
         candidates += len(blocks)
         if scan.budget is not None and candidates > scan.budget:
             raise ActivityBudgetError(candidates, scan.budget)
@@ -189,6 +198,33 @@ def extend(rpc: ChainRpc, conn: Connection, scan: Scan) -> Coverage:
     if reached is None:
         raise ValueError("the scan's start height is above the scan target")
     return reached
+
+
+def recover(rpc: ChainRpc, conn: Connection) -> bool:
+    """At start-up, and after any client error: abort the node's scan if the app may have left one
+    running (an in-flight marker is set), then clear the marker. Returns whether a scan was aborted."""
+    if scan_marker(conn) is None:
+        return False
+    aborted = rpc.call("scanblocks", ["abort"])
+    if type(aborted) is not bool:
+        raise MalformedScanError("scanblocks abort didn't say whether a scan was running")
+    clear_scan_marker(conn)
+    return aborted
+
+
+def _marked_scan(rpc: ChainRpc, conn: Connection, scan: Scan, covered: Coverage) -> list[str]:
+    """`scan_range` inside the in-flight marker. The marker is cleared once the node has answered;
+    on a transport error or timeout it stays, since the node may still be scanning."""
+    set_scan_marker(conn, scan.subject)
+    try:
+        blocks = scan_range(
+            rpc, scan.scanobjects, covered.start_height, covered.stop_height, covered.stop_hash
+        )
+    except (RpcCallError, MalformedScanError, StaleScanError, ScanBusyError, ScanAbortedError):
+        clear_scan_marker(conn)
+        raise
+    clear_scan_marker(conn)
+    return blocks
 
 
 def _commit(conn: Connection, events: list[Activity], covered: Coverage, target: Tip) -> None:
