@@ -4,6 +4,8 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { claimSession, getStatus, quit, SessionError, takeBootstrapToken, type NodeStatus } from "./api/client";
+import "./app.css";
+import { Graph } from "./views/Graph";
 import { Holdings } from "./views/Holdings";
 import { Imports } from "./views/Imports";
 
@@ -68,6 +70,7 @@ function App() {
             Quit
           </button>
           <Holdings session={state.session} />
+          <Graph session={state.session} />
           <Imports session={state.session} />
         </>
       )}
