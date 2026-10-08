@@ -9,13 +9,15 @@
 - **Checked after the open, too:** SQLite opens by path, so once it has, the DB and its side files
   are checked again: the same inode, regular, private, on the verified device.
 - **Integrity:** `PRAGMA integrity_check` on every open; anything but `ok` refuses the DB (T-408).
-- **One writer, many readers** (architecture §3): `open_db` returns the one writer connection, shared
-  by the job worker and short API writes. Its `lock` serialises their transactions: `transaction`
-  (and any read that opens a transaction of its own) holds it from `BEGIN` to the end, so one
-  thread's statements never land in another's transaction. Statements outside a transaction aren't
-  serialised: a lone read on the writer can see another thread's uncommitted rows. Code that needs
-  a consistent read on another thread uses a reader instead: `open_reader` opens a read-only
-  connection (`mode=ro`, `query_only`) to the same, already-migrated file, with the same checks.
+- **One writer, many readers** (architecture §3): `open_db` returns the one writer connection, used
+  only by the job worker (and start-up and shutdown, before and after it runs) and by short API
+  writes. Its `lock` serialises their transactions: `transaction`, and `hold` for a read that opens a
+  transaction of its own, keep it from `BEGIN` to the end, so one thread's statements never land in
+  another's transaction. Waiting for it is bounded by the connection's timeout, like SQLite's own
+  busy wait, and ends in a "busy" `DbError`. A lone statement outside a transaction isn't
+  serialised and would see another thread's uncommitted rows, so API reads never use the writer.
+  They use readers: `open_reader` opens a read-only connection (`mode=ro`, `query_only`) to the same,
+  already-migrated file, with the same file checks, for one thread (one request) at a time.
 - **Schema:** the numbered steps in `migrations/` (`mNNNN_name.py`, each an `SQL` string), applied in
   order, each in its own transaction, with `PRAGMA user_version` recording the last one. A DB from a
   newer app version is refused rather than guessed at.
@@ -52,11 +54,39 @@ class WriterConnection(sqlite3.Connection):
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
         self.lock = threading.RLock()
+        timeout = kwargs.get("timeout", 5.0)  # open_db passes its timeout by keyword
+        self.lock_timeout = float(timeout) if isinstance(timeout, (int, float)) else 5.0
 
 
 def writer_lock(conn: sqlite3.Connection) -> threading.RLock | None:
     """The writer's lock; None for a connection that isn't the writer (a reader, or a test's own)."""
     return conn.lock if isinstance(conn, WriterConnection) else None
+
+
+def _acquire(conn: sqlite3.Connection) -> threading.RLock | None:
+    """Take the writer's lock (None on another connection), waiting at most its timeout."""
+    if not isinstance(conn, WriterConnection):
+        return None
+    if not conn.lock.acquire(timeout=conn.lock_timeout):
+        raise DbError("the user DB is busy; try again in a moment")
+    return conn.lock
+
+
+class hold:
+    """Hold the writer's lock (nothing on another connection) for a read that opens a transaction of
+    its own, such as a snapshot, so it can't start inside another thread's transaction."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        self.lock: threading.RLock | None = None
+
+    def __enter__(self) -> sqlite3.Connection:
+        self.lock = _acquire(self.conn)
+        return self.conn
+
+    def __exit__(self, kind: object, value: object, tb: object) -> None:
+        if self.lock is not None:
+            self.lock.release()
 
 
 def migrations(steps: Sequence[tuple[int, str]] = STEPS) -> list[tuple[int, str]]:
@@ -134,8 +164,10 @@ def open_db(
 
 def open_reader(data_dir: DataDir, *, timeout: float = 5.0) -> sqlite3.Connection:
     """A read-only connection to the user DB that `open_db` has already opened and migrated
-    (architecture §3: readers use separate connections). It never creates or changes the file: SQLite
-    opens it `mode=ro`, with `query_only` on, and the same file checks as the writer's."""
+    (architecture §3: readers use separate connections). SQLite opens it `mode=ro`, with `query_only`
+    on, after the same file checks as the writer's. It never creates the DB or changes its contents;
+    SQLite may create the WAL side files, which are checked like the writer's. Use it only on the
+    thread that opened it."""
     path = data_dir.root / DB_NAME
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -153,7 +185,7 @@ def open_reader(data_dir: DataDir, *, timeout: float = 5.0) -> sqlite3.Connectio
             f"{path.as_uri()}?mode=ro",
             uri=True,
             isolation_level=None,
-            check_same_thread=False,
+            check_same_thread=True,  # one thread (one request) per reader: its snapshots are its own
             timeout=timeout,
         )
     except sqlite3.Error as e:
@@ -239,11 +271,10 @@ class transaction:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
         self.nested = False
-        self.lock = writer_lock(conn)
+        self.lock: threading.RLock | None = None
 
     def __enter__(self) -> sqlite3.Connection:
-        if self.lock is not None:
-            self.lock.acquire()  # held until __exit__: no other thread's statements join this one
+        self.lock = _acquire(self.conn)  # held until __exit__: no other thread's statements join this one
         try:
             self._begin()
         except BaseException:
