@@ -430,9 +430,6 @@ def test_recovery_aborts_a_scan_the_app_left_running_t212(conn: sqlite3.Connecti
 
 
 def test_a_malformed_abort_reply_keeps_the_marker(conn: sqlite3.Connection) -> None:
-    node = FakeNode(10, {})
-    node.running = True
-
     class Odd(FakeNode):
         def call(self, method: str, params: Any = ()) -> Any:
             return "yes" if params == ["abort"] else super().call(method, params)
@@ -599,3 +596,83 @@ def test_an_oversized_scan_reply_still_clears_the_marker_t212(conn: sqlite3.Conn
     with pytest.raises(RpcResponseTooLargeError):
         extend(TooLarge(1000, {}), conn, Scan("s", tuple(DESC)))
     assert cc.scan_marker(conn) is None  # the node answered: its scan is over
+
+
+def test_a_retry_never_appends_to_coverage_a_reorg_has_left_behind_t207(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scans, "RANGE_BLOCKS", 300)
+    node = FakeNode(1000, {5: [receive(1)]})
+    target(conn, node)
+    cc.extend_coverage(conn, cc.Coverage("s", 0, 299, bh(299)), Tip(bh(1000), 1000))
+    # The node is now on another branch from height 200: the saved coverage stops on the old one.
+    node.hash_at = lambda h: bh(h) if h < 200 else f"{h + 7 * 10**9:064x}"  # type: ignore[method-assign,assignment]
+    with pytest.raises(StaleScanError, match="below the subject's coverage"):
+        extend(node, conn, Scan("s", tuple(DESC)))
+    assert not [p for m, p in node.calls if m == "scanblocks"]  # nothing scanned or committed
+    assert cc.coverage(conn, "s") == cc.Coverage("s", 0, 299, bh(299))
+
+
+def test_a_branch_switch_below_the_anchor_during_a_range_commits_nothing_t207(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scans, "RANGE_BLOCKS", 300)
+    node = FakeNode(1000, {5: [receive(1)], 400: [receive(2)]})
+    target(conn, node)
+    cc.extend_coverage(conn, cc.Coverage("s", 0, 299, bh(299)), Tip(bh(1000), 1000))
+    flips = iter(["flip", None])
+
+    def flip_below_the_anchor_and_back_above_s() -> None:
+        if next(flips, None):  # S is untouched, but the anchor (299) is now on another branch
+            node.hash_at = lambda h: f"{h + 7 * 10**9:064x}" if 250 <= h < 350 else bh(h)  # type: ignore[method-assign,assignment]
+
+    node.after_scan = flip_below_the_anchor_and_back_above_s
+    with pytest.raises(StaleScanError, match="below the subject's coverage"):
+        extend(node, conn, Scan("s", tuple(DESC)))
+    assert cc.coverage(conn, "s") == cc.Coverage("s", 0, 299, bh(299))
+
+
+def test_a_range_without_candidates_passes_a_subject_already_over_budget_t205(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scans, "RANGE_BLOCKS", 300)
+    node = FakeNode(1000, {h: [receive(h)] for h in range(10, 20)})
+    target(conn, node)
+    extend(node, conn, Scan("s", tuple(DESC), budget=None))  # the user agreed: 10 candidates
+    later = FakeNode(1500, {h: [receive(h)] for h in range(10, 20)})
+    cc.set_scan_target(conn, Tip(bh(1500), 1500))
+    reached = extend(later, conn, Scan("s", tuple(DESC), budget=5))  # no new candidates: no question
+    assert reached.stop_height == 1500
+
+
+def test_the_anchor_moves_with_each_committed_range_t207(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scans, "RANGE_BLOCKS", 300)
+    node = FakeNode(1000, {5: [receive(1)], 400: [receive(2)]})
+    target(conn, node)
+    flips = iter([None, "flip"])
+
+    def flip_below_the_first_range_end() -> None:  # S (900) stays; block 299 doesn't
+        if next(flips, None):
+            node.hash_at = lambda h: f"{h + 7 * 10**9:064x}" if 250 <= h < 350 else bh(h)  # type: ignore[method-assign,assignment]
+
+    node.after_scan = flip_below_the_first_range_end
+    with pytest.raises(StaleScanError, match="below the subject's coverage"):
+        extend(node, conn, Scan("s", tuple(DESC)))
+    assert cc.coverage(conn, "s") == cc.Coverage("s", 0, 299, bh(299))
+
+
+def test_a_branch_switch_while_the_tip_window_is_read_commits_nothing_t207(conn: sqlite3.Connection) -> None:
+    class FlipsDuringTheWindow(FakeNode):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "getblockhash" and params == [951]:
+                self.hash_at = lambda h: f"{h + 7 * 10**9:064x}" if 940 <= h <= 960 else bh(h)  # type: ignore[method-assign,assignment]
+            return super().call(method, params)
+
+    node = FlipsDuringTheWindow(1000, {})
+    target(conn, node)
+    cc.extend_coverage(conn, cc.Coverage("s", 0, 950, bh(950)), Tip(bh(1000), 1000))
+    with pytest.raises(StaleScanError, match="below the subject's coverage"):
+        extend(node, conn, Scan("s", tuple(DESC)))
+    assert cc.coverage(conn, "s") == cc.Coverage("s", 0, 950, bh(950))

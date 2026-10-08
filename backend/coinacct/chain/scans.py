@@ -9,8 +9,10 @@ Core's `scanblocks` skips a filter range it can't read without saying so: `compl
 2. **Bounded ranges** of at most `RANGE_BLOCKS`, each processed and committed on its own.
 3. **After each range** the filter index must still reach S and `getblockhash(S)` must be unchanged;
    otherwise the range's results are discarded (`StaleScanError`). Every range is checked against the
-   same S, so the node switching branches between ranges can't mix two branches in one coverage.
-   Each event's block hash must also be the block at its height.
+   same S, and against the block the subject's coverage continues from (its *anchor*), which must
+   still be the block at its height. So the node switching branches, between ranges or between a
+   failed attempt and its retry, can't mix two branches in one coverage. Each event's block hash
+   must also be the block at its height.
 4. **The newest blocks** (above S, up to the scan target) never go through `scanblocks`: their hashes
    go straight to `getdescriptoractivity`, which errors rather than skips. They are at most
    `TIP_WINDOW` blocks: a filter index further behind is `FilterIndexBehindError`, never a longer
@@ -210,18 +212,25 @@ def extend(rpc: ChainRpc, conn: Connection, scan: Scan) -> Coverage:
         raise ValueError("there is no tip to scan to: catch up first")
     now = coverage(conn, scan.subject)
     start = scan.start_height if now is None else now.stop_height + 1
+    # The anchor: the block the subject's coverage continues from. A reorg below it (since a failed
+    # attempt, or during this one) means catching up first, never appending to it.
+    anchor = None if now is None else Tip(now.stop_hash, now.stop_height)
+    _check_anchor(rpc, anchor)
     stop = stop_height(rpc, target)
     seen = coverage_candidates(conn, scan.subject)
     guard = Tip(_block_hash(rpc, stop), stop) if start <= stop else None
     while guard is not None and start <= stop:
         end = min(start + RANGE_BLOCKS - 1, stop)
-        end_hash = _block_hash(rpc, end)
         blocks = scan_range(rpc, scan.scanobjects, start, end, guard, marker=(conn, scan.subject))
-        if scan.budget is not None and seen + len(blocks) > scan.budget:
+        _check_anchor(rpc, anchor)
+        # Only a range that adds candidates can take the subject past its budget.
+        if blocks and scan.budget is not None and seen + len(blocks) > scan.budget:
             raise ActivityBudgetError(seen + len(blocks), scan.budget)
+        end_hash = _block_hash(rpc, end)  # after the guard passed: on the same chain as S
         covered = Coverage(scan.subject, start, end, end_hash)
         _commit(conn, activity(rpc, blocks, scan.scanobjects), covered, target, len(blocks))
         seen += len(blocks)
+        anchor = Tip(end_hash, end)
         start = end + 1
     if start <= target.height:
         if target.height - start + 1 > TIP_WINDOW:
@@ -230,6 +239,7 @@ def extend(rpc: ChainRpc, conn: Connection, scan: Scan) -> Coverage:
         hashes = [_block_hash(rpc, h) for h in range(start, target.height + 1)]
         if hashes[-1] != target.blockhash:
             raise StaleScanError("the scan target left the active chain")
+        _check_anchor(rpc, anchor)
         window = Coverage(scan.subject, start, target.height, target.blockhash)
         _commit(conn, activity(rpc, hashes, scan.scanobjects), window, target, 0)
     reached = coverage(conn, scan.subject)
@@ -279,6 +289,11 @@ def _scanblocks(rpc: ChainRpc, params: list[Any], marker: tuple[Connection, str]
         raise
     _clear(conn)
     return result
+
+
+def _check_anchor(rpc: ChainRpc, anchor: Tip | None) -> None:
+    if anchor is not None and _block_hash(rpc, anchor.height) != anchor.blockhash:
+        raise StaleScanError("the chain moved below the subject's coverage; catch up first (T-207)")
 
 
 def _clear(conn: Connection | None) -> None:
