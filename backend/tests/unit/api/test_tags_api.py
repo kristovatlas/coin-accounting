@@ -72,20 +72,20 @@ def test_every_tag_route_needs_the_session(world: World, path: str) -> None:
 def test_an_address_is_tagged_retagged_and_its_history_read(world: World, conn: sqlite3.Connection) -> None:
     exchange = ac.add_entity(conn, "Some exchange", "exchange")
     wallet = ac.add_tax_account(conn, "Cold storage", "self_custody")
-    first = world.post("/api/tags/address", {"script": SCRIPT, "address": "bcrt1qx", "entity_id": exchange})
+    first = world.post("/api/tags/address", {"script": SCRIPT, "entity_id": exchange})
     assert first.status == 200 and first.json() == {"new": True}
     second = world.post(
         "/api/tags/address", {"script": SCRIPT, "entity_id": ME, "tax_account_id": wallet, "label": "mine"}
     )
     assert second.json() == {"new": False}
-    changes = world.post("/api/tags/history", {"subject": SCRIPT}).json()["changes"]
+    changes = world.post("/api/tags/history", {"kind": "address_tag", "subject": SCRIPT}).json()["changes"]
     assert [c["after"]["entity_id"] for c in changes] == [exchange, ME]
     assert changes[1]["before"]["entity_id"] == exchange
 
 
 def test_the_mixing_flag_is_set_and_logged(world: World) -> None:
     assert world.post("/api/tags/mixing", {"txid": TXID, "mixing": True}).json() == {"mixing": True}
-    [change] = world.post("/api/tags/history", {"subject": TXID}).json()["changes"]
+    [change] = world.post("/api/tags/history", {"kind": "tx_flag", "subject": TXID}).json()["changes"]
     assert change["kind"] == "tx_flag" and change["after"]["mixing"] is True
 
 
@@ -103,9 +103,26 @@ def test_a_refused_tag_is_a_422_without_echo(world: World) -> None:
         ("/api/tags/address", {"script": SCRIPT, "entity_id": 1, "extra": 1}),
         ("/api/tags/mixing", {"txid": "AB" * 32, "mixing": True}),
         ("/api/tags/mixing", {"txid": TXID}),
-        ("/api/tags/history", {"subject": "not hex"}),
+        ("/api/tags/history", {"kind": "address_tag", "subject": "not hex"}),
+        ("/api/tags/history", {"subject": TXID}),
+        ("/api/tags/history", {"kind": "event", "subject": TXID}),
+        ("/api/tags/address", {"script": SCRIPT, "entity_id": 2**63}),
+        ("/api/tags/address", {"script": SCRIPT, "entity_id": 1, "tax_account_id": 2**63}),
+        ("/api/tags/address", {"script": SCRIPT, "entity_id": 1, "client_ids": [2**63]}),
+        ("/api/tags/address", {"script": SCRIPT, "entity_id": 1, "client_ids": [0]}),
     ],
 )
 def test_malformed_bodies_are_refused_without_echo(world: World, path: str, body: dict[str, Any]) -> None:
     reply = world.post(path, body)
     assert reply.status == 422 and reply.json() == {"error": "invalid request"}
+
+
+@pytest.mark.parametrize("field", ["label", "address"])
+def test_a_private_key_in_a_tag_is_refused_without_echo_t703(
+    world: World, conn: sqlite3.Connection, field: str
+) -> None:
+    exchange = ac.add_entity(conn, "Some exchange", "exchange")
+    wif_shaped = ("K" + "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")[:52]
+    reply = world.post("/api/tags/address", {"script": SCRIPT, "entity_id": exchange, field: wif_shaped})
+    assert reply.status == 422 and wif_shaped not in reply.body.decode()
+    assert ac.addresses(conn) == []
