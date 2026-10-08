@@ -4,11 +4,17 @@ chain state", §2; THREAT_MODEL T-207, T-208, T-209).
 It reveals which scripts and transactions the user cares about, so it lives only here (T-209). Its
 rules keep a reorg from leaving stale or orphaned data behind (T-207):
 
-- **Every write names the tip it was computed against**, which must be the recorded tip
-  (`chain_state`), and no row may lie above that tip. A block the row came from that is later
-  orphaned is then always above the fork point the next tip check finds by walking back from the
-  recorded tip, so `invalidate_above` removes it. A caller checks the tip before and after its RPC
-  calls; a tip that moved in between is `StaleTipError` here.
+- **Two recorded tips** (architecture §8). The *last-seen tip* moves only once a catch-up has
+  extended coverage to the node's tip. The *scan target* is the tip that catch-up is working
+  towards. Rows are written against the **reference tip**: the scan target while there is one,
+  otherwise the last-seen tip. A failed scan leaves the target in place, so it is retried.
+- **Every write names the tip it was computed against**, which must be the reference tip, and no
+  row may lie above it (a row at its height must be from its block). A block a row came from that
+  is later orphaned is then always above the fork point found by walking back from the reference
+  tip, so `invalidate_above` removes it. A caller reads the tip before its RPC calls; a tip that
+  moved in between is `StaleTipError` here.
+- **A row is written once.** Writing the same row again is a no-op; a different row under the same
+  key is refused, never silently kept or replaced.
 - **Negative answers are snapshots** ("unspent at this tip"), never facts.
 - **Coverage** is one contiguous height range per subject, with its stop block's hash.
 - **Mempool results never come here;** they are rebuilt on every refresh.
@@ -25,6 +31,8 @@ from typing import Literal
 from coinacct.domain.chain import MAX_SATS, Outpoint, Tx, TxIn, TxOut, is_hash, is_hex
 from coinacct.storage.chain_state import Tip, last_tip, set_tip
 from coinacct.storage.db import DbError, transaction
+
+MAX_SEQUENCE = 0xFFFFFFFF
 
 
 class StaleTipError(DbError):
@@ -71,34 +79,79 @@ class Invalidated:
     subjects: frozenset[str]
 
 
-def _at(conn: sqlite3.Connection, at: Tip, height: int) -> None:
-    if last_tip(conn) != at:
-        raise StaleTipError("the tip moved while chain data was fetched; fetch it again (T-207)")
+def scan_target(conn: sqlite3.Connection) -> Tip | None:
+    row = conn.execute("SELECT target_hash, target_height FROM chain_state WHERE id = 1").fetchone()
+    return None if row is None or row[0] is None else Tip(str(row[0]), int(row[1]))
+
+
+def reference_tip(conn: sqlite3.Connection) -> Tip | None:
+    """The tip rows are written against, and the one a reorg check walks back from: the scan target
+    while a catch-up is under way, otherwise the last-seen tip."""
+    return scan_target(conn) or last_tip(conn)
+
+
+def set_scan_target(conn: sqlite3.Connection, target: Tip) -> None:
+    """Start (or restart) a catch-up towards `target`. Rows from blocks no longer in the active chain
+    must already be gone (`invalidate_above`): the target is the new reference tip."""
+    with transaction(conn):
+        cur = conn.execute(
+            "UPDATE chain_state SET target_hash = ?, target_height = ? WHERE id = 1",
+            (target.blockhash, target.height),
+        )
+        if cur.rowcount != 1:
+            raise DbError("the chain must be recorded before a tip")
+
+
+def complete_scan_target(conn: sqlite3.Connection, target: Tip) -> None:
+    """The catch-up towards `target` is done: it becomes the last-seen tip."""
+    with transaction(conn):
+        if scan_target(conn) != target:
+            raise StaleTipError("the scan target moved; catch up again (T-207)")
+        set_tip(conn, target)
+        conn.execute("UPDATE chain_state SET target_hash = NULL, target_height = NULL WHERE id = 1")
+
+
+def _at(conn: sqlite3.Connection, at: Tip, height: int, blockhash: str) -> None:
+    if reference_tip(conn) != at:
+        raise StaleTipError("the tip moved while chain data was read from the node; read it again (T-207)")
     if height > at.height:
         raise DbError("chain data can't lie above the tip it was computed against (T-207)")
+    if height == at.height and blockhash != at.blockhash:
+        raise DbError("chain data at the tip's height must be from the tip's block (T-207)")
 
 
 def put_tx(conn: sqlite3.Connection, tx: Tx, height: int, at: Tip) -> None:
-    """Cache a confirmed transaction, found in its block at `height`. Caching it again is a no-op."""
+    """Cache a confirmed transaction, found in its block at `height` while the node's tip was `at`."""
     if tx.blockhash is None or not tx.confirmed:
         raise ValueError("only confirmed transactions are cached")
+    if tx.confirmations != at.height - height + 1:
+        raise ValueError("the transaction's confirmations don't match its height and the tip")
+    data = _encode(tx)
     with transaction(conn):
-        _at(conn, at, height)
+        _at(conn, at, height, tx.blockhash)
+        known = conn.execute(
+            "SELECT height, data FROM tx_cache WHERE txid = ? AND blockhash = ?", (tx.txid, tx.blockhash)
+        ).fetchone()
+        if known is not None:
+            if tuple(known) != (height, data):
+                raise DbError("a cached transaction can't change (T-207)")
+            return
         conn.execute(
-            "INSERT INTO tx_cache (txid, blockhash, height, data) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-            (tx.txid, tx.blockhash, height, _encode(tx)),
+            "INSERT INTO tx_cache (txid, blockhash, height, data) VALUES (?, ?, ?, ?)",
+            (tx.txid, tx.blockhash, height, data),
         )
 
 
-def get_tx(conn: sqlite3.Connection, txid: str, blockhash: str, tip: Tip) -> Tx | None:
-    """The cached transaction, with its confirmations counted from `tip`."""
+def get_tx(conn: sqlite3.Connection, txid: str, blockhash: str) -> Tx | None:
+    """The cached transaction, with its confirmations counted from the reference tip."""
     row = conn.execute(
         "SELECT height, data FROM tx_cache WHERE txid = ? AND blockhash = ?", (txid, blockhash)
     ).fetchone()
     if row is None:
         return None
+    tip = reference_tip(conn)
     height = int(row[0])
-    if height > tip.height:
+    if tip is None or height > tip.height:
         raise DbError("a cached transaction lies above the tip (T-207)")
     return _decode(txid, blockhash, tip.height - height + 1, str(row[1]))
 
@@ -109,7 +162,7 @@ def put_spender(conn: sqlite3.Connection, outpoint: Outpoint, spent_by: SpentBy,
     if not is_hash(spent_by.txid) or not is_hash(spent_by.blockhash):
         raise ValueError("a spend needs a txid and a block hash")
     with transaction(conn):
-        _at(conn, at, spent_by.height)
+        _at(conn, at, spent_by.height, spent_by.blockhash)
         known = get_spender(conn, outpoint)
         if known is not None:
             if known != spent_by:
@@ -136,7 +189,7 @@ def get_spender(conn: sqlite3.Connection, outpoint: Outpoint) -> SpentBy | None:
 def put_unspent(conn: sqlite3.Connection, outpoint: Outpoint, at: Tip) -> None:
     """Snapshot "unspent at `at`", replacing an older snapshot. A recorded spend contradicts it."""
     with transaction(conn):
-        _at(conn, at, at.height)
+        _at(conn, at, at.height, at.blockhash)
         if get_spender(conn, outpoint) is not None:
             raise DbError("an output with a recorded spend can't be unspent (T-207)")
         conn.execute(
@@ -156,7 +209,7 @@ def unspent_at(conn: sqlite3.Connection, outpoint: Outpoint) -> Tip | None:
 
 
 def put_activity(conn: sqlite3.Connection, events: Iterable[Activity], at: Tip) -> None:
-    """Record receive and spend events, all or none. Recording one again is a no-op."""
+    """Record receive and spend events, all or none."""
     rows = []
     for e in events:
         if e.kind not in ("receive", "spend") or (e.kind == "spend") != (e.prevout is not None):
@@ -176,16 +229,26 @@ def put_activity(conn: sqlite3.Connection, events: Iterable[Activity], at: Tip) 
         )
     with transaction(conn):
         for row in rows:
-            _at(conn, at, row[8])
-        conn.executemany(
-            "INSERT INTO activity (script_hex, kind, txid, n, sats, prevout_txid, prevout_vout,"
-            " blockhash, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-            rows,
-        )
+            _at(conn, at, row[8], row[7])
+            known = conn.execute(
+                "SELECT script_hex, kind, txid, n, sats, prevout_txid, prevout_vout, blockhash, height"
+                " FROM activity WHERE kind = ? AND txid = ? AND n = ? AND blockhash = ?",
+                (row[1], row[2], row[3], row[7]),
+            ).fetchone()
+            if known is not None:
+                if tuple(known) != row:
+                    raise DbError("a recorded activity event can't change (T-207)")
+                continue
+            conn.execute(
+                "INSERT INTO activity (script_hex, kind, txid, n, sats, prevout_txid, prevout_vout,"
+                " blockhash, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                row,
+            )
 
 
 def activity_for(conn: sqlite3.Connection, script_hex: str) -> list[Activity]:
-    """The recorded events for a script, oldest first."""
+    """The recorded events for a script, by height. Within a block the order is fixed (kind, txid,
+    index) but is not the order of the transactions in the block."""
     rows = conn.execute(
         "SELECT kind, txid, n, sats, prevout_txid, prevout_vout, blockhash, height FROM activity"
         " WHERE script_hex = ? ORDER BY height, kind, txid, n",
@@ -209,8 +272,12 @@ def activity_for(conn: sqlite3.Connection, script_hex: str) -> list[Activity]:
 def extend_coverage(conn: sqlite3.Connection, covered: Coverage, at: Tip) -> Coverage:
     """Add a scanned range. It must start where the subject's coverage stops (or be the first), so
     coverage stays one range with no gaps (T-210). Returns the subject's coverage now."""
+    if not 0 <= covered.start_height <= covered.stop_height or not is_hash(covered.stop_hash):
+        raise ValueError("a scanned range needs 0 <= start <= stop and its stop block's hash")
+    if not covered.subject:
+        raise ValueError("a scanned range needs a subject")
     with transaction(conn):
-        _at(conn, at, covered.stop_height)
+        _at(conn, at, covered.stop_height, covered.stop_hash)
         now = coverage(conn, covered.subject)
         if now is not None and covered.start_height != now.stop_height + 1:
             raise DbError("a scanned range must continue the subject's coverage without a gap (T-210)")
@@ -232,12 +299,13 @@ def coverage(conn: sqlite3.Connection, subject: str) -> Coverage | None:
 
 def invalidate_above(conn: sqlite3.Connection, fork: Tip) -> Invalidated:
     """After a reorg: remove every row, snapshot and stretch of coverage above the fork point, at any
-    depth, and record the fork block as the tip, all in one transaction (T-207). The fork block is
-    on both chains, so coverage that reaches past it now stops there."""
+    depth, and record the fork block as the last-seen tip (clearing any scan target), all in one
+    transaction (T-207). The fork block is on both chains, so coverage that reaches past it now
+    stops there."""
     with transaction(conn):
-        last = last_tip(conn)
-        if last is None or fork.height > last.height:
-            raise DbError("a fork point must be at or below the recorded tip (T-207)")
+        ref = reference_tip(conn)
+        if ref is None or fork.height > ref.height or (fork.height == ref.height and fork != ref):
+            raise DbError("a fork point must be the reference tip or below it (T-207)")
         f = fork.height
         txids: set[str] = set()
         for (txid,) in conn.execute("SELECT txid FROM tx_cache WHERE height > ?", (f,)):
@@ -264,6 +332,7 @@ def invalidate_above(conn: sqlite3.Connection, fork: Tip) -> Invalidated:
             (f, fork.blockhash, f),
         )
         set_tip(conn, fork)
+        conn.execute("UPDATE chain_state SET target_hash = NULL, target_height = NULL WHERE id = 1")
     return Invalidated(fork, frozenset(txids), unspent, subjects)
 
 
@@ -294,27 +363,34 @@ def _decode(txid: str, blockhash: str, confirmations: int, data: str) -> Tx:
     """Rebuild a cached transaction, refusing anything the encoder couldn't have written (T-408)."""
     try:
         d = json.loads(data)
+        if not isinstance(d, dict) or set(d) != {"time", "in", "out"}:
+            raise TypeError
         time = d["time"]
-        if time is not None and type(time) is not int:
+        if time is not None and (type(time) is not int or time < 0):
             raise TypeError
         inputs = tuple(_decode_in(i) for i in d["in"])
         outputs = tuple(_decode_out(o) for o in d["out"])
-        if set(d) != {"time", "in", "out"}:
-            raise TypeError
-    except (ValueError, TypeError, KeyError, IndexError):
+        tx = Tx(txid, blockhash, confirmations, time, inputs, outputs)
+        # What the node's parser guarantees (chain/txs.py, T-502) holds for a cached copy too.
+        if not inputs or not outputs or sum(o.sats for o in outputs) > MAX_SATS:
+            raise ValueError
+        fee = tx.fee_sats
+        if fee is not None and fee < 0:
+            raise ValueError
+    except (ValueError, TypeError, KeyError, IndexError, RecursionError):
         raise DbError("a cached transaction is damaged (T-408); remove the user DB's cache") from None
-    return Tx(txid, blockhash, confirmations, time, inputs, outputs)
+    return tx
 
 
 def _decode_in(i: object) -> TxIn:
     if not isinstance(i, list) or len(i) != 4:
         raise TypeError
     prev_txid, prev_vout, sequence, spent = i
-    if type(sequence) is not int or not 0 <= sequence <= 0xFFFFFFFF:
+    if type(sequence) is not int or not 0 <= sequence <= MAX_SEQUENCE:
         raise TypeError
     if prev_txid is None and prev_vout is None:
         prevout = None
-    elif is_hash(prev_txid) and type(prev_vout) is int:
+    elif is_hash(prev_txid) and type(prev_vout) is int and prev_vout <= MAX_SEQUENCE:
         prevout = Outpoint(prev_txid, prev_vout)
     else:
         raise TypeError
@@ -327,7 +403,7 @@ def _decode_out(o: object) -> TxOut:
     sats, script_hex, script_type, address = o
     if type(sats) is not int or not 0 <= sats <= MAX_SATS:
         raise TypeError
-    if not is_hex(script_hex) or not isinstance(script_type, str):
+    if not is_hex(script_hex) or not isinstance(script_type, str) or not script_type:
         raise TypeError
     if address is not None and not isinstance(address, str):
         raise TypeError

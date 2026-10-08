@@ -15,6 +15,15 @@ BEGIN
     SELECT RAISE(ABORT, 'the recorded chain never changes');
 END;
 
+-- The tip a catch-up is bringing the cache up to (architecture §8): rows are written against it, and
+-- the last-seen tip moves to it only once coverage has been extended, so a failed scan is retried.
+ALTER TABLE chain_state ADD COLUMN target_hash TEXT CHECK (
+    target_hash IS NULL OR (length(target_hash) = 64 AND target_hash NOT GLOB '*[^0-9a-f]*')
+);
+ALTER TABLE chain_state ADD COLUMN target_height INTEGER CHECK (
+    (target_height IS NULL) = (target_hash IS NULL) AND (target_height IS NULL OR target_height >= 0)
+);
+
 -- Decoded confirmed transactions, keyed by (txid, block) for BIP30's duplicate coinbases (T-208).
 -- `data` holds the inputs and outputs; confirmations are worked out from the tip when read.
 CREATE TABLE tx_cache (
@@ -67,7 +76,8 @@ CREATE TABLE coverage (
     stop_hash TEXT NOT NULL CHECK (length(stop_hash) = 64 AND stop_hash NOT GLOB '*[^0-9a-f]*')
 ) STRICT, WITHOUT ROWID;
 
--- Negative answers, never facts: "this output was unspent at this tip".
+-- Negative answers, never facts: "this output was unspent at this tip". "No activity" for a script
+-- needs no row: it is its coverage with no activity events in that range.
 CREATE TABLE snapshot (
     kind TEXT NOT NULL CHECK (kind IN ('unspent')),
     txid TEXT NOT NULL CHECK (length(txid) = 64 AND txid NOT GLOB '*[^0-9a-f]*'),

@@ -67,8 +67,9 @@ def open_db(
         raise DbError(f"can't open the user DB ({type(e).__name__})") from None
     try:
         conn.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
-        # A read makes SQLite open the file now, so the path is checked again before anything is
-        # written through it (WAL journaling writes at once).
+        # A read makes SQLite open the file now, so the path is checked again before WAL journaling
+        # is switched on. (For a DB already in WAL mode, that read may already open its side files:
+        # the check after the switch covers them; best-effort, see `_check_still_ours`.)
         conn.execute("PRAGMA schema_version").fetchone()
         _check_still_ours(path, inode, data_dir)
         if any(row[0] == "TEMP_STORE=0" for row in conn.execute("PRAGMA compile_options")):
@@ -183,12 +184,18 @@ class transaction:
                 self.conn.execute("RELEASE coinacct")
                 return
             # Undo the body's changes, but let its own exception be the one that propagates, even
-            # if SQLite already rolled the whole transaction back (no savepoint left).
+            # if SQLite already rolled the whole transaction back (no savepoint left). If the
+            # savepoint can't be rolled back while the transaction is still open, the whole
+            # transaction is rolled back, so the body's partial writes can never be committed.
             try:
                 self.conn.execute("ROLLBACK TO coinacct")
                 self.conn.execute("RELEASE coinacct")
             except sqlite3.Error:
-                pass
+                if self.conn.in_transaction:
+                    try:
+                        self.conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
             return
         if kind is not None:
             # Roll back, but let the body's own exception be the one that propagates.

@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -489,5 +490,74 @@ def test_the_schema_refuses_a_malformed_tip(dd: DataDir, blockhash: str, height:
         with pytest.raises(sqlite3.IntegrityError):
             set_tip(conn, Tip(blockhash, height))
         assert last_tip(conn) is None
+    finally:
+        conn.close()
+
+
+class _Proxy:
+    """A connection whose `execute` can be made to fail for chosen statements."""
+
+    def __init__(self, inner: sqlite3.Connection, fail: set[str], foreign_keys_off: bool = False) -> None:
+        self.inner = inner
+        self.fail = fail
+        self.foreign_keys_off = foreign_keys_off
+
+    @property
+    def in_transaction(self) -> bool:
+        return self.inner.in_transaction
+
+    def execute(self, sql: str, *args: Any) -> object:
+        if sql in self.fail:
+            raise sqlite3.OperationalError("disk I/O error")
+        if self.foreign_keys_off and sql == "PRAGMA foreign_keys":
+            return self.inner.execute("SELECT 0")
+        return self.inner.execute(sql, *args)
+
+    def executescript(self, sql: str) -> object:
+        return self.inner.executescript(sql)
+
+    def set_authorizer(self, authorizer: object) -> None:
+        self.inner.set_authorizer(authorizer)  # type: ignore[arg-type]
+
+
+def test_a_nested_rollback_that_fails_rolls_back_the_whole_transaction(dd: DataDir) -> None:
+    conn = open_db(dd)
+    try:
+        record_chain(conn, "regtest")
+        proxy = _Proxy(conn, {"ROLLBACK TO coinacct"})
+        # A caller that catches the inner error and carries on can't commit the inner partial write:
+        # the whole transaction is gone, so its COMMIT fails.
+        with pytest.raises(sqlite3.OperationalError), transaction(conn):
+            set_tip(conn, Tip("ab" * 32, 1))
+            try:
+                with transaction(proxy):  # type: ignore[arg-type]
+                    conn.execute("UPDATE chain_state SET tip_height = 2")
+                    raise KeyError("the body's error")
+            except KeyError:
+                pass
+        assert not conn.in_transaction
+        assert last_tip(conn) is None
+    finally:
+        conn.close()
+
+
+def test_the_path_is_checked_again_before_wal_is_switched_on_t401(
+    dd: DataDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: object) -> None:
+        raise DbError("replaced")
+
+    monkeypatch.setattr(db, "_check_still_ours", refuse)
+    with pytest.raises(DbError, match="replaced"):
+        open_db(dd)
+    assert not (dd.root / f"{DB_NAME}-wal").exists()  # refused before journaling wrote anything
+
+
+def test_foreign_keys_left_off_after_the_migrations_are_refused(dd: DataDir) -> None:
+    conn = open_db(dd, steps=[])
+    try:
+        proxy = _Proxy(conn, set(), foreign_keys_off=True)
+        with pytest.raises(DbError, match="foreign keys"):
+            migrate(proxy, migrations())  # type: ignore[arg-type]
     finally:
         conn.close()
