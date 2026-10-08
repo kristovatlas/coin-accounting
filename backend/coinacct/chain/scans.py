@@ -47,7 +47,7 @@ against the scan target (`storage.chain_cache`), so a reorg found later removes 
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
@@ -102,6 +102,10 @@ class ScanInFlightError(RuntimeError):
     set): run `recover` before scanning again (T-212)."""
 
 
+class ScanCancelledError(RuntimeError):
+    """The job was cancelled (shutdown): no further range is started (T-212)."""
+
+
 class ScanBusyError(RuntimeError):
     """Another `scanblocks` is running on the node (Core runs one at a time for all users): the
     queue is busy; retry with backoff (T-212)."""
@@ -144,6 +148,10 @@ def stop_height(rpc: ChainRpc, target: Tip) -> int:
     return min(_filter_height(rpc), target.height - TIP_WINDOW)
 
 
+def _never() -> bool:
+    return False
+
+
 def scan_range(  # noqa: PLR0913 - the range, its guard, and where to keep the in-flight marker
     rpc: ChainRpc,
     scanobjects: Sequence[Any],
@@ -152,6 +160,7 @@ def scan_range(  # noqa: PLR0913 - the range, its guard, and where to keep the i
     guard: Tip,
     *,
     marker: tuple[Connection, str] | None = None,
+    cancelled: Callable[[], bool] = _never,
 ) -> list[str]:
     """The candidate blocks between `start` and `stop`, checked against the silent-skip gap (T-210):
     afterwards the filter index must still reach `guard` (S and the hash recorded for it before the
@@ -161,7 +170,7 @@ def scan_range(  # noqa: PLR0913 - the range, its guard, and where to keep the i
         raise ValueError("a scan range can't go past its guard block")
     if not 0 <= start <= stop or stop - start + 1 > RANGE_BLOCKS:
         raise ValueError("a scan range is 0 <= start <= stop, at most RANGE_BLOCKS blocks")
-    result = _scanblocks(rpc, ["start", list(scanobjects), start, stop, "basic"], marker)
+    result = _scanblocks(rpc, ["start", list(scanobjects), start, stop, "basic"], marker, cancelled)
     if not isinstance(result, dict):
         raise MalformedScanError("scanblocks didn't return an object")
     if result.get("completed") is not True:
@@ -208,10 +217,12 @@ def activity(rpc: ChainRpc, blockhashes: Sequence[str], scanobjects: Sequence[An
     return events
 
 
-def extend(rpc: ChainRpc, conn: Connection, scan: Scan) -> Coverage:
+def extend(rpc: ChainRpc, conn: Connection, scan: Scan, cancelled: Callable[[], bool] = _never) -> Coverage:
     """Extend `scan`'s coverage to the scan target, one range at a time, committing each range's
     activity and coverage together. Returns the coverage reached. `StaleScanError` and
-    `ScanBusyError` leave everything committed so far; calling again resumes after it."""
+    `ScanBusyError` leave everything committed so far; calling again resumes after it.
+    `cancelled` is checked right before each range's `scanblocks`: once it is true no further
+    range starts (`ScanCancelledError`), so a shutdown abort isn't followed by a new scan (T-212)."""
     target = reference_tip(conn)
     if target is None:
         raise ValueError("there is no tip to scan to: catch up first")
@@ -226,7 +237,9 @@ def extend(rpc: ChainRpc, conn: Connection, scan: Scan) -> Coverage:
     guard = Tip(_block_hash(rpc, stop), stop) if start <= stop else None
     while guard is not None and start <= stop:
         end = min(start + RANGE_BLOCKS - 1, stop)
-        blocks = scan_range(rpc, scan.scanobjects, start, end, guard, marker=(conn, scan.subject))
+        blocks = scan_range(
+            rpc, scan.scanobjects, start, end, guard, marker=(conn, scan.subject), cancelled=cancelled
+        )
         _check_anchor(rpc, anchor)
         # Only a range that adds candidates can take the subject past its budget.
         if blocks and scan.budget is not None and seen + len(blocks) > scan.budget:
@@ -272,14 +285,27 @@ def recover(rpc: ChainRpc, conn: Connection) -> bool:
     return aborted
 
 
-def _scanblocks(rpc: ChainRpc, params: list[Any], marker: tuple[Connection, str] | None) -> Any:
+def _scanblocks(
+    rpc: ChainRpc,
+    params: list[Any],
+    marker: tuple[Connection, str] | None,
+    cancelled: Callable[[], bool] = _never,
+) -> Any:
     """The `scanblocks` call itself, inside the in-flight marker: cleared as soon as the node has
-    answered, kept on a transport error or timeout, since the node may still be scanning."""
+    answered, kept on a transport error or timeout, since the node may still be scanning.
+
+    The cancel is checked after the marker is set and right before the call. Shutdown sets the
+    cancel before it reads the marker, so either this sees the cancel, or shutdown sees the marker
+    and sends the abort (T-212). That abort can still reach the node just before this call does;
+    shutdown reads the marker again after the worker's join for that case."""
     conn = None if marker is None else marker[0]
     if marker is not None:
         if scan_marker(marker[0]) is not None:
             raise ScanInFlightError("a scan the app started may still be running; recover first")
         set_scan_marker(*marker)
+    if cancelled():
+        _clear(conn)
+        raise ScanCancelledError("the scan job was cancelled")
     try:
         result = rpc.call("scanblocks", params)
     except RpcTransportError:

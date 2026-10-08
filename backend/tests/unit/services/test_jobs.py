@@ -386,3 +386,89 @@ def test_only_a_bounded_number_of_finished_jobs_is_kept(worker: JobWorker) -> No
     ids = [worker.submit("j", lambda _c: "x" * 10) for _ in range(jobs.KEEP_FINISHED + 20)]
     wait_for(lambda: worker.job(ids[-1]) is not None and worker.job(ids[-1]).state is State.DONE)  # type: ignore[union-attr]
     assert worker.job(ids[0]) is None and worker.job(ids[-1]) is not None
+
+
+def test_a_range_started_as_the_cancel_was_set_is_aborted_after_the_join_t212(
+    conn: sqlite3.Connection,
+) -> None:
+    aborts: list[int] = []
+
+    class Abort:
+        def call(self, method: str, params: Any = ()) -> Any:
+            aborts.append(1)
+            return True
+
+    w = JobWorker()
+    w.start()
+    release = threading.Event()
+
+    def late_range(cancelled: threading.Event) -> object:
+        cancelled.wait(5)  # it checked its cancel just before shutdown set it ...
+        threading.Event().wait(0.1)  # ... so it sets the marker after shutdown's first read
+        cc.set_scan_marker(conn, "s")
+        release.wait(5)  # and is now blocked in scanblocks
+        return None
+
+    w.submit("sync", late_range)
+    wait_for(lambda: w.busy)
+    poller = TipPoller(Node(500), conn, w, lambda: [], interval=3600)
+    jobs.stop_chain_jobs(Abort(), conn, poller, w)
+    assert aborts == [1]  # the second read saw the marker and aborted
+    release.set()
+
+
+def test_cancelled_queued_jobs_count_towards_the_history_bound() -> None:
+    w = JobWorker()  # not started: everything stays queued
+    ids = [w.submit("j", lambda _c: None) for _ in range(jobs.KEEP_FINISHED + 20)]
+    for i in ids:
+        w.cancel(i)
+    w.start()  # skipping them prunes them; no job runs afterwards to do it instead
+    wait_for(lambda: w.job(ids[0]) is None)
+    w.stop()
+
+
+def test_a_poll_stuck_on_the_node_doesnt_keep_the_db_open(conn: sqlite3.Connection) -> None:
+    release = threading.Event()
+
+    class Hung(Node):
+        def call(self, method: str, params: Any = ()) -> Any:
+            release.wait(5)  # getbestblockhash on a hung node
+            return super().call(method, params)
+
+    w = JobWorker()  # never started: stopped
+    poller = TipPoller(Hung(500), conn, w, lambda: [], interval=3600)
+    poller.start()
+    running = jobs.ChainJobs(Node(500), conn, w, poller)
+    assert not poller.stopped and running.stopped  # the poller never touches the DB
+    release.set()
+    poller.stop()
+
+
+def test_a_hung_abort_doesnt_hold_up_the_shutdown_step_t405(conn: sqlite3.Connection) -> None:
+    release = threading.Event()
+
+    class Trickling:
+        def call(self, method: str, params: Any = ()) -> Any:
+            release.wait(5)  # a node that keeps the reply coming slowly
+            return True
+
+    cc.set_scan_marker(conn, "s")
+    w = JobWorker()
+    w.start()
+    t0 = time.monotonic()
+    jobs.stop_chain_jobs(Trickling(), conn, TipPoller(Node(500), conn, w, lambda: [], interval=3600), w)
+    assert time.monotonic() - t0 < jobs.SHUTDOWN_STEP_SECONDS + 0.5
+    release.set()
+
+
+def test_an_over_budget_sync_remembers_the_tip_it_processed_t205(conn: sqlite3.Connection) -> None:
+    node = Node(500, {h: h for h in range(1, 400)})
+    w = JobWorker()  # not started: the sync runs after the tip moved
+    poller = TipPoller(node, conn, w, lambda: [Scan("busy", ("addr(bcrt1qbusy)",), budget=10)], interval=3600)
+    first = poller.poll()  # sees 500
+    assert first is not None
+    node.tip = 501  # a block arrives before the sync runs; it processes 501
+    w.start()
+    wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
+    assert poller.poll() is None  # 501 was processed already: no rescan of the refused range
+    w.stop()

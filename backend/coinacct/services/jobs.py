@@ -7,11 +7,13 @@
 - **The tip poller** calls `getbestblockhash` every `POLL_SECONDS` and queues one tip-change job
   (`chain_sync.sync`) when the tip moves, unless one is already queued. It uses no ZMQ, which would
   be a new flow (§5).
-- **At shutdown** (§3 step 2): the poller stops, every job is cancelled (a running sync stops at its
-  next check and never starts a scan after this), and if the app's in-flight scan marker is set,
-  `scanblocks abort` is sent on a client with a short timeout, so the node isn't left scanning for
-  a client that's gone. Then the worker gets a short join. The whole step stays within
-  `SHUTDOWN_STEP_SECONDS`, well inside the shutdown deadline (T-405).
+- **At shutdown** (§3 step 2): the poller stops, every job is cancelled (a running sync starts no
+  further range), and if the app's in-flight scan marker is set, `scanblocks abort` is sent on a
+  client with a short timeout, so the node isn't left scanning for a client that's gone. Then the
+  worker gets a short join, and the marker is read once more for a range that started just as
+  the cancel was set. Each wait is bounded (each abort runs on its own thread, joined for
+  `ABORT_SECONDS`), so the step ends within `SHUTDOWN_STEP_SECONDS`, well inside the shutdown
+  deadline (T-405).
 
 A failed job is logged by its exception's class name only: node replies and errors can name the
 user's scripts (T-201, T-403).
@@ -45,7 +47,8 @@ STOP_SECONDS: Final = 2.0
 POLLER_JOIN_SECONDS: Final = 0.5
 ABORT_SECONDS: Final = 1.0
 WORKER_JOIN_SECONDS: Final = 1.0
-SHUTDOWN_STEP_SECONDS: Final = POLLER_JOIN_SECONDS + ABORT_SECONDS + WORKER_JOIN_SECONDS
+# Two abort calls at most: one before the worker's join, one after it if a scan started meanwhile.
+SHUTDOWN_STEP_SECONDS: Final = POLLER_JOIN_SECONDS + 2 * ABORT_SECONDS + WORKER_JOIN_SECONDS
 
 
 class State(enum.Enum):
@@ -148,6 +151,7 @@ class JobWorker:
                 return
             with self._lock:
                 if job.state is not State.QUEUED:
+                    self._forget_old()  # a cancelled queued job counts towards the bound too
                     continue
                 job.state = State.RUNNING
                 self._current = job
@@ -220,10 +224,12 @@ class TipPoller:
             self._last = None  # failed: the next poll queues the sync again, tip moved or not
             raise
         if not result.complete and (result.waiting or not result.over_budget):
-            # Unfinished: the next poll queues the sync again. A subject over its budget alone
-            # waits for the next tip instead: rescanning its refused range every poll would hold
-            # Core's one scan slot (T-205, T-212) until the user decides (M2).
-            self._last = None
+            self._last = None  # unfinished: the next poll queues the sync again
+        elif result.target is not None:
+            # The tip this sync actually processed, which may be newer than the polled one. A subject
+            # over its budget alone waits for the tip after it: rescanning its refused range every
+            # poll would hold Core's one scan slot (T-205, T-212) until the user decides (M2).
+            self._last = result.target.blockhash
         return result
 
     def _loop(self) -> None:
@@ -246,12 +252,29 @@ def stop_chain_jobs(abort_rpc: ChainRpc, conn: Connection, poller: TipPoller, wo
     nothing is aborted, since the running scan may be another client's (§8.1)."""
     poller.stop(POLLER_JOIN_SECONDS)
     worker.request_stop()
-    if scan_marker(conn) is not None:
+    _abort_if_ours(abort_rpc, conn)
+    worker.join(WORKER_JOIN_SECONDS)
+    if not worker.stopped:
+        # A job that checked its cancel just before it was set may have started one more range
+        # since the first read; it set the marker before calling the node, so this read sees it.
+        _abort_if_ours(abort_rpc, conn)
+
+
+def _abort_if_ours(abort_rpc: ChainRpc, conn: Connection) -> None:
+    if scan_marker(conn) is None:
+        return
+
+    def abort() -> None:
         try:
             abort_rpc.call("scanblocks", ["abort"])
         except Exception as e:  # the node may be gone; the marker makes the next start recover
             log.warning("couldn't abort the node's scan at shutdown: %s", type(e).__name__)
-    worker.join(WORKER_JOIN_SECONDS)
+
+    # The client's timeout is per socket operation; a node trickling its reply could exceed it, so
+    # the call gets a hard bound here (a daemon thread: one still waiting doesn't hold the exit).
+    t = threading.Thread(target=abort, name="scan-abort", daemon=True)
+    t.start()
+    t.join(ABORT_SECONDS)
 
 
 @dataclass
@@ -268,8 +291,9 @@ class ChainJobs:
 
     @property
     def stopped(self) -> bool:
-        """Both threads have ended, so the user DB can be closed (§3)."""
-        return self.worker.stopped and self.poller.stopped
+        """The worker has ended, so the user DB can be closed (§3). The poller never touches the
+        DB, so a poll still waiting on a slow node doesn't keep it open."""
+        return self.worker.stopped
 
 
 def no_subjects() -> Sequence[Scan]:

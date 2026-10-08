@@ -577,3 +577,40 @@ def test_our_own_abort_is_never_followed_by_another_scan_t212(
         Node(500), conn, [SUBJECT, Scan("t", ("addr(bcrt1qother)",))], lambda: flag["cancelled"]
     )
     assert starts == [1] and not result.complete and result.waiting == ("s", "t")
+
+
+def test_a_cancel_between_two_ranges_starts_no_further_range_t212(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scans, "RANGE_BLOCKS", 100)  # several ranges below the tip window
+    node = Node(500, {10: 1, 250: 2})
+
+    def cancelled() -> bool:  # shutdown lands while the first range's activity is committed
+        return cc.coverage(conn, "s") is not None
+
+    result = chain_sync.sync(node, conn, [SUBJECT], cancelled)
+    starts = [c for c in node.calls if c[0] == "scanblocks" and c[1][0] == "start"]
+    assert len(starts) == 1 and not result.complete and result.waiting == ("s",)
+    assert cc.scan_marker(conn) is None  # nothing left in flight
+
+
+def test_one_pending_event_reported_two_ways_hides_the_pass_t205(conn: sqlite3.Connection) -> None:
+    class Inconsistent(Node):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "getdescriptoractivity" and params[0] == [] and params[2] is True:
+                amount = Decimal("0.1") if params[1] == list(SUBJECT.scanobjects) else Decimal("0.2")
+                return {
+                    "activity": [
+                        {
+                            "type": "receive",
+                            "amount": amount,
+                            "txid": "ee" * 32,
+                            "vout": 0,
+                            "output_spk": {"hex": SPK},
+                        }
+                    ]
+                }
+            return super().call(method, params)
+
+    result = chain_sync.sync(Inconsistent(500), conn, [SUBJECT, Scan("t", ("addr(bcrt1qother)",))])
+    assert result.pending == () and result.mempool_refused == ("s", "t")

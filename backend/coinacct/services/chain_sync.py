@@ -123,8 +123,9 @@ def sync(
     rpc: ChainRpc, conn: Connection, subjects: Sequence[Scan], cancelled: Callable[[], bool] = never
 ) -> SyncResult:
     """The tip-change job (§8.4). `subjects` are the scripts and descriptors whose history is kept.
-    `cancelled` is checked before each subject, each range and the mempool pass: a cancelled sync
-    stops there, unfinished, and never starts a scan after the shutdown abort (§3 step 2, T-212)."""
+    `cancelled` is checked before each subject's retries, right before each range's `scanblocks`
+    (`chain.scans`) and before the mempool pass: a cancelled sync stops there, unfinished, and
+    starts no range after the cancel (§3 step 2, T-212)."""
     scans.recover(rpc, conn)
     change = reorg.catch_up(rpc, conn)
     target = change.new if change is not None else reference_tip(conn)
@@ -197,8 +198,10 @@ def _mempool_pass(
     # mempool still never holds two spends of one output (`chain.mempool`'s per-call check).
     unique = list(dict.fromkeys(pending))
     spends = [p.prevout for p in unique if p.prevout is not None]
-    if len(spends) != len(set(spends)):
-        log.warning("the mempool pass reported two spends of one output; unconfirmed activity isn't shown")
+    events = {(p.kind, p.txid, p.n) for p in unique}
+    if len(spends) != len(set(spends)) or len(events) != len(unique):
+        # Two spends of one output, or one event reported two different ways: fail closed (T-205).
+        log.warning("the mempool pass contradicted itself across subjects; unconfirmed activity isn't shown")
         return (), [s.subject for s in subjects]
     return tuple(unique), refused
 
@@ -211,14 +214,16 @@ def _extend(  # noqa: PLR0911 - one outcome per way a range can end
         if cancelled():
             return "cancelled"
         try:
-            scans.extend(rpc, conn, subject)
+            scans.extend(rpc, conn, subject, cancelled)
+        except scans.ScanCancelledError:
+            return "cancelled"
         except scans.FilterIndexBehindError:
             return "filter index behind"
         except ChainMovedError:
             return "chain moved"
         except (StaleScanError, ScanAbortedError):
             # The chain moved under a range, or a client aborted it; after our own shutdown abort
-            # the cancel check above ends the loop, so no scan starts after it (T-212).
+            # the cancel check ends the loop, so no range starts after it (T-212).
             continue
         except ScanBusyError:
             return "scan slot busy"
