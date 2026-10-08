@@ -13,9 +13,10 @@
   only by the job worker (and start-up and shutdown, before and after it runs) and by short API
   writes. Its `lock` serialises their transactions: `transaction`, and `hold` for a read that opens a
   transaction of its own, keep it from `BEGIN` to the end, so one thread's statements never land in
-  another's transaction. Waiting for it is bounded by the connection's timeout, like SQLite's own
-  busy wait, and ends in a "busy" `DbError`. A lone statement outside a transaction isn't
-  serialised and would see another thread's uncommitted rows, so API reads never use the writer.
+  another's transaction. Waiting for it is bounded by the connection's timeout and ends in a "busy"
+  `DbError`; SQLite's own busy wait, for another process, is bounded by the same timeout after it.
+  A lone statement outside a transaction isn't serialised and would see another thread's
+  uncommitted rows, so API reads never use the writer.
   They use readers: `open_reader` opens a read-only connection (`mode=ro`, `query_only`) to the same,
   already-migrated file, with the same file checks, for one thread (one request) at a time.
 - **Schema:** the numbered steps in `migrations/` (`mNNNN_name.py`, each an `SQL` string), applied in
@@ -54,8 +55,7 @@ class WriterConnection(sqlite3.Connection):
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
         self.lock = threading.RLock()
-        timeout = kwargs.get("timeout", 5.0)  # open_db passes its timeout by keyword
-        self.lock_timeout = float(timeout) if isinstance(timeout, (int, float)) else 5.0
+        self.lock_timeout = 5.0  # open_db sets the caller's timeout
 
 
 def writer_lock(conn: sqlite3.Connection) -> threading.RLock | None:
@@ -120,6 +120,9 @@ def open_db(
         )
     except sqlite3.Error as e:
         raise DbError(f"can't open the user DB ({type(e).__name__})") from None
+    if isinstance(conn, WriterConnection):
+        # RLock.acquire waits forever for a negative timeout, where SQLite's means "don't wait".
+        conn.lock_timeout = max(timeout, 0.0)
     try:
         conn.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
         # A read makes SQLite open the file now, so the path is checked again before WAL journaling
@@ -196,7 +199,10 @@ def open_reader(data_dir: DataDir, *, timeout: float = 5.0) -> sqlite3.Connectio
             conn.execute(f"PRAGMA {pragma}")
         conn.execute("PRAGMA schema_version").fetchone()
         _check_still_ours(path, inode, data_dir)
-        if conn.execute("PRAGMA user_version").fetchone()[0] != len(migrations()):
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > len(migrations()):
+            raise DbError("the user DB was written by a newer version of the app; update the app")
+        if version != len(migrations()):
             raise DbError("the user DB isn't at this app's schema version; open it with open_db first")
     except sqlite3.DatabaseError as e:
         conn.close()

@@ -890,7 +890,7 @@ def test_a_reader_refuses_a_newer_schema_or_a_damaged_file_t408(dd: DataDir) -> 
     conn = open_db(dd)
     conn.execute(f"PRAGMA user_version = {len(migrations()) + 1}")
     conn.close()
-    with pytest.raises(DbError, match="schema version"):
+    with pytest.raises(DbError, match="newer version"):
         db.open_reader(dd)
     (dd.root / DB_NAME).write_bytes(b"not a database" * 100)
     for side in ("-wal", "-shm"):
@@ -909,9 +909,41 @@ def test_a_reader_refuses_a_db_swapped_after_its_checks_t401(
     def swap(fd: int, path: Path, data_dir: DataDir) -> int:
         inode = real(fd, path, data_dir)
         path.rename(path.with_name("moved-aside"))  # keep the inode allocated (see the writer's test)
-        os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
+        # A valid DB at the current schema version, so only the inode check can refuse it.
+        other = sqlite3.connect(path)
+        other.execute(f"PRAGMA user_version = {len(migrations())}")
+        other.close()
+        path.chmod(0o600)
         return inode
 
     monkeypatch.setattr(db, "_check_fd", swap)
-    with pytest.raises(DbError):
+    with pytest.raises(DbError, match="replaced"):
         db.open_reader(dd)
+
+
+def test_the_writers_lock_wait_is_the_timeout_open_db_was_given(dd: DataDir) -> None:
+    conn = open_db(dd, timeout=0.25)
+    assert isinstance(conn, db.WriterConnection) and conn.lock_timeout == 0.25
+    conn.close()
+
+
+def test_a_negative_timeout_never_waits_forever_for_the_lock(dd: DataDir) -> None:
+    conn = open_db(dd, timeout=-1)
+    assert isinstance(conn, db.WriterConnection) and conn.lock_timeout == 0
+    inside, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with transaction(conn):
+            inside.set()
+            release.wait(5)
+
+    a = threading.Thread(target=holder)
+    a.start()
+    try:
+        assert inside.wait(5)
+        with pytest.raises(DbError, match="busy"), transaction(conn):
+            pass
+    finally:
+        release.set()
+        a.join(5)
+    conn.close()
