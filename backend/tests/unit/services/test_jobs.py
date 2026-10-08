@@ -512,3 +512,45 @@ def test_a_sync_requested_while_one_runs_is_queued_after_it(conn: sqlite3.Connec
     wait_for(lambda: w.job(second).state is State.DONE)  # type: ignore[union-attr]
     assert poller.poll() is None  # served: no further sync until the tip moves or another request
     w.stop()
+
+
+def test_a_grown_window_is_scanned_at_the_next_poll(conn: sqlite3.Connection) -> None:
+    node = Node(500)
+    w = JobWorker()
+    w.start()
+    calls: list[list[str]] = []
+
+    def discover(rpc: Any, db: Any, pending: Any) -> list[int]:
+        calls.append(list(pending))
+        return [1] if len(calls) == 1 else []  # the first sync grows a window; the second finds no more
+
+    poller = TipPoller(node, conn, w, lambda: [], interval=3600, discover=discover)
+    first = poller.poll()
+    assert first is not None
+    wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
+    second = poller.poll()  # same tip: the wider window is what's new
+    assert second is not None and calls == [[]]
+    wait_for(lambda: w.job(second).state is State.DONE)  # type: ignore[union-attr]
+    assert poller.poll() is None and len(calls) == 2
+    w.stop()
+
+
+def test_a_failed_window_growth_leaves_the_sync_done(
+    conn: sqlite3.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+    node = Node(500)
+    w = JobWorker()
+    w.start()
+
+    def discover(rpc: Any, db: Any, pending: Any) -> list[int]:
+        raise ValueError("descriptor 1: the node's new addresses can't be used")
+
+    poller = TipPoller(node, conn, w, lambda: [], interval=3600, discover=discover)
+    with caplog.at_level(logging.WARNING):
+        first = poller.poll()
+        assert first is not None
+        wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
+    assert "growing descriptor windows failed: ValueError" in caplog.text
+    assert "descriptor 1" not in caplog.text  # the type only, as every chain-job log line
+    assert poller.poll() is None  # done for this tip; the next block tries again
+    w.stop()

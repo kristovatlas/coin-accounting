@@ -176,10 +176,15 @@ class JobWorker:
             del self._jobs[i]
 
 
+# After a complete sync: (rpc, db, the scripts with mempool activity) -> the descriptors whose windows
+# grew (services.discovery.extend_windows).
+Discover = Callable[[ChainRpc, Connection, Sequence[str]], Sequence[int]]
+
+
 class TipPoller:
     """Polls the node's tip and queues a tip-change job when it moves (§3, §8.4)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - the node, the DB, the worker, what to scan, and discovery
         self,
         rpc: ChainRpc,
         conn: Connection,
@@ -187,8 +192,10 @@ class TipPoller:
         subjects: Callable[[], Sequence[Scan]],
         *,
         interval: float = POLL_SECONDS,
+        discover: Discover | None = None,
     ) -> None:
         self._rpc, self._conn, self._worker, self._subjects = rpc, conn, worker, subjects
+        self._discover = discover
         self._interval = interval
         self._last: object = None
         self._requested = threading.Event()
@@ -240,7 +247,21 @@ class TipPoller:
             # over its budget alone waits for the tip after it: rescanning its refused range every
             # poll would hold Core's one scan slot (T-205, T-212) until the user decides (M2).
             self._last = result.target.blockhash
+        if result.complete and self._discover is not None:
+            self._grow_windows(self._discover, result)
         return result
+
+    def _grow_windows(self, discover: Discover, result: chain_sync.SyncResult) -> None:
+        """After a complete sync: grow the descriptor windows whose used indexes near their end, and
+        scan the wider windows at the next poll (services.discovery)."""
+        pending = [p.script_hex for p in result.pending or ()]
+        try:
+            grown = discover(self._rpc, self._conn, pending)
+        except Exception as e:  # the sync itself is done: the next one tries again
+            log.warning("growing descriptor windows failed: %s", type(e).__name__)
+            return
+        if grown:
+            self.request_sync()
 
     def _loop(self) -> None:
         while True:
@@ -315,7 +336,7 @@ def no_subjects() -> Sequence[Scan]:
     return ()
 
 
-def start_chain_jobs(  # noqa: PLR0913 - the endpoint, its credentials, the DB and the subjects
+def start_chain_jobs(  # noqa: PLR0913 - the endpoint, its credentials, the DB, the subjects and discovery
     host: str,
     port: int,
     user: str,
@@ -323,12 +344,13 @@ def start_chain_jobs(  # noqa: PLR0913 - the endpoint, its credentials, the DB a
     *,
     db: Connection,
     subjects: Callable[[], Sequence[Scan]] = no_subjects,
+    discover: Discover | None = None,
 ) -> ChainJobs:
     """Start the job worker and the tip poller against the configured node (online mode only)."""
     rpc = node_checks.connect(host, port, user, password)
     abort_rpc = node_checks.connect(host, port, user, password, timeout=ABORT_SECONDS)
     worker = JobWorker()
-    poller = TipPoller(rpc, db, worker, subjects)
+    poller = TipPoller(rpc, db, worker, subjects, discover=discover)
     worker.start()
     poller.start()
     return ChainJobs(abort_rpc, db, worker, poller)
