@@ -158,7 +158,9 @@ def test_a_db_swapped_after_the_checks_is_refused_t401(dd: DataDir, monkeypatch:
 
     def swap(path: Path, data_dir: DataDir) -> int:
         inode = real(path, data_dir)
-        path.unlink()  # another file takes its place before SQLite opens the path
+        # Move the original aside rather than unlinking it, so its inode stays allocated and the
+        # new file can't reuse the number (ext4 often hands a freed inode straight back).
+        path.rename(path.with_name("moved-aside"))
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         os.close(fd)
         return inode

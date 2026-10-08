@@ -199,7 +199,8 @@ def _check_side_files(path: Path, data_dir: DataDir) -> None:
 
 
 def _check_still_ours(path: Path, inode: int, data_dir: DataDir) -> None:
-    """After SQLite opened the DB and made its WAL files: nothing was swapped in by path."""
+    """After SQLite opened the DB and made its WAL files: the path still names the file that was
+    checked (same inode). A best-effort check: Python's sqlite3 can't open with SQLITE_OPEN_NOFOLLOW."""
     try:
         st = os.lstat(path)
     except OSError:
