@@ -8,10 +8,12 @@ tests/integration/launcher.
 from __future__ import annotations
 
 import functools
+import os
 import re
 import shutil
 import signal
 import socket
+import sqlite3
 import stat
 import threading
 import time
@@ -264,6 +266,34 @@ def test_a_storage_refusal_stops_start_up_before_anything_is_served_t401(prepare
             announce=lambda s: None,
             exit_process=no_exit,
         )
+    assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
+
+
+def test_the_user_db_is_open_for_the_node_checks_and_closed_at_shutdown_t206(prepared: Prepared) -> None:
+    h = Harness()
+    seen: list[Any] = []
+
+    def check(*args: Any, **kwargs: Any) -> NodeStatus:
+        seen.append(kwargs["db"])
+        assert kwargs["db"].execute("PRAGMA user_version").fetchone()[0] >= 1  # opened and migrated
+        return h.status
+
+    h.check = check  # type: ignore[method-assign]
+    h.during = quitting(h)
+    assert h.serve(prepared) == 0
+    with pytest.raises(sqlite3.ProgrammingError):  # closed by the shutdown steps
+        seen[0].execute("SELECT 1")
+
+
+def test_a_user_db_that_cant_be_used_stops_start_up_before_the_node_checks_t408(prepared: Prepared) -> None:
+    conn = sqlite3.connect(prepared.data_dir.root / "db.sqlite")
+    conn.execute("PRAGMA user_version = 999")  # from a newer version of the app
+    conn.close()
+    os.chmod(prepared.data_dir.root / "db.sqlite", 0o600)
+    h = Harness()
+    with pytest.raises(LaunchError, match="newer version"):
+        h.serve(prepared)
+    assert "check" not in h.events
     assert list(prepared.data_dir.root.glob(f"{launcher.BOOTSTRAP_PREFIX}*")) == []
 
 

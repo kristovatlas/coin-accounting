@@ -58,6 +58,7 @@ import uvicorn
 from coinacct import config
 from coinacct.api import runtime
 from coinacct.storage import config_file, datadir, volume
+from coinacct.storage.db import DbError, open_db
 from coinacct.storage.logfile import open_log_handler
 from coinacct.storage.watchdog import Watchdog
 
@@ -438,6 +439,7 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
     token = new_bootstrap_token()
     launch_file: list[Path] = []
     servers: list[Any] = []
+    dbs: list[Any] = []  # the user DB, once open
     server_running = threading.Event()  # set just before uvicorn runs
     server_stopped = threading.Event()  # set once it has returned
     phase_lock = threading.Lock()
@@ -458,6 +460,11 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
         # coordinator's deadline, which ends the process if this doesn't.
         if server_running.is_set() and not server_stopped.wait(SERVER_STOP_SECONDS):
             raise RuntimeError("the server didn't stop in time")
+
+    def close_db() -> None:
+        # After the server has stopped (stop_server waits for it), so no request still uses it (§3).
+        for conn in dbs:
+            conn.close()
 
     def end_a_stalled_start_up() -> None:
         # Shutdown was asked for before uvicorn ran, and start-up hasn't taken over the report: the
@@ -491,6 +498,7 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
     watchdog = make_watchdog(data, shutdown.request)
     shutdown.add_step("report the reason", lambda: stderr_line(f"shutting down: {shutdown.reason}"))
     shutdown.add_step("stop the server", stop_server)
+    shutdown.add_step("close the user DB", close_db)
     shutdown.add_step("stop the watchdog", watchdog.stop)
     shutdown.add_step("remove the launch file", remove_launch_file)
     shutdown.add_step("clear the temp directory", clear_tmp_if_trusted)  # §6
@@ -527,6 +535,12 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
 
     with shutdown_signals(shutdown.request, force_exit):
         try:
+            # §8.1: the user DB (its checks, integrity check and migrations), then the watchdog, then
+            # the node checks, which compare the node's chain with the DB's (T-206).
+            try:
+                dbs.append(open_db(data))
+            except DbError as e:
+                raise refuse(str(e)) from None
             watchdog.start()  # before the node checks (§8.1)
             try:
                 rt = build(
@@ -534,6 +548,7 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
                     bootstrap_token=token,
                     rpc=prepared.config.rpc,
                     volume=data.volume,
+                    db=dbs[0],
                     allow_unencrypted=prepared.needs_test_chain,
                     on_claimed=remove_launch_file,
                     shutdown=shutdown,

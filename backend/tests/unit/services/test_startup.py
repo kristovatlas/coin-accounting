@@ -8,13 +8,19 @@ decision, the reasons, and the deferred unencrypted-storage policy.
 from __future__ import annotations
 
 import logging
+import sqlite3
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from coinacct.chain.node_checks import REQUIRED_INDEXES
 from coinacct.rpc import RpcAuthError, RpcTransportError
-from coinacct.services.startup import StorageRefused, check_at_startup
+from coinacct.services.startup import StorageRefused, check_at_startup, check_recorded
+from coinacct.storage.chain_state import record_chain, recorded_chain
+from coinacct.storage.datadir import open_data_dir
+from coinacct.storage.db import open_db
 from coinacct.storage.volume import Encryption, VolumeStatus
 
 ENCRYPTED = VolumeStatus(Encryption.VERACRYPT, "device-mapper veracrypt1")
@@ -146,3 +152,48 @@ def test_a_test_chain_data_directory_runs_offline_while_the_node_is_down_t401() 
         Node(error=RpcTransportError("down")), expected_chain="regtest", volume=PLAIN, allow_unencrypted=True
     )
     assert not status.online
+
+
+# --- The recorded chain (T-206) ------------------------------------------------------------------
+
+
+@pytest.fixture
+def db(tmp_path: Path) -> Iterator[sqlite3.Connection]:
+    d = tmp_path / "data"
+    d.mkdir(mode=0o700)
+    conn = open_db(open_data_dir(str(d)))
+    yield conn
+    conn.close()
+
+
+def recorded(node: Node, db: sqlite3.Connection, **kwargs: Any) -> Any:
+    return check_recorded(
+        node,
+        db=db,
+        volume=kwargs.get("volume", ENCRYPTED),
+        allow_unencrypted=kwargs.get("allow", False),
+        sync_attempts=1,
+    )
+
+
+def test_a_new_data_directory_records_the_nodes_chain_once_every_check_passes_t206(
+    db: sqlite3.Connection,
+) -> None:
+    assert recorded_chain(db) is None
+    assert recorded(Node(canary=False), db).online is False  # the whitelist is missing: offline
+    assert recorded_chain(db) is None  # a node that fails a check never decides the chain
+    assert recorded(Node(chain="signet"), db).online
+    assert recorded_chain(db) == "signet"
+
+
+def test_a_node_on_another_chain_than_the_recorded_one_means_offline_t206(db: sqlite3.Connection) -> None:
+    record_chain(db, "signet")
+    status = recorded(Node(chain="regtest"), db)
+    assert not status.online and any("different chain" in r for r in status.reasons)
+    assert recorded_chain(db) == "signet"
+
+
+def test_the_recorded_chain_decides_the_storage_policy_t401(db: sqlite3.Connection) -> None:
+    record_chain(db, "main")
+    with pytest.raises(StorageRefused):  # a regtest node can't make unencrypted mainnet data acceptable
+        recorded(Node(chain="regtest"), db, volume=PLAIN, allow=True)

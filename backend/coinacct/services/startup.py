@@ -7,6 +7,10 @@ stops the app: it becomes a reason shown to the user.
 It also settles the storage decision the launcher had to defer (T-401): unencrypted storage is only
 ever allowed on a test chain, and the chain isn't known until the node has answered. If the chain
 can't be shown to be a test chain, `StorageRefused` is raised and the app must not start.
+
+`check_configured_node` checks the node's chain against the one recorded in the user DB (T-206): a
+mismatch means offline mode. A new data directory records the node's chain on its first start that
+passes every check, and from then on it never changes.
 """
 
 from __future__ import annotations
@@ -17,7 +21,8 @@ from typing import Any
 
 from coinacct.chain import node_checks
 from coinacct.domain.secret import Secret
-from coinacct.storage import datadir
+from coinacct.storage import chain_state, datadir
+from coinacct.storage.db import Connection
 from coinacct.storage.volume import VolumeStatus
 
 log = logging.getLogger(__name__)
@@ -74,12 +79,31 @@ def check_configured_node(  # noqa: PLR0913 - the endpoint, its credentials and 
     user: str,
     password: Secret,
     *,
-    expected_chain: str | None,
+    db: Connection,
     volume: VolumeStatus,
     allow_unencrypted: bool,
 ) -> NodeStatus:
-    """`check_at_startup` against the configured node (the launcher passes the config as values)."""
+    """`check_recorded` against the configured node (the launcher passes the config as values)."""
     client = node_checks.connect(host, port, user, password)
-    return check_at_startup(
-        client, expected_chain=expected_chain, volume=volume, allow_unencrypted=allow_unencrypted
+    return check_recorded(client, db=db, volume=volume, allow_unencrypted=allow_unencrypted)
+
+
+def check_recorded(
+    client: node_checks.NodeRpc,
+    *,
+    db: Connection,
+    volume: VolumeStatus,
+    allow_unencrypted: bool,
+    **gather_options: Any,
+) -> NodeStatus:
+    """`check_at_startup` against the chain recorded in the user DB (T-206). A data directory with
+    no recorded chain records the node's, but only once every check has passed: a node that is
+    misconfigured, or on the wrong chain, must never decide it."""
+    expected = chain_state.recorded_chain(db)
+    status = check_at_startup(
+        client, expected_chain=expected, volume=volume, allow_unencrypted=allow_unencrypted, **gather_options
     )
+    if expected is None and status.online and status.chain is not None:
+        chain_state.record_chain(db, status.chain)
+        log.info("recorded the data directory's chain: %s", status.chain)
+    return status
