@@ -216,6 +216,15 @@ class Added:
     conflicts: tuple[str, ...]
 
 
+# What a change made by `add_addresses` is logged as: the user adding addresses by hand is the user.
+_ORIGIN: Final[dict[Source, change_log.Origin]] = {
+    "import": "import",
+    "descriptor": "descriptor",
+    "discovery": "discovery",
+    "manual": "user",
+}
+
+
 def add_addresses(  # noqa: PLR0913 - one batch of addresses and the owner, account and clients they share
     conn: sqlite3.Connection,
     addresses: Iterable[tuple[str, str | None]],
@@ -266,7 +275,10 @@ def add_addresses(  # noqa: PLR0913 - one batch of addresses and the owner, acco
                     after = change_log.address_state(conn, script_hex)
                     if after != before:
                         change_log.append(
-                            conn, at or change_log.now(), ("address_tag", script_hex, before, after)
+                            conn,
+                            at or change_log.now(),
+                            ("address_tag", script_hex, before, after),
+                            _ORIGIN[source],
                         )
     except sqlite3.IntegrityError:
         raise _refused(

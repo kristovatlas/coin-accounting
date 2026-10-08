@@ -503,7 +503,7 @@ def _tag_routes(app: FastAPI, tagging: Tagging, authenticated: list[Any]) -> Non
     def history(body: Subject) -> dict[str, Any]:
         return {
             "changes": [
-                {"at": c.at, "kind": c.kind, "before": c.before, "after": c.after}
+                {"at": c.at, "kind": c.kind, "before": c.before, "after": c.after, "origin": c.origin}
                 for c in tagging.changes(body.kind, body.subject)
             ]
         }

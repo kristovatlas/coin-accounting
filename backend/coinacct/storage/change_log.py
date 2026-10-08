@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime
 import json
 import sqlite3
-from typing import Any
+from typing import Any, Literal
 
 
 def now() -> str:
@@ -43,16 +43,21 @@ def address_state(conn: sqlite3.Connection, script_hex: str) -> dict[str, Any] |
     }
 
 
-def append(conn: sqlite3.Connection, at: str, entry: tuple[str, str, Any, Any]) -> None:
-    """Append `(kind, subject, before, after)` to the change log."""
+type Origin = Literal["user", "import", "descriptor", "discovery", "heuristic", "suggestion"]
+
+
+def append(conn: sqlite3.Connection, at: str, entry: tuple[str, str, Any, Any], origin: Origin) -> None:
+    """Append `(kind, subject, before, after)` to the change log, with what made the change
+    (`migrations/m0010_change_log_origin`)."""
     kind, subject, before, after = entry
     conn.execute(
-        "INSERT INTO change_log (at, kind, subject, before, after) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO change_log (at, kind, subject, before, after, origin) VALUES (?, ?, ?, ?, ?, ?)",
         (
             at,
             kind,
             subject,
             None if before is None else json.dumps(before, sort_keys=True),
             json.dumps(after, sort_keys=True),
+            origin,
         ),
     )

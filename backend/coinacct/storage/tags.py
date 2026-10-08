@@ -39,6 +39,7 @@ class Change:
     subject: str
     before: dict[str, Any] | None
     after: dict[str, Any]
+    origin: str | None  # what made the change (m0010); None for rows logged before it was recorded
 
 
 def tag_address(  # noqa: PLR0913 - the address, its owner and account, label, clients and the time
@@ -96,7 +97,7 @@ def tag_address(  # noqa: PLR0913 - the address, its owner and account, label, c
                 "INSERT INTO address_client (script_hex, client_id) VALUES (?, ?)",
                 [(script_hex, c) for c in clients],
             )
-            append(conn, at, ("address_tag", script_hex, before, after))
+            append(conn, at, ("address_tag", script_hex, before, after), "user")
     except sqlite3.IntegrityError:
         raise AccountsError(
             "that tag (an unknown owner, account or client; the user's address needs one self-custody"
@@ -120,7 +121,7 @@ def set_mixing(conn: sqlite3.Connection, txid: str, mixing: bool, *, at: str) ->
             " ON CONFLICT (txid) DO UPDATE SET mixing = excluded.mixing, source = 'user'",
             (txid, int(mixing)),
         )
-        append(conn, at, ("tx_flag", txid, before, after))
+        append(conn, at, ("tx_flag", txid, before, after), "user")
 
 
 def mixing(conn: sqlite3.Connection, txid: str) -> bool | None:
@@ -132,9 +133,10 @@ def mixing(conn: sqlite3.Connection, txid: str) -> bool | None:
 def changes(conn: sqlite3.Connection, of: tuple[str, str] | None = None) -> list[Change]:
     """The change log, oldest first; or one `(kind, subject)`'s. The kind matters: a 32-byte script
     and a txid look alike."""
-    sql = "SELECT id, at, kind, subject, before, after FROM change_log"
+    sql = "SELECT id, at, kind, subject, before, after, origin FROM change_log"
     where = "" if of is None else " WHERE kind = ? AND subject = ?"
     rows = conn.execute(sql + where + " ORDER BY id", () if of is None else of).fetchall()
     return [
-        Change(i, a, k, s, None if b is None else json.loads(b), json.loads(af)) for i, a, k, s, b, af in rows
+        Change(i, a, k, s, None if b is None else json.loads(b), json.loads(af), o)
+        for i, a, k, s, b, af, o in rows
     ]
