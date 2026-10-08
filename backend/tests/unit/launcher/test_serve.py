@@ -136,6 +136,9 @@ class Harness:
                 db.execute("SELECT 1")  # the user DB is still open (§3: jobs stop before it closes)
                 events.append("chain jobs stopped")
 
+            def request_sync(self) -> None:
+                events.append("sync requested")
+
         self.events.append("chain jobs started")
         return Jobs()
 

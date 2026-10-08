@@ -49,6 +49,11 @@ class DbError(Exception):
     """The user DB can't be used. The message says why; it never contains user data."""
 
 
+class DbBusy(DbError):
+    """The user DB is busy: the writer's lock, or SQLite's own write lock (another process), wasn't
+    free within the connection's timeout. Trying again later can work."""
+
+
 class WriterConnection(sqlite3.Connection):
     """The one writer connection (architecture §3), with the lock its transactions hold."""
 
@@ -68,7 +73,7 @@ def _acquire(conn: sqlite3.Connection) -> threading.RLock | None:
     if not isinstance(conn, WriterConnection):
         return None
     if not conn.lock.acquire(timeout=conn.lock_timeout):
-        raise DbError("the user DB is busy; try again in a moment")
+        raise DbBusy("the user DB is busy; try again in a moment")
     return conn.lock
 
 
@@ -206,9 +211,10 @@ def open_reader(data_dir: DataDir, *, timeout: float = 5.0) -> sqlite3.Connectio
             raise DbError("the user DB isn't at this app's schema version; open it with open_db first")
     except sqlite3.DatabaseError as e:
         conn.close()
-        raise DbError(
-            f"the user DB can't be read ({getattr(e, 'sqlite_errorname', '') or type(e).__name__})"
-        ) from None
+        name = getattr(e, "sqlite_errorname", "")
+        if name.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+            raise DbBusy("the user DB is busy; try again in a moment") from None
+        raise DbError(f"the user DB can't be read ({name or type(e).__name__})") from None
     except BaseException:
         conn.close()
         raise
@@ -301,7 +307,12 @@ class transaction:
             self.nested = True
             self.conn.execute("SAVEPOINT coinacct")
         else:
-            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as e:
+                if getattr(e, "sqlite_errorname", "").startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+                    raise DbBusy("the user DB is busy; try again in a moment") from None
+                raise
 
     def _end(self, kind: object) -> None:
         if self.nested:

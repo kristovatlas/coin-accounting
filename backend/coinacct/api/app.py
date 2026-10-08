@@ -11,6 +11,16 @@ Routes:
 - `POST /api/session`: bootstrap token → session token, once (§4).
 - `GET /api/status` (bearer): the node status from start-up.
 - `POST /api/quit` (bearer): start shutdown.
+- Accounts and imports (bearer; PLAN §3, T-701, T-703), through `services.imports.Imports`:
+  - `GET /api/accounts`: the entities, tax accounts and wallet clients.
+  - `POST /api/entities`, `/api/tax-accounts`, `/api/clients`: add one.
+  - `POST /api/imports/addresses/preview` and `/api/imports/descriptor/preview`: what an upload holds.
+  - `POST /api/imports/addresses` and `/api/imports/descriptor`: import it (the UI sends this only
+    after the user confirmed the preview of the same upload).
+
+  A refusal is a 422 with the service's fixed message, which never repeats the upload (T-403,
+  T-703); a busy DB is a 503; a descriptor while offline is a 409 (T-203). Upload size is bounded by
+  the security layer's body limit, before any of this runs.
 
 FastAPI's docs, OpenAPI schema and default validation errors are off: the docs page loads
 third-party assets (T-106), and the default error body echoes the request input.
@@ -20,7 +30,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
@@ -28,8 +38,11 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from coinacct.api.placeholder import APP_JS, INDEX_HTML
-from coinacct.api.security import SecurityMiddleware
+from coinacct.api.security import MAX_BODY_BYTES, SecurityMiddleware
 from coinacct.api.session import ClaimError, Sessions
+from coinacct.domain.keys import PrivateKeyError
+from coinacct.services import imports as import_service
+from coinacct.services.imports import Busy, ImportRefused, Imports, OfflineError, Owner
 from coinacct.services.startup import NodeStatus
 
 log = logging.getLogger(__name__)
@@ -55,13 +68,77 @@ class Unauthorized(Exception):
     pass
 
 
-def create_app(
+class Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class NewEntity(Strict):
+    name: str = Field(min_length=1, max_length=200)
+    kind: Literal["exchange", "employer", "merchant", "person", "unknown"]
+
+
+class NewTaxAccount(Strict):
+    name: str = Field(min_length=1, max_length=200)
+    kind: Literal["self_custody", "custodial"]
+    entity_id: int | None = None
+
+
+class NewClient(Strict):
+    name: str = Field(min_length=1, max_length=200)
+    kind: Literal["hardware", "mobile", "desktop", "web", "paper", "other"]
+
+
+class Upload(Strict):
+    # The security layer's body limit comes first (a 413 above it), so it is the real upload limit:
+    # a longer list is imported in parts.
+    text: str = Field(max_length=MAX_BODY_BYTES)
+
+
+class DescriptorUpload(Upload):
+    gap_limit: int = Field(default=import_service.DEFAULT_GAP_LIMIT, ge=1, le=import_service.MAX_GAP_LIMIT)
+
+
+class Owned(Strict):
+    entity_id: int
+    tax_account_id: int | None
+    label: str = Field(default="", max_length=200)
+    start_height: int = Field(default=0, ge=0)
+    client_ids: list[int] = Field(default_factory=list, max_length=50)
+
+    def owner(self) -> Owner:
+        return Owner(
+            self.entity_id, self.tax_account_id, self.label, self.start_height, tuple(self.client_ids)
+        )
+
+
+class OwnedUpload(Upload, Owned):
+    pass
+
+
+class OwnedDescriptorUpload(DescriptorUpload, Owned):
+    pass
+
+
+def _known(known: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "script": k.script_hex,
+            "address": k.address,
+            "entity_id": k.entity_id,
+            "tax_account_id": k.tax_account_id,
+        }
+        for k in known
+    ]
+
+
+def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hands in
     *,
     port: int,
     sessions: Sessions,
     status: Callable[[], NodeStatus],
     on_quit: Callable[[], None],
     bundle: Mapping[str, bytes] | None = None,
+    imports: Imports | None = None,
 ) -> SecurityMiddleware:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -81,6 +158,20 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def invalid(request: Request, exc: RequestValidationError) -> Response:
         return JSONResponse({"error": "invalid request"}, status_code=422)
+
+    # The services' refusals carry fixed messages that never repeat the input (T-403, T-703).
+    @app.exception_handler(OfflineError)
+    async def offline(request: Request, exc: OfflineError) -> Response:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.exception_handler(ImportRefused)
+    @app.exception_handler(PrivateKeyError)
+    async def refused(request: Request, exc: Exception) -> Response:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+    @app.exception_handler(Busy)
+    async def busy(request: Request, exc: Busy) -> Response:
+        return JSONResponse({"error": str(exc)}, status_code=503)
 
     if bundle is not None:
         index_html = bundle["index.html"]
@@ -125,4 +216,66 @@ def create_app(
         on_quit()
         return {"result": "shutting down"}
 
+    if imports is not None:
+        _import_routes(app, imports, authenticated)
     return SecurityMiddleware(app, port=port)
+
+
+def _import_routes(app: FastAPI, imports: Imports, authenticated: list[Any]) -> None:
+    @app.get("/api/accounts", dependencies=authenticated)
+    def overview() -> dict[str, Any]:
+        o = imports.overview()
+        return {
+            "online": imports.online,
+            "entities": [
+                {"id": e.id, "name": e.name, "kind": e.kind, "knows_identity": e.knows_identity}
+                for e in o.entities
+            ],
+            "tax_accounts": [
+                {"id": a.id, "name": a.name, "kind": a.kind, "entity_id": a.entity_id} for a in o.tax_accounts
+            ],
+            "clients": [{"id": c.id, "name": c.name, "kind": c.kind} for c in o.clients],
+        }
+
+    @app.post("/api/entities", status_code=201, dependencies=authenticated)
+    def add_entity(body: NewEntity) -> dict[str, int]:
+        return {"id": imports.add_entity(body.name, body.kind)}
+
+    @app.post("/api/tax-accounts", status_code=201, dependencies=authenticated)
+    def add_tax_account(body: NewTaxAccount) -> dict[str, int]:
+        return {"id": imports.add_tax_account(body.name, body.kind, entity_id=body.entity_id)}
+
+    @app.post("/api/clients", status_code=201, dependencies=authenticated)
+    def add_client(body: NewClient) -> dict[str, int]:
+        return {"id": imports.add_client(body.name, body.kind)}
+
+    @app.post("/api/imports/addresses/preview", dependencies=authenticated)
+    def preview_addresses(body: Upload) -> dict[str, Any]:
+        p = imports.preview_addresses(body.text)
+        return {
+            "new": [{"script": s, "address": a} for s, a in p.new],
+            "known": _known(p.known),
+            "repeated": p.repeated,
+            "invalid_lines": list(p.invalid_lines),
+        }
+
+    @app.post("/api/imports/addresses", dependencies=authenticated)
+    def import_addresses(body: OwnedUpload) -> dict[str, Any]:
+        result = imports.import_addresses(body.text, body.owner())
+        return {"added": list(result.added), "conflicts": list(result.conflicts)}
+
+    @app.post("/api/imports/descriptor/preview", dependencies=authenticated)
+    def preview_descriptor(body: DescriptorUpload) -> dict[str, Any]:
+        p = imports.preview_descriptor(body.text, body.gap_limit)
+        return {
+            "descriptor": p.info.text,
+            "ranged": p.info.is_range,
+            "gap_limit": p.gap_limit,
+            "derived": [{"index": i, "script": s, "address": a} for i, s, a in p.derived],
+            "already_imported": p.already_imported,
+            "known": _known(p.known),
+        }
+
+    @app.post("/api/imports/descriptor", status_code=201, dependencies=authenticated)
+    def import_descriptor(body: OwnedDescriptorUpload) -> dict[str, int]:
+        return {"id": imports.import_descriptor(body.text, body.owner(), body.gap_limit)}
