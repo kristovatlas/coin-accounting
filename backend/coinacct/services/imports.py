@@ -392,7 +392,8 @@ class Imports:
                 start_height=owner.start_height,
                 client_ids=owner.client_ids,
             )
-        # A new script, or a known one whose start height went down: something to scan either way.
+        # Any script that isn't a conflict: a new one, or a known one whose start height may have
+        # gone down. A sync with nothing new to scan is cheap; a missed one leaves history unscanned.
         if len(preview.new) + len(preview.known) > len(result.conflicts):
             self._request_sync()
         return result

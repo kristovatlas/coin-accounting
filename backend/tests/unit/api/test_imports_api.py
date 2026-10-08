@@ -180,11 +180,22 @@ def test_an_address_list_is_previewed_then_imported_and_scanned_t701(world: Worl
     }
     assert world.syncs == 0 and ac.addresses(world.db) == []  # a preview writes nothing
     owner = {"entity_id": ac.ME, "tax_account_id": wallet, "label": "cold"}
-    reply = world.post("/api/imports/addresses", {"text": upload, **owner})
+    reply = world.post("/api/imports/addresses", {"text": upload, **owner, "start_height": 100})
     assert reply.json() == {"added": [s1, s2], "conflicts": []} and world.syncs == 1
     earlier = world.post("/api/imports/addresses", {"text": upload, **owner, "start_height": 0})
-    # Nothing added, but a known script may now start earlier: its earlier history needs a scan.
+    # Nothing added, but the known scripts now start earlier: that history needs a scan.
     assert earlier.json() == {"added": [], "conflicts": []} and world.syncs == 2
+    assert {a.start_height for a in ac.addresses(world.db)} == {0}
+
+
+def test_an_import_that_only_conflicts_asks_for_no_sync(world: World) -> None:
+    wallet = world.wallet()
+    exchange = world.post("/api/entities", {"name": "An exchange", "kind": "exchange"}).json()["id"]
+    address, script = p2wpkh(1)
+    ac.add_addresses(world.db, [(script, address)], entity_id=exchange, tax_account_id=None, source="manual")
+    body = {"text": address, "entity_id": ac.ME, "tax_account_id": wallet}
+    assert world.post("/api/imports/addresses", body).json() == {"added": [], "conflicts": [script]}
+    assert world.syncs == 0  # nothing of this owner's to scan
 
 
 def test_a_private_key_is_refused_and_never_repeated_t703(world: World) -> None:
