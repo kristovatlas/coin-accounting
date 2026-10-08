@@ -21,6 +21,8 @@ Transitive packages are covered by the lockfiles, the lockfile policy check and 
 | `@vitejs/plugin-react` | JavaScript (pnpm), `frontend`, dev | 6.1.1 (published 2026-08-28) | Dev | React support for Vite | none needed beyond Vite's built-in JSX transform | MIT | No | No | PR #136: both Socket checks (Pull Request Alerts, Project Report) passed | 2026-10-06, PR #136 | the human, by merging PR #136 (ENGINEERING §2.4) |
 | `typescript` | JavaScript (pnpm), `frontend`, dev | 6.0.3 (published 2026-04-16) | Dev | Strict typing (ENGINEERING §5) | TypeScript 7 (native compiler, needs its own ADR); plain JavaScript | Apache-2.0 | No | No (the last pure-JavaScript release) | PR #136: both Socket checks (Pull Request Alerts, Project Report) passed | 2026-10-06, PR #136 | the human, by merging PR #136 (ENGINEERING §2.4) |
 | `@playwright/test` | JavaScript (pnpm), `e2e`, dev | 1.63.0 (published 2026-09-04) | Dev | E2E tests on the production build (ENGINEERING §3.1) | Cypress (heavier, its own runtime); WebdriverIO | Apache-2.0 | Drives a local browser; browser downloads are pinned and hash-checked separately, not by this package. Transitive: `playwright`, `playwright-core` (Apache-2.0) | No | PR #136: both Socket checks (Pull Request Alerts, Project Report) passed | 2026-10-06, PR #136 | the human, by merging PR #136 (ENGINEERING §2.4) |
+| `cytoscape` | JavaScript (pnpm), `frontend` | 3.33.1 (published 2025-08-12) | Runtime (bundled) | The UTXO graph (PLAN §4, M3): nodes, edges, styling, pan and zoom | `vis-network` (larger, less active), `sigma.js` (WebGL, aimed at large static graphs), hand-written SVG with React (no layout, hit-testing or zoom) | MIT | **Can load images** named by URL-valued style properties (`background-image`), confined by the CSP's `img-src 'self' data: blob:`. M3 never maps element data (labels, chain data) to a URL-valued style property (T-104). No other requests | No native code, no install scripts, no dependencies; ships its own type declarations. To check in M3's E2E test: it runs under the strict CSP (no inline `<style>`, no `eval`) | Pending: this PR's Socket checks | 2026-10-08, this PR (M3) | pending: the human's approval (ENGINEERING §2.4) |
+| `@dagrejs/dagre` | JavaScript (pnpm), `frontend` | 1.1.5 (published 2025-06-17) | Runtime (bundled) | Directed (DAG) layout: computes node positions, which M3 hands to Cytoscape's `preset` layout through a small adapter of its own | `cytoscape-dagre` 2.5.0 (2022), which depends on the unmaintained `dagre` 0.8.5 and `graphlib` 2.1.8 (2019) and ships no type declarations (PR #203's review); `cytoscape-elk` (a large layout engine); Cytoscape's built-in `breadthfirst` (no edge-crossing reduction) | MIT | No | No native code, no install scripts. Transitive: `@dagrejs/graphlib` 2.2.4 (MIT, 2024-08), maintained by the same project. Type declarations: to confirm when M3 first imports it (expected bundled) | Pending: this PR's Socket checks | 2026-10-08, this PR (M3) | pending: the human's approval (ENGINEERING §2.4) |
 
 ## Proposed, awaiting approval
 
@@ -29,6 +31,8 @@ Step 1 of [ENGINEERING §2.4](ENGINEERING.md#24-adding-a-dependency-vet-before-a
 **Python, runtime**: `fastapi` and `uvicorn` were approved by the owner on 2026-10-04 (Socket verdict and lockfile diff; PR #104, ADR 0028), and are listed in the table above.
 
 **JavaScript**: `react`, `react-dom`, `vite`, `@vitejs/plugin-react`, `typescript` and `@playwright/test` were approved by merging PR #136, and are listed in the table above.
+
+**JavaScript, M3**: `cytoscape` and `@dagrejs/dagre` are resolved in the lockfile and listed in the table above, pending the human's approval. When the human approves them, this PR's rows record the Socket result and "the human, by merging PR #N".
 
 Deliberately **not** proposed, because the stdlib or our own code covers it:
 - the RPC client (`http.client`)
@@ -41,13 +45,6 @@ Deliberately **not** proposed, because the stdlib or our own code covers it:
 | Package | Purpose | Notes |
 |---|---|---|
 | `mutmut` | Mutation testing (§3.4) | |
-
-**JavaScript, runtime (bundled into the SPA)**
-
-| Package | Purpose | Notes |
-|---|---|---|
-| `cytoscape` | Graph rendering | Must pass the E2E strict-CSP check (inline styles) |
-| `cytoscape-dagre` (+ `dagre`) | DAG layout for the UTXO graph | Alternative: `cytoscape-elk` (heavier) |
 
 **JavaScript, development and build**
 
