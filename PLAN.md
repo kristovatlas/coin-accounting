@@ -370,6 +370,21 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
 
    What M2 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues #184, #186, #188, #190, #192, #194, #196, #198 and #200.
 4. **M3 graph UI:** backward/forward expansion, the tagging side panel, the mixing flag.
+
+   M3 is done (2026-10-08). The merged PRs:
+   - the graph libraries, `cytoscape` and `@dagrejs/dagre` (#204, ADR 0037)
+   - transaction and spender expansion for the graph (#205)
+   - tagging from the graph, the mixing flag and the append-only change log (#207)
+   - tagging follow-ups: the address text checked against its script, the log guarded against replacement, a log holding an id only an outside edit can write refused at upgrade, and import edits logged (#214, #217, #219, #221)
+   - the graph view and its tagging side panel (#223)
+
+   As built, it differs from this plan in these ways:
+   - **Paging:** a transaction's inputs and outputs are all added at once; paging large transactions, with a node budget, is #225.
+   - **Colours:** outputs are coloured by class (yours, someone else's, untagged, unspendable), not per entity yet (#226).
+   - **Expansion E2E:** the E2E test opens a transaction, flags it, checks an unspent output and re-tags it; backward and spent-forward expansion need a spend in the regtest harness (#224).
+   - **Mixing flag:** the user sets it; auto-detection comes with the clustering heuristics (M4).
+
+   What M3 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues #206, #209, #220, #222, #224–#227, #229 (tag provenance per change, before M4) and #230 (frontend unit tests).
 5. **M4 clustering suggestions + doxx propagation:** certain and inferred links, plus the sell planner view.
 6. **M5 prices:** bulk USD VWAP, display FX for all pairs, proxy support.
 7. **M6 lot engine:**

@@ -5,6 +5,7 @@ real node. Synthetic data only."""
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -72,11 +73,15 @@ class FakeChain:
         self.spends: dict[Outpoint, Spend] = {}
         self.calls: list[str] = []
         self.raise_on_fetch: Exception | None = None
+        self.raise_on_tip: Exception | None = None
+        self.filled: dict[str, Tx] = {}  # what fill_prevouts returns, by txid (default: unchanged)
         self.stale: set[str] = set()  # txids whose block has left the active chain
         self.missing: set[str] = set()  # txids the node doesn't have
 
     def node_tip(self, rpc: Any) -> Tip:
         self.calls.append("node_tip")
+        if self.raise_on_tip is not None:
+            raise self.raise_on_tip
         return self.tips.pop(0) if len(self.tips) > 1 else self.tips[0]
 
     def fetch_tx(self, rpc: Any, txid: str, blockhash: str | None = None) -> Tx:
@@ -91,7 +96,7 @@ class FakeChain:
 
     def fill_prevouts(self, rpc: Any, t: Tx) -> Tx:
         self.calls.append("fill_prevouts")
-        return t
+        return self.filled.get(t.txid, t)
 
     def spend_of(self, rpc: Any, t: Tx, n: int) -> Spend:
         self.calls.append(f"spend_of {n}")
@@ -215,20 +220,29 @@ def test_a_node_ahead_of_the_apps_tip_isnt_cached_t207(
 def test_an_unconfirmed_transaction_gets_its_prevouts_and_is_never_cached_t207(
     data: DataDir, conn: sqlite3.Connection, chain: FakeChain
 ) -> None:
-    chain.txs[(h(1), None)] = tx(1, block=None)
+    unfilled = tx(1, block=None)
+    chain.txs[(h(1), None)] = dataclasses.replace(
+        unfilled, inputs=(dataclasses.replace(unfilled.inputs[0], spent=None),)
+    )
+    chain.filled[h(1)] = dataclasses.replace(
+        unfilled,
+        inputs=(dataclasses.replace(unfilled.inputs[0], spent=TxOut(12_345, MINE, "witness_v0_keyhash")),),
+    )
     view = online(data, conn).tx(h(1), None)
     assert view.blockhash is None and view.confirmations == 0
-    assert "fill_prevouts" in chain.calls
+    # the input's value and owner come from the filled prevout, not the reply without it
+    assert view.inputs[0].sats == 12_345
+    assert view.inputs[0].owner is not None and view.inputs[0].owner.entity_id == ME
     assert conn.execute("SELECT COUNT(*) FROM tx_cache").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(
     ("error", "raised"),
     [
-        (txs.TxNotFoundError("x"), NotFound),
-        (txs.StaleBlockError("x"), NotFound),
-        (txs.BudgetExceededError("x"), ImportRefused),
-        (txs.MalformedTxError("x"), ImportRefused),
+        (txs.TxNotFoundError("node text that names " + h(9)), NotFound),
+        (txs.StaleBlockError("node text that names " + h(9)), NotFound),
+        (txs.BudgetExceededError("node text that names " + h(9)), ImportRefused),
+        (txs.MalformedTxError("node text that names " + h(9)), ImportRefused),
         (txs.NodeError("node text that names " + h(9)), OfflineError),
     ],
 )
@@ -236,6 +250,23 @@ def test_node_failures_map_without_repeating_node_text_t403(
     data: DataDir, conn: sqlite3.Connection, chain: FakeChain, error: Exception, raised: type[Exception]
 ) -> None:
     chain.raise_on_fetch = error
+    with pytest.raises(raised) as caught:
+        online(data, conn).tx(h(1), h(490))
+    assert h(9) not in str(caught.value) and "node text" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("error", "raised"),
+    [
+        (reorg.NodeSyncingError("node text that names " + h(9)), OfflineError),
+        (reorg.TipMovedError("node text that names " + h(9)), OfflineError),
+        (reorg.MalformedHeaderError("node text that names " + h(9)), ImportRefused),
+    ],
+)
+def test_a_tip_read_that_fails_maps_without_repeating_node_text_t403(
+    data: DataDir, conn: sqlite3.Connection, chain: FakeChain, error: Exception, raised: type[Exception]
+) -> None:
+    chain.raise_on_tip = error
     with pytest.raises(raised) as caught:
         online(data, conn).tx(h(1), h(490))
     assert h(9) not in str(caught.value) and "node text" not in str(caught.value)

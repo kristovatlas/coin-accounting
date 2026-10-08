@@ -1,6 +1,7 @@
-// M3's graph (PLAN §4): open a transaction, flag it as a mix, follow an output to its spender, and
-// re-label its address from the side panel; each change lands in the change log. The production build
-// under the real CSP, and every image the graph view requests is the bundle's own (ADR 0037).
+// M3's graph (PLAN §4): open a transaction, flag it as a mix, ask whether an output is spent, and
+// re-label its address from the side panel; each change lands in the change log. Backward and
+// spent-forward expansion are #224. The production build under the real CSP, and every image the
+// graph view requests is the bundle's own (ADR 0037).
 // Synthetic regtest data only: the harness mines to a public test address.
 import { pathToFileURL } from "node:url";
 
@@ -56,6 +57,7 @@ test("a transaction opens in the graph, and its flag and its output's tag are sa
     await expect(page.locator("#graph-mixing-result")).toHaveText("Marked as a mixing transaction.");
     await page.locator("#graph-show-history").click();
     await expect(page.locator("#graph-history li")).toHaveCount(1);
+    await expect(page.locator("#graph-history li")).toContainText('"mixing":true');
 
     // The miner's output: the user's, unspent.
     await output.click();
@@ -72,7 +74,13 @@ test("a transaction opens in the graph, and its flag and its output's tag are sa
     await expect(page.locator("#graph-panel-owner")).toHaveText("Owner: You (coinbase)");
     await page.locator("#tag-history").click();
     await expect(page.locator("#graph-history li")).toHaveCount(1);
-    await expect(page.locator("#graph-history li")).not.toContainText('"client_ids":[]'); // the link was kept
+    // the logged tag keeps the import's wallet app and carries the new label
+    await expect(page.locator("#graph-history li")).toContainText(/"client_ids":\[\d+\]/);
+    await expect(page.locator("#graph-history li")).toContainText('"label":"coinbase"');
+    // the panel opened afresh shows the saved owner, wallet app included (a second edit keeps it)
+    await page.locator(`#graph-nodes [data-node="tx:${txid}"]`).click();
+    await output.click();
+    await expect(page.locator("#graph-panel-owner")).toHaveText("Owner: You (coinbase)");
     await expect(page.locator(".tag-client").first()).toBeChecked();
     expect(await page.locator("style").count()).toBe(0);
 
