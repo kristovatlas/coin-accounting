@@ -122,6 +122,27 @@ def complete_scan_target(conn: sqlite3.Connection, target: Tip) -> None:
         conn.execute("UPDATE chain_state SET target_hash = NULL, target_height = NULL WHERE id = 1")
 
 
+def set_scan_marker(conn: sqlite3.Connection, subject: str) -> None:
+    """Record that a `scanblocks` call for `subject` is about to start (architecture §8.2, T-212)."""
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO scan_marker (id, subject) VALUES (1, ?)"
+            " ON CONFLICT DO UPDATE SET subject = excluded.subject",
+            (subject,),
+        )
+
+
+def clear_scan_marker(conn: sqlite3.Connection) -> None:
+    with transaction(conn):
+        conn.execute("DELETE FROM scan_marker")
+
+
+def scan_marker(conn: sqlite3.Connection) -> str | None:
+    """The subject of a `scanblocks` call the node may still be running, or None."""
+    row = conn.execute("SELECT subject FROM scan_marker WHERE id = 1").fetchone()
+    return None if row is None else str(row[0])
+
+
 def _at(conn: sqlite3.Connection, at: Tip, height: int, blockhash: str) -> None:
     if reference_tip(conn) != at:
         raise StaleTipError("the tip moved while chain data was read from the node; read it again (T-207)")
@@ -280,13 +301,16 @@ def activity_for(conn: sqlite3.Connection, script_hex: str) -> list[Activity]:
     ]
 
 
-def extend_coverage(conn: sqlite3.Connection, covered: Coverage, at: Tip) -> Coverage:
-    """Add a scanned range. It must start where the subject's coverage stops (or be the first), so
-    coverage stays one range with no gaps (T-210). Returns the subject's coverage now."""
+def extend_coverage(conn: sqlite3.Connection, covered: Coverage, at: Tip, *, candidates: int = 0) -> Coverage:
+    """Add a scanned range, with the number of candidate blocks it had (T-205). It must start where
+    the subject's coverage stops (or be the first), so coverage stays one range with no gaps (T-210).
+    Returns the subject's coverage now."""
     if not 0 <= covered.start_height <= covered.stop_height or not is_hash(covered.stop_hash):
         raise ValueError("a scanned range needs 0 <= start <= stop and its stop block's hash")
     if not covered.subject:
         raise ValueError("a scanned range needs a subject")
+    if type(candidates) is not int or candidates < 0:
+        raise ValueError("a candidate count is a whole number >= 0")
     with transaction(conn):
         _at(conn, at, covered.stop_height, covered.stop_hash)
         now = coverage(conn, covered.subject)
@@ -294,11 +318,19 @@ def extend_coverage(conn: sqlite3.Connection, covered: Coverage, at: Tip) -> Cov
             raise DbError("a scanned range must continue the subject's coverage without a gap (T-210)")
         start = covered.start_height if now is None else now.start_height
         conn.execute(
-            "INSERT INTO coverage (subject, start_height, stop_height, stop_hash) VALUES (?, ?, ?, ?)"
-            " ON CONFLICT DO UPDATE SET stop_height = excluded.stop_height, stop_hash = excluded.stop_hash",
-            (covered.subject, start, covered.stop_height, covered.stop_hash),
+            "INSERT INTO coverage (subject, start_height, stop_height, stop_hash, candidates)"
+            " VALUES (?, ?, ?, ?, ?) ON CONFLICT DO UPDATE SET stop_height = excluded.stop_height,"
+            " stop_hash = excluded.stop_hash, candidates = candidates + excluded.candidates",
+            (covered.subject, start, covered.stop_height, covered.stop_hash, candidates),
         )
     return Coverage(covered.subject, start, covered.stop_height, covered.stop_hash)
+
+
+def coverage_candidates(conn: sqlite3.Connection, subject: str) -> int:
+    """The candidate blocks the subject's coverage has had (T-205). A reorg that cuts its coverage
+    back leaves the count: an over-count only asks the user sooner."""
+    row = conn.execute("SELECT candidates FROM coverage WHERE subject = ?", (subject,)).fetchone()
+    return 0 if row is None else int(row[0])
 
 
 def coverage(conn: sqlite3.Connection, subject: str) -> Coverage | None:
