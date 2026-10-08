@@ -84,9 +84,14 @@ def test_an_address_is_tagged_retagged_and_its_history_read(world: World, conn: 
 
 
 def test_the_mixing_flag_is_set_and_logged(world: World) -> None:
-    assert world.post("/api/tags/mixing", {"txid": TXID, "mixing": True}).json() == {"mixing": True}
+    assert world.post("/api/tags/mixing", {"txid": TXID, "mixing": True}).status == 200
     [change] = world.post("/api/tags/history", {"kind": "tx_flag", "subject": TXID}).json()["changes"]
-    assert change["kind"] == "tx_flag" and change["after"]["mixing"] is True
+    assert change == {
+        "at": "2026-10-08T12:00:00+00:00",
+        "kind": "tx_flag",
+        "before": None,
+        "after": {"mixing": True, "source": "user"},
+    }
 
 
 def test_a_refused_tag_is_a_422_without_echo(world: World) -> None:
@@ -110,6 +115,8 @@ def test_a_refused_tag_is_a_422_without_echo(world: World) -> None:
         ("/api/tags/address", {"script": SCRIPT, "entity_id": 1, "tax_account_id": 2**63}),
         ("/api/tags/address", {"script": SCRIPT, "entity_id": 1, "client_ids": [2**63]}),
         ("/api/tags/address", {"script": SCRIPT, "entity_id": 1, "client_ids": [0]}),
+        ("/api/tags/address", {"script": SCRIPT, "entity_id": 1, "address": ""}),
+        ("/api/tags/address", {"script": SCRIPT, "entity_id": 1, "address": "a" * 91}),
     ],
 )
 def test_malformed_bodies_are_refused_without_echo(world: World, path: str, body: dict[str, Any]) -> None:
@@ -136,3 +143,14 @@ def test_an_address_text_that_isnt_the_scripts_is_a_422_without_echo_t701(
     reply = world.post("/api/tags/address", {"script": SCRIPT, "entity_id": exchange, "address": other})
     assert reply.status == 422 and reply.json() == {"error": "that address doesn't pay to that script"}
     assert ac.addresses(conn) == []
+
+
+def test_one_addresss_history_route_returns_only_its_own_changes(
+    world: World, conn: sqlite3.Connection
+) -> None:
+    exchange = ac.add_entity(conn, "Some exchange", "exchange")
+    other = "0014" + "dd" * 20
+    for script in (SCRIPT, other):
+        world.post("/api/tags/address", {"script": script, "entity_id": exchange, "label": script[-2:]})
+    changes = world.post("/api/tags/history", {"kind": "address_tag", "subject": SCRIPT}).json()["changes"]
+    assert [c["after"]["label"] for c in changes] == [SCRIPT[-2:]]

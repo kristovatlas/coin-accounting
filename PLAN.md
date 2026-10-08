@@ -384,7 +384,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
    - **Expansion E2E:** the E2E test opens a transaction, flags it, checks an unspent output and re-tags it; backward and spent-forward expansion need a spend in the regtest harness (#224).
    - **Mixing flag:** the user sets it; auto-detection comes with the clustering heuristics (M4).
 
-   What M3 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues #206, #209, #220, #222, #224–#227 and #229 (tag provenance per change, before M4).
+   What M3 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues #206, #209, #220, #222, #224–#227, #229 (tag provenance per change, before M4) and #230 (frontend unit tests).
 5. **M4 clustering suggestions + doxx propagation:** certain and inferred links, plus the sell planner view.
 6. **M5 prices:** bulk USD VWAP, display FX for all pairs, proxy support.
 7. **M6 lot engine:**
