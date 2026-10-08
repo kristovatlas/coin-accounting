@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.5 (status: see ADR 0014, ADR 0029, ADR 0034) |
-| Last updated | 2026-10-06 |
+| Version | 0.2.6 (status: see ADR 0014, ADR 0029, ADR 0034, ADR 0035) |
+| Last updated | 2026-10-08 |
 | Scope | v1: Bitcoin (Bitcoin Core), single user, Linux + macOS |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) (IDs such as TB1, T-203, F2 refer to it) · [`ENGINEERING.md`](ENGINEERING.md) |
 
@@ -292,11 +292,11 @@ sequenceDiagram
   participant J as services job worker
   participant C as chain/scans
   participant N as Bitcoin Core
-  C->>N: getindexinfo (filter index height H), getblockcount (tip)
+  C->>N: getindexinfo (filter index height H)
   C->>C: S = min(H, scan target − 100), record getblockhash(S)
   loop bounded ranges up to S
     C->>C: write in-flight scan marker
-    C->>C: job cancelled? clear marker, stop (no range starts after a shutdown abort)
+    C->>C: job cancelled? clear marker, stop (shutdown re-reads the marker after its join, for a range that started as the cancel was set)
     C->>N: scanblocks start [{desc, range}] from to
     N-->>C: relevant_blocks, completed
     C->>C: clear marker
@@ -319,7 +319,8 @@ sequenceDiagram
       C->>C: commit activity + coverage(range, hash)
     end
   end
-  C->>N: getdescriptoractivity [blocks S+1..tip] [descs] false
+  C->>N: getblockhash S+1..scan target (stop if the target has left the chain)
+  C->>N: getdescriptoractivity [blocks S+1..scan target] [descs] false
   C->>C: commit (mempool is handled by the separate pass)
 ```
 
@@ -364,14 +365,14 @@ sequenceDiagram
   P->>N: getbestblockhash (every 30 s)
   P->>C: tip changed: queue tip-change job
   C->>N: getblockheader(reference tip), walk back while confirmations = −1
-  C->>C: fork height F: invalidate rows, coverage, snapshots above F (any depth); record the removed txids in the review queue
+  C->>C: fork height F: invalidate rows, coverage, snapshots above F (any depth), and record the removed txids in the review queue
   C->>C: record the new tip as the scan target
   C-->>P: invalidation set
   P->>P: extend coverage to the scan target (8.2), rebuild mempool pass, flag changed events for review
   C->>C: once every subject reaches it, the scan target becomes the last-seen tip
+```
 
 The reference tip is the unfinished scan target if there is one, otherwise the last-seen tip. The review queue keeps the removed txids in the user DB until their events have been flagged, so a crash or a failed sync never loses them (ADR 0035).
-```
 
 ## 9. Build and development flows (never at runtime)
 
