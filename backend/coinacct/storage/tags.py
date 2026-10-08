@@ -4,7 +4,7 @@ THREAT_MODEL T-408, T-504).
 Each change is written together with a `change_log` row, in one transaction, so the log can't miss
 an edit or record one that didn't happen. The log is append-only: the schema refuses any update or
 delete (`migrations/m0006_tags`) and any insert that would replace a row or take an id below 1
-(`m0007_change_log_ids`, `m0008_change_log_positive_ids`).
+(`m0007_change_log_ids`, `m0008_change_log_positive_ids`, `m0009_change_log_no_replace`).
 
 An address text passed in must already be checked against the script and the chain (`services.tags`
 does it); this module only refuses private keys, whoever calls.

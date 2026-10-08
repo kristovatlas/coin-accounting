@@ -8,7 +8,7 @@ the chain jobs are asked for a sync (`services.imports.Imports.request_sync`).
 Errors map as for the import routes: the schema's refusals are `ImportRefused` with a fixed message,
 a busy DB is `Busy`, and a private key in a label or address text is refused before it reaches the DB.
 An address text must be an address of the recorded chain that pays to the script it is stored with,
-as for an import; its normal form is stored.
+as for an import; its normal form is stored, replacing any text stored before.
 """
 
 from __future__ import annotations
