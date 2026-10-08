@@ -36,6 +36,14 @@ function short(hex: string): string {
   return `${hex.slice(0, 8)}…${hex.slice(-4)}`;
 }
 
+/** A bech32 address keeps its prefix and the first characters after the "1" separator, where
+ * addresses differ; any other address keeps its first 8. */
+function shortAddress(address: string): string {
+  const sep = address.lastIndexOf("1");
+  const head = /^(bc|tb|bcrt)1/i.test(address) && sep > 0 ? address.slice(0, sep + 7) : address.slice(0, 8);
+  return `${head}…${address.slice(-4)}`;
+}
+
 /** The owner class a node is drawn with: a fixed set, never free text (ADR 0037). */
 export function ownerClass(node: OutputNode): "mine" | "tagged" | "untagged" | "unspendable" {
   if (node.unspendable) return "unspendable";
@@ -47,7 +55,7 @@ export function label(node: Node): string {
   if (node.kind === "tx") return short(node.txid);
   const amount = node.sats === null ? "?" : btc(node.sats);
   const where = node.address
-    ? short(node.address)
+    ? shortAddress(node.address)
     : node.unspendable
       ? "unspendable"
       : node.script

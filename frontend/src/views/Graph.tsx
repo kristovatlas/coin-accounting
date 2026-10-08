@@ -111,6 +111,7 @@ function TxPanel(props: {
   }
 
   async function showHistory() {
+    setHistoryError(null);
     try {
       setChanges((await getTagHistory(session, "tx_flag", node.txid)).changes);
     } catch (error) {
@@ -164,6 +165,7 @@ function OutputPanel(props: {
   const [clients, setClients] = useState<number[]>(node.owner?.client_ids ?? []);
   const [result, setResult] = useState<string | null>(null);
   const [changes, setChanges] = useState<Change[] | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   const wallets = (accounts?.tax_accounts ?? []).filter((a) => a.kind === "self_custody");
   const ownerName = (id: number) =>
@@ -181,6 +183,7 @@ function OutputPanel(props: {
 
   async function save() {
     if (node.script === null) return;
+    // Save is disabled without an owner; this keeps a save from ever sending entity 0.
     if (owner === NO_OWNER) {
       setResult("Choose whose address this is first.");
       return;
@@ -205,12 +208,15 @@ function OutputPanel(props: {
 
   async function showHistory() {
     if (node.script === null) return;
+    setHistoryError(null);
     try {
       setChanges((await getTagHistory(session, "address_tag", node.script)).changes);
     } catch (e) {
-      setError(message(e));
+      setHistoryError(message(e));
     }
   }
+
+  const spendingTxid = spender?.spending_txid ?? "";
 
   return (
     <>
@@ -237,11 +243,11 @@ function OutputPanel(props: {
         </button>
       )}
       {spender && <p id="graph-spender-state">{spenderText(spender)}</p>}
-      {spender?.spending_txid != null && (
+      {spender !== null && spender.spending_txid !== null && (
         <button
           id="graph-open-spender"
           type="button"
-          onClick={() => onOpen(spender.spending_txid as string, spender.blockhash)}
+          onClick={() => onOpen(spendingTxid, spender.blockhash)}
         >
           Show the transaction that spent it
         </button>
@@ -312,6 +318,7 @@ function OutputPanel(props: {
           <button id="tag-history" type="button" onClick={showHistory}>
             Change history
           </button>
+          {historyError && <p id="graph-history-error">{historyError}</p>}
           {changes && <History changes={changes} />}
         </fieldset>
       )}
@@ -365,9 +372,23 @@ export function Graph({ session }: { session: string }) {
     };
   }, []);
 
+  const shown = useRef("");
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy) return;
+    const ids = [...graph.nodes.keys(), ...graph.edges.keys()].join("\n");
+    if (ids === shown.current) {
+      // The same elements: only an owner or a flag changed. Keep the layout, zoom and pan.
+      cy.batch(() => {
+        for (const n of graph.nodes.values()) {
+          const el = cy.$id(n.id);
+          el.data("label", label(n));
+          el.classes(classes(n));
+        }
+      });
+      return;
+    }
+    shown.current = ids;
     const positions = layout(graph);
     cy.batch(() => {
       cy.elements().remove();
