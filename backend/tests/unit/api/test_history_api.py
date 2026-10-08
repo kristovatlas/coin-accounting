@@ -16,7 +16,7 @@ from coinacct.services.history import History
 from coinacct.services.startup import NodeStatus
 from coinacct.storage.chain_state import record_chain
 from coinacct.storage.datadir import open_data_dir
-from coinacct.storage.db import open_db, open_reader
+from coinacct.storage.db import DbBusy, open_db, open_reader
 from tests.unit.services.test_history import TIP, A, B, two_wallets, txid
 
 from .asgi import PORT, Reply, call
@@ -47,6 +47,9 @@ class World:
     def get(self, path: str) -> Reply:
         return call(self.app, "GET", path, headers=self.auth)
 
+    def post(self, path: str, body: dict[str, Any]) -> Reply:
+        return call(self.app, "POST", path, headers=self.auth, json_body=body)
+
 
 @pytest.fixture
 def world(tmp_path: Path) -> Iterator[World]:
@@ -60,9 +63,12 @@ def conn(world: World) -> sqlite3.Connection:
     return world.db  # for the shared two_wallets fixture
 
 
-@pytest.mark.parametrize("path", ["/api/addresses", f"/api/addresses/{A[0]}/events", "/api/utxos"])
-def test_every_history_route_needs_the_session(world: World, path: str) -> None:
-    assert call(world.app, "GET", path).status == 401
+@pytest.mark.parametrize(
+    ("method", "path"), [("GET", "/api/addresses"), ("POST", "/api/addresses/events"), ("GET", "/api/utxos")]
+)
+def test_every_history_route_needs_the_session(world: World, method: str, path: str) -> None:
+    body = {"script": A[0]} if method == "POST" else None
+    assert call(world.app, method, path, json_body=body).status == 401
 
 
 def test_addresses_carry_balances_and_the_tip_they_are_as_of(
@@ -82,23 +88,52 @@ def test_addresses_carry_balances_and_the_tip_they_are_as_of(
         "received": 70_000,
         "transactions": 3,
         "last_height": 300,
+        "scanned_to": None,
     }
+    assert body["catching_up"] is False
     hot = world.get(f"/api/addresses?tax_account_id={two_wallets[1]}").json()["addresses"]
     assert [x["script"] for x in hot] == [B[0]]
 
 
 def test_one_addresses_events(world: World, two_wallets: tuple[int, int]) -> None:
-    events = world.get(f"/api/addresses/{A[0]}/events").json()["events"]
+    events = world.post("/api/addresses/events", {"script": A[0]}).json()["events"]
     assert [e["kind"] for e in events] == ["receive", "receive", "spend"]
     assert events[2]["prevout"] == {"txid": txid(1), "vout": 0}
 
 
-@pytest.mark.parametrize("script", ["0014" + "cc" * 20, "ZZ", "0014AA", "abc"])
-def test_an_unknown_or_malformed_script_is_refused_without_echo(
+def test_an_unknown_script_is_a_404(world: World, two_wallets: tuple[int, int]) -> None:
+    script = "0014" + "cc" * 20
+    reply = world.post("/api/addresses/events", {"script": script})
+    assert reply.status == 404 and script not in reply.body.decode()
+
+
+def test_the_script_never_goes_in_a_url_t105(world: World, two_wallets: tuple[int, int]) -> None:
+    assert world.get(f"/api/addresses/{A[0]}/events").status in (404, 405)  # no such GET route
+
+
+@pytest.mark.parametrize("script", ["ZZ", "0014AA", "abc"])
+def test_a_malformed_script_is_a_422_without_echo(
     world: World, two_wallets: tuple[int, int], script: str
 ) -> None:
-    reply = world.get(f"/api/addresses/{script}/events")
-    assert reply.status in (404, 422) and script not in reply.body.decode()
+    reply = world.post("/api/addresses/events", {"script": script})
+    assert reply.status == 422 and reply.json() == {"error": "invalid request"}
+
+
+def test_a_busy_db_is_a_503(tmp_path: Path) -> None:
+    def busy() -> sqlite3.Connection:
+        raise DbBusy("the user DB is busy; try again in a moment")
+
+    sessions = Sessions(TOKEN)
+    app = create_app(
+        port=PORT,
+        sessions=sessions,
+        status=lambda: NodeStatus(online=False, chain=None, reasons=()),
+        on_quit=lambda: None,
+        history=History(busy),
+    )
+    session = call(app, "POST", "/api/session", json_body={"bootstrap": TOKEN}).json()["session"]
+    reply = call(app, "GET", "/api/addresses", headers={"Authorization": f"Bearer {session}"})
+    assert reply.status == 503 and "busy" in reply.json()["error"]
 
 
 def test_utxos_oldest_first(world: World, two_wallets: tuple[int, int]) -> None:
