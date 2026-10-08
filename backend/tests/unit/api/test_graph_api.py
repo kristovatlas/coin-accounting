@@ -74,6 +74,7 @@ def test_a_transaction_comes_with_its_owners(world: World, chain: FakeChain) -> 
     body = reply.json()
     assert body["txid"] == h(1) and body["confirmations"] == 11
     assert body["outputs"][0]["script"] == MINE and body["outputs"][0]["owner"]["label"] == "savings"
+    assert body["outputs"][0]["owner"]["client_ids"] == []
     assert body["outputs"][1]["owner"] is None
     assert body["inputs"][0]["prevout"] == {"txid": h(1001), "vout": 0}
     assert body["mixing"] is None

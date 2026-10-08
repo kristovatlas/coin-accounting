@@ -59,6 +59,7 @@ class Owner:
     entity_id: int
     tax_account_id: int | None
     label: str
+    client_ids: tuple[int, ...] = ()  # the wallet apps it lives in; a tag edit must keep them
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,7 +260,10 @@ class Graph:
 
 
 def _owners(conn: Connection) -> dict[str, Owner]:
-    return {a.script_hex: Owner(a.entity_id, a.tax_account_id, a.label) for a in accounts.addresses(conn)}
+    return {
+        a.script_hex: Owner(a.entity_id, a.tax_account_id, a.label, a.client_ids)
+        for a in accounts.addresses(conn)
+    }
 
 
 def _overwritten(tx: Tx) -> bool:

@@ -1,0 +1,40 @@
+/* The app's only stylesheet: bundled by Vite and served from /assets/, so it follows the CSP's
+   style-src 'self' (T-104). No inline styles anywhere. */
+
+.graph-layout {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+/* The rule Cytoscape would otherwise inject as an inline <style> (Graph.tsx, markCytoscapeStylesheet). */
+.__________cytoscape_container {
+  position: relative;
+}
+
+.graph-canvas {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 480px;
+  border: 1px solid #bbbbbb;
+}
+
+.graph-panel {
+  flex: 0 0 22rem;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.graph-nodes {
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.graph-node.selected {
+  font-weight: bold;
+}
+
+.txid {
+  font-family: monospace;
+  overflow-wrap: anywhere;
+}

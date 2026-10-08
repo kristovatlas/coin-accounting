@@ -193,3 +193,69 @@ export function btc(sats: number): string {
   const digits = String(Math.abs(Math.trunc(sats))).padStart(9, "0");
   return `${negative ? "-" : ""}${digits.slice(0, -8)}.${digits.slice(-8)}`;
 }
+
+// --- The graph and its tags (services/graph, services/tags; PLAN §4) ----------------------------------
+// Every txid and script goes in a POST body, never in a URL (T-105).
+
+/** Whose an input or output is, from the user DB; null if nobody has tagged its script. */
+export type GraphOwner = {
+  entity_id: number;
+  tax_account_id: number | null;
+  label: string;
+  client_ids: number[]; // the wallet apps it lives in: a tag edit sends them back, or they'd be dropped
+} | null;
+export type GraphInput = {
+  prevout: { txid: string; vout: number } | null; // null for a coinbase input
+  sats: number | null;
+  script: string | null;
+  address: string | null;
+  owner: GraphOwner;
+};
+export type GraphOutput = {
+  n: number;
+  sats: number;
+  script: string;
+  address: string | null;
+  unspendable: boolean;
+  owner: GraphOwner;
+};
+export type GraphTx = {
+  txid: string;
+  blockhash: string | null; // null while unconfirmed
+  confirmations: number;
+  block_time: number | null;
+  mixing: boolean | null; // the user's flag; null if nobody has set one
+  inputs: GraphInput[];
+  outputs: GraphOutput[];
+};
+export type Spender = {
+  state: "unspendable" | "unspent" | "spent_unconfirmed" | "spent";
+  spending_txid: string | null;
+  blockhash: string | null;
+  as_of: Tip | null;
+};
+export type Change = { at: string; kind: string; before: Record<string, unknown> | null; after: Record<string, unknown> };
+
+export const getGraphTx = (session: string, txid: string, blockhash: string | null) =>
+  call<GraphTx>(session, "POST", "/api/graph/tx", { txid, blockhash });
+
+export const getSpender = (session: string, txid: string, blockhash: string | null, n: number) =>
+  call<Spender>(session, "POST", "/api/graph/spender", { txid, blockhash, n });
+
+export type AddressTagBody = {
+  script: string;
+  address: string | null;
+  entity_id: number;
+  tax_account_id: number | null;
+  label: string;
+  client_ids: number[];
+};
+
+export const tagAddress = (session: string, tag: AddressTagBody) =>
+  call<{ new: boolean }>(session, "POST", "/api/tags/address", tag);
+
+export const setMixing = (session: string, txid: string, mixing: boolean) =>
+  call<{ mixing: boolean }>(session, "POST", "/api/tags/mixing", { txid, mixing });
+
+export const getTagHistory = (session: string, kind: "address_tag" | "tx_flag", subject: string) =>
+  call<{ changes: Change[] }>(session, "POST", "/api/tags/history", { kind, subject });
