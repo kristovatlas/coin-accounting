@@ -4,14 +4,16 @@ ADR 0008, ADR 0019; schema step 5).
 Plain reads and writes; the rules live in the schema (a script has one owner and account, an
 owned one a self-custody account; the user entity stays) and in `services/`, which validates imports
 (`domain.keys`, `domain.addresses`) before anything reaches here. As a backstop, every text written
-here also passes `domain.keys.refuse_private` (T-703). A refused write raises
-`AccountsError` with a fixed message: it never repeats a label, an address or a descriptor (T-403).
+here also passes `domain.keys.refuse_private` (T-703), which raises `domain.keys.PrivateKeyError`.
+Any other refused write raises `AccountsError` with a fixed message: it never repeats a label, an
+address or a descriptor (T-403).
 """
 
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Final, Literal
 
@@ -96,6 +98,29 @@ def _no_keys(*texts: str) -> None:
     """A backstop to the import service: no private key reaches the DB, whoever calls (T-703)."""
     for text in texts:
         refuse_private(text)
+
+
+@contextmanager
+def _snapshot(conn: sqlite3.Connection) -> Iterator[None]:
+    """A read in one snapshot: a deferred transaction, which under WAL takes no write lock (unlike
+    `transaction`'s BEGIN IMMEDIATE). Inside a transaction already, that transaction's snapshot."""
+    if conn.in_transaction:
+        yield
+        return
+    conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        conn.execute("COMMIT")
+
+
+def _gap_free(derived: Sequence[tuple[int, str, str | None]], first: int) -> int:
+    """The window's new end; `AccountsError` unless the indexes are exactly first..end (no gaps)."""
+    indexes = {i for i, _, _ in derived}
+    end = max(indexes)
+    if indexes != set(range(first, end + 1)):
+        raise AccountsError("a descriptor's derived indexes run without gaps from the window's next index")
+    return end
 
 
 def _new_id(cur: sqlite3.Cursor) -> int:
@@ -242,7 +267,7 @@ def _owned_by(conn: sqlite3.Connection, script_hex: str, entity_id: int, tax_acc
 
 
 def addresses(conn: sqlite3.Connection) -> list[Address]:
-    with transaction(conn):  # the rows and their links from one snapshot
+    with _snapshot(conn):  # the rows and their links from one snapshot
         links: dict[str, list[int]] = {}
         for script, client in conn.execute(
             "SELECT script_hex, client_id FROM address_client ORDER BY client_id"
@@ -276,9 +301,23 @@ def add_descriptor(  # noqa: PLR0913 - the descriptor, its owner and account, an
     script); a script already owned otherwise refuses the import."""
     if not derived:
         raise AccountsError("a descriptor needs at least one derived script")
+    end = _gap_free(derived, 0)
     _no_keys(text, label, *(t for _, _, t in derived if t))
     try:
         with transaction(conn):
+            known = conn.execute(
+                "SELECT id, entity_id, tax_account_id FROM descriptor WHERE text = ?", (text,)
+            ).fetchone()
+            if known is not None:
+                # Imported again, from another wallet client (PLAN §2): link it, change nothing else.
+                if (known[1], known[2]) != (entity_id, tax_account_id):
+                    raise AccountsError("the descriptor is already imported under another owner or account")
+                conn.executemany(
+                    "INSERT INTO descriptor_client (descriptor_id, client_id) VALUES (?, ?)"
+                    " ON CONFLICT DO NOTHING",
+                    [(known[0], c) for c in client_ids],
+                )
+                return int(known[0])
             cur = conn.execute(
                 "INSERT INTO descriptor"
                 " (text, entity_id, tax_account_id, label, gap_limit, range_end, start_height)"
@@ -289,7 +328,7 @@ def add_descriptor(  # noqa: PLR0913 - the descriptor, its owner and account, an
                     tax_account_id,
                     label,
                     gap_limit,
-                    max(i for i, _, _ in derived),
+                    end,
                     start_height,
                 ),
             )
@@ -352,9 +391,7 @@ def extend_descriptor(
             range_end, entity_id, tax_account_id, start_height = row
             if not derived:
                 return int(range_end)
-            if min(i for i, _, _ in derived) <= int(range_end):
-                raise AccountsError("a wider window starts past the current one")
-            end = max(i for i, _, _ in derived)
+            end = _gap_free(derived, int(range_end) + 1)
             conn.execute("UPDATE descriptor SET range_end = ? WHERE id = ?", (end, descriptor_id))
             _add_derived(
                 conn,
@@ -388,7 +425,7 @@ def mark_used(conn: sqlite3.Connection, descriptor_id: int, index: int) -> None:
 
 
 def descriptors(conn: sqlite3.Connection) -> list[Descriptor]:
-    with transaction(conn):  # the rows and their links from one snapshot
+    with _snapshot(conn):  # the rows and their links from one snapshot
         links: dict[int, list[int]] = {}
         for d, client in conn.execute(
             "SELECT descriptor_id, client_id FROM descriptor_client ORDER BY client_id"

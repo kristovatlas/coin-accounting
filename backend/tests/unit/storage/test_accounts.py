@@ -246,9 +246,10 @@ def test_a_descriptor_is_imported_once_and_its_window_only_widens(
 ) -> None:
     text = "tr(tpubexample/0/*)#checksum"
     d = add(conn, text, derived(0), wallet)
-    with pytest.raises(AccountsError):
-        add(conn, text, derived(5, base=100), wallet)
-    with pytest.raises(AccountsError, match="past the current one"):
+    other = ac.add_tax_account(conn, "Hot wallet", "self_custody")
+    with pytest.raises(AccountsError, match="another owner or account"):
+        add(conn, text, derived(0), other)
+    with pytest.raises(AccountsError, match="without gaps"):
         ac.extend_descriptor(conn, d, derived(0, base=200))
     assert ac.extend_descriptor(conn, d, []) == 0
     with pytest.raises(AccountsError, match="at least one"):
@@ -314,3 +315,48 @@ def test_a_client_or_account_in_use_can_go_only_in_the_right_way(
     assert ac.addresses(conn)[0].client_ids == ()
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("DELETE FROM tax_account WHERE id = ?", (wallet,))  # basis lives here: never silently
+
+
+def test_a_descriptor_window_has_no_gaps(conn: sqlite3.Connection, wallet: int) -> None:
+    for triples in (derived(0, 5), derived(3), derived(1, 2)):
+        with pytest.raises(AccountsError, match="without gaps"):
+            add(conn, "wpkh(tpubg/0/*)#c", triples, wallet)
+    d = add(conn, "wpkh(tpubg/0/*)#c", derived(0, 1), wallet)
+    with pytest.raises(AccountsError, match="without gaps"):
+        ac.extend_descriptor(conn, d, derived(5))  # 2..4 would be missing
+    assert ac.extend_descriptor(conn, d, derived(2, 3)) == 3
+
+
+def test_an_account_holding_the_users_addresses_stays_self_custody(
+    conn: sqlite3.Connection, wallet: int, exchange: int
+) -> None:
+    ac.add_addresses(conn, [(spk(1), None)], entity_id=ME, tax_account_id=wallet, source="import")
+    with pytest.raises(sqlite3.IntegrityError, match="stays self-custody"):
+        conn.execute(
+            "UPDATE tax_account SET kind = 'custodial', entity_id = ? WHERE id = ?", (exchange, wallet)
+        )
+    empty = ac.add_tax_account(conn, "Unused", "self_custody")
+    conn.execute("UPDATE tax_account SET kind = 'custodial', entity_id = ? WHERE id = ?", (exchange, empty))
+
+
+def test_reads_take_no_write_lock(conn: sqlite3.Connection, wallet: int, tmp_path: Path) -> None:
+    ac.add_addresses(conn, [(spk(1), None)], entity_id=ME, tax_account_id=wallet, source="import")
+    other = sqlite3.connect(tmp_path / "data" / "db.sqlite", timeout=0.1)
+    other.execute("BEGIN IMMEDIATE")  # another connection holds the write lock
+    try:
+        assert len(ac.addresses(conn)) == 1 and ac.descriptors(conn) == []
+    finally:
+        other.rollback()
+        other.close()
+    assert not conn.in_transaction
+
+
+def test_a_descriptor_imported_again_from_another_client_gets_the_link(
+    conn: sqlite3.Connection, wallet: int
+) -> None:
+    hw = ac.add_client(conn, "A hardware wallet", "hardware")
+    phone = ac.add_client(conn, "A phone wallet", "mobile")
+    d = add(conn, "wpkh(tpubr/0/*)#c", derived(0, 1), wallet, client_ids=[hw])
+    assert add(conn, "wpkh(tpubr/0/*)#c", derived(0, 1), wallet, client_ids=[phone, hw]) == d
+    [desc] = ac.descriptors(conn)
+    assert desc.client_ids == (hw, phone) and desc.range_end == 1

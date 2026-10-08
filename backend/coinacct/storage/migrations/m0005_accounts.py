@@ -64,6 +64,15 @@ WHEN NEW.entity_id IS NOT NULL AND (SELECT kind FROM entity WHERE id = NEW.entit
 BEGIN
     SELECT RAISE(ABORT, 'a custodial account''s custodian is an exchange');
 END;
+-- An account holding the user's addresses or descriptors stays self-custody.
+CREATE TRIGGER tax_account_with_owned_scripts_stays_self_custody BEFORE UPDATE OF kind ON tax_account
+WHEN NEW.kind != 'self_custody' AND (
+    EXISTS (SELECT 1 FROM address WHERE tax_account_id = NEW.id)
+    OR EXISTS (SELECT 1 FROM descriptor WHERE tax_account_id = NEW.id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'an account holding the user''s addresses stays self-custody');
+END;
 CREATE TRIGGER entity_custodian_stays_an_exchange BEFORE UPDATE OF kind ON entity
 WHEN NEW.kind != 'exchange' AND EXISTS (SELECT 1 FROM tax_account WHERE entity_id = NEW.id)
 BEGIN
