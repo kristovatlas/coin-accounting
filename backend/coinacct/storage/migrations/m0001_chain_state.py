@@ -11,4 +11,15 @@ CREATE TABLE chain_state (
     tip_height INTEGER CHECK (tip_height IS NULL OR tip_height >= 0),
     CHECK ((tip_hash IS NULL) = (tip_height IS NULL))
 ) STRICT;
+
+-- T-206: once recorded, the chain can't be changed or removed, not even by a stray UPDATE.
+CREATE TRIGGER chain_state_chain_is_fixed BEFORE UPDATE OF chain ON chain_state
+WHEN NEW.chain IS NOT OLD.chain
+BEGIN
+    SELECT RAISE(ABORT, 'the recorded chain never changes');
+END;
+CREATE TRIGGER chain_state_is_kept BEFORE DELETE ON chain_state
+BEGIN
+    SELECT RAISE(ABORT, 'the recorded chain is never removed');
+END;
 """
