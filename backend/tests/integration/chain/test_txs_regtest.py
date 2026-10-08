@@ -40,13 +40,15 @@ def test_a_confirmed_spend_is_decoded_with_its_spent_outputs(wallet_node: Regtes
 def test_a_mempool_transaction_gets_its_prevouts_from_its_parents(wallet_node: RegtestNode) -> None:
     rpc = app_client(wallet_node)
     txid = wallet_node.admin("sendtoaddress", [wallet_node.admin("getnewaddress"), "0.5"])
-    tx = fetch_tx(rpc, txid)
-    assert not tx.confirmed
-    filled = fill_prevouts(rpc, tx)
-    assert filled.prevouts_known
-    fee = wallet_node.admin("gettransaction", [txid])["fee"]
-    assert filled.fee_sats == int(-Decimal(str(fee)) * 100_000_000)
-    wallet_node.mine(1)  # leave the mempool empty for the other tests
+    try:
+        tx = fetch_tx(rpc, txid)
+        assert not tx.confirmed
+        filled = fill_prevouts(rpc, tx)
+        assert filled.prevouts_known
+        fee = wallet_node.admin("gettransaction", [txid])["fee"]
+        assert filled.fee_sats == int(-Decimal(str(fee)) * 100_000_000)
+    finally:
+        wallet_node.mine(1)  # leave the mempool empty for the other tests
 
 
 def test_an_op_return_output_is_unspendable(wallet_node: RegtestNode) -> None:
@@ -76,7 +78,7 @@ def test_the_genesis_coinbase_and_unknown_txids_are_not_found(wallet_node: Regte
         fetch_tx(rpc, "00" * 32)
 
 
-def test_a_transaction_in_a_reorged_away_block_is_stale_t210(wallet_node: RegtestNode) -> None:
+def test_a_transaction_in_a_reorged_away_block_is_stale_t207(wallet_node: RegtestNode) -> None:
     txid = wallet_node.admin("sendtoaddress", [wallet_node.admin("getnewaddress"), "0.1"])
     [blockhash] = wallet_node.mine(1)
     wallet_node.admin("invalidateblock", [blockhash])  # test harness only, never the app

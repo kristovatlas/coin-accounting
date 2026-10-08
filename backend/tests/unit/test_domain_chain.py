@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import decimal
 from decimal import Decimal
 
 import pytest
@@ -20,11 +21,30 @@ def test_btc_converts_to_exact_satoshis_t502(btc: str, sats: int) -> None:
 
 
 @pytest.mark.parametrize(
-    "btc", ["0.000000001", "0.123456789", "-0.00000001", "21000000.00000001", "NaN", "Infinity"]
+    "btc",
+    [
+        "0.000000001",
+        "0.123456789",
+        "-0.00000001",
+        "21000000.00000001",
+        "NaN",
+        "Infinity",
+        "1.000000000000000000000000000001",  # more digits than the default context: no rounding
+        "0.0000000100000000000000000000000000001",
+        "1E-1000100",  # would underflow to 0 sats
+        "1E+999999",  # would overflow
+        "21000000.0000000000000000000000000000001",  # just above the cap, not rounded down to it
+    ],
 )
 def test_a_fraction_of_a_satoshi_or_an_out_of_range_amount_is_refused_t502(btc: str) -> None:
     with pytest.raises(ValueError, match="amount"):
         btc_to_sats(Decimal(btc))
+
+
+def test_the_conversion_ignores_the_ambient_decimal_context_t502() -> None:
+    with decimal.localcontext() as ctx:
+        ctx.prec = 4
+        assert btc_to_sats(Decimal("1.23456789")) == 123_456_789
 
 
 def test_only_a_decimal_is_converted() -> None:

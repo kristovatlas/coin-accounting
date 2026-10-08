@@ -8,7 +8,9 @@ from typing import Any
 
 import pytest
 
+from coinacct.chain import txs
 from coinacct.chain.txs import (
+    BudgetExceededError,
     MalformedTxError,
     StaleBlockError,
     TxNotFoundError,
@@ -48,10 +50,21 @@ def mempool_child() -> dict[str, Any]:
 
 
 class FakeNode:
-    def __init__(self, txs: dict[str, dict[str, Any]], error: RpcCallError | None = None) -> None:
+    def __init__(
+        self,
+        txs: dict[str, dict[str, Any]],
+        error: RpcCallError | None = None,
+        headers: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.txs, self.error, self.calls = txs, error, list[list[Any]]()
+        self.headers = headers or {}
 
     def call(self, method: str, params: Any = ()) -> Any:
+        if method == "getblockheader":
+            self.calls.append([method, *params])
+            if params[0] not in self.headers:
+                raise RpcCallError(method, -5, "Block not found")
+            return self.headers[params[0]]
         assert method == "getrawtransaction"
         self.calls.append(list(params))
         if self.error is not None:
@@ -101,11 +114,93 @@ def test_an_unknown_txid_is_not_found_and_other_node_errors_pass_through() -> No
         fetch_tx(FakeNode({}, RpcCallError("getrawtransaction", -8, "parameter error")), PARENT)
 
 
-def test_a_transaction_in_a_reorged_away_block_is_stale_t210() -> None:
-    raw = confirmed_parent()
-    raw["in_active_chain"] = False
+def stale_parent() -> dict[str, Any]:
+    """What Core sends for a block off the active chain: no confirmations and no block time."""
+    raw = confirmed_parent() | {"in_active_chain": False, "confirmations": 0}
+    del raw["blocktime"]
+    return raw
+
+
+def test_a_transaction_in_a_reorged_away_block_is_stale_t207() -> None:
     with pytest.raises(StaleBlockError):
+        fetch_tx(FakeNode({PARENT: stale_parent()}), PARENT, BLOCK)
+    assert not parse_tx(stale_parent()).confirmed
+
+
+@pytest.mark.parametrize("value", [KeyError, None, "true", 1])
+def test_a_missing_or_odd_in_active_chain_is_malformed_not_a_reorg(value: object) -> None:
+    raw = confirmed_parent()
+    if value is KeyError:
+        del raw["in_active_chain"]
+    else:
+        raw["in_active_chain"] = value
+    with pytest.raises(MalformedTxError, match="in_active_chain"):
         fetch_tx(FakeNode({PARENT: raw}), PARENT, BLOCK)
+
+
+@pytest.mark.parametrize(("field", "value"), [("confirmations", 0), ("blocktime", KeyError)])
+def test_an_active_block_needs_confirmations_and_a_block_time(field: str, value: object) -> None:
+    raw = confirmed_parent()
+    if value is KeyError:
+        del raw[field]
+    else:
+        raw[field] = value
+    with pytest.raises(MalformedTxError, match="active block"):
+        fetch_tx(FakeNode({PARENT: raw}), PARENT, BLOCK)
+
+
+def test_an_unknown_or_side_branch_block_is_stale_not_a_missing_tx_t207() -> None:
+    with pytest.raises(StaleBlockError):  # the node doesn't know the block at all
+        fetch_tx(FakeNode({}), PARENT, BLOCK)
+    with pytest.raises(StaleBlockError):  # a known block on a side branch
+        fetch_tx(FakeNode({}, headers={BLOCK: {"confirmations": -1}}), PARENT, BLOCK)
+    with pytest.raises(TxNotFoundError):  # an active block that doesn't hold the tx
+        fetch_tx(FakeNode({}, headers={BLOCK: {"confirmations": 4}}), PARENT, BLOCK)
+    with pytest.raises(MalformedTxError, match="getblockheader"):
+        fetch_tx(FakeNode({}, headers={BLOCK: {"height": 4}}), PARENT, BLOCK)
+
+
+def test_other_getblockheader_errors_pass_through() -> None:
+    class Failing(FakeNode):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "getblockheader":
+                raise RpcCallError(method, -1, "something else")
+            return super().call(method, params)
+
+    with pytest.raises(RpcCallError):
+        fetch_tx(Failing({}), PARENT, BLOCK)
+
+
+def test_a_negative_fee_is_malformed_t502() -> None:
+    child = mempool_child()
+    child["vout"][0]["value"] = Decimal("50.00000001")  # more than the parent's 50 BTC
+    node = FakeNode({PARENT: confirmed_parent(), CHILD: child})
+    with pytest.raises(MalformedTxError, match="worth more"):
+        fill_prevouts(node, fetch_tx(node, CHILD))
+    with_prevout = mempool_child()
+    with_prevout["vout"][0]["value"] = Decimal("50.00000001")
+    with_prevout["vin"][0]["prevout"] = {"value": Decimal("50"), "scriptPubKey": P2WPKH}
+    with pytest.raises(MalformedTxError, match="worth more"):
+        parse_tx(with_prevout)
+
+
+def test_outputs_totalling_more_than_all_bitcoin_are_malformed_t502() -> None:
+    raw = confirmed_parent()
+    raw["vout"] = [vout(0, "21000000"), vout(1, "0.00000001")]
+    with pytest.raises(MalformedTxError, match="21 million"):
+        parse_tx(raw)
+
+
+def test_fill_prevouts_has_a_parent_budget_t205(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(txs, "MAX_PARENTS", 1)
+    other = "33" * 32
+    child = mempool_child()
+    child["vin"].append({"txid": other, "vout": 0, "sequence": 0})
+    node = FakeNode({PARENT: confirmed_parent(), CHILD: child, other: confirmed_parent() | {"txid": other}})
+    with pytest.raises(BudgetExceededError):
+        fill_prevouts(node, fetch_tx(node, CHILD))
+    monkeypatch.setattr(txs, "MAX_PARENTS", 2)
+    assert fill_prevouts(node, fetch_tx(node, CHILD)).prevouts_known
 
 
 @pytest.mark.parametrize(

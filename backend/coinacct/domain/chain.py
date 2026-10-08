@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, DecimalException, Inexact, Overflow, Underflow, localcontext
 from typing import Final, TypeIs
 
 SATS_PER_BTC: Final = 100_000_000
@@ -35,13 +35,21 @@ def btc_to_sats(value: Decimal) -> int:
     number of satoshis (no rounding, T-502)."""
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ValueError("an amount must be a finite Decimal")
-    sats = value * SATS_PER_BTC
+    # Range first: an exact comparison, so a huge exponent never reaches the arithmetic.
+    if not 0 <= value <= MAX_SATS // SATS_PER_BTC:
+        raise ValueError("an amount is out of range")
+    # Then multiply in a context where any rounding is an error, not the default 28-digit one.
+    with localcontext() as ctx:
+        ctx.prec = 60
+        for trap in (Inexact, Underflow, Overflow):
+            ctx.traps[trap] = True
+        try:
+            sats = value * SATS_PER_BTC
+        except DecimalException:
+            raise ValueError("an amount isn't a whole number of satoshis") from None
     if sats != sats.to_integral_value():
         raise ValueError("an amount isn't a whole number of satoshis")
-    result = int(sats)
-    if not 0 <= result <= MAX_SATS:
-        raise ValueError("an amount is out of range")
-    return result
+    return int(sats)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +74,9 @@ class TxOut:
 
     @property
     def unspendable(self) -> bool:
-        """Provably unspendable: OP_RETURN, or a script too long to ever execute. Such outputs never
-        enter the UTXO set or the block filters, so they are terminal in the graph (PLAN §1)."""
+        """Provably unspendable: OP_RETURN, or a script too long to ever execute. Neither enters the
+        UTXO set, so they are terminal in the graph (PLAN §1). Only OP_RETURN (and empty) scripts are
+        left out of the BIP158 filters; an over-long script is still in them."""
         return (
             self.script_type == "nulldata"
             or self.script_hex.startswith(OP_RETURN)
