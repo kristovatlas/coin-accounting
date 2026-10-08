@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from coinacct.storage import db
+from coinacct.storage import accounts, db
 from coinacct.storage.chain_state import (
     Tip,
     last_tip,
@@ -611,3 +612,151 @@ def test_peeking_at_the_recorded_chain_writes_nothing_and_never_follows_a_link_t
     empty = tmp_path / "empty.sqlite"
     sqlite3.connect(empty).close()
     assert peek_recorded_chain(empty) is None  # no chain_state table
+
+
+# --- One writer, many readers (architecture §3) -----------------------------------------------------
+
+
+def test_a_transaction_on_the_writer_holds_its_lock_across_threads(dd: DataDir) -> None:
+    conn = open_db(dd)
+    record_chain(conn, "regtest")
+    order: list[str] = []
+    inside, release = threading.Event(), threading.Event()
+
+    def first() -> None:
+        with transaction(conn):
+            order.append("first begins")
+            inside.set()
+            release.wait(5)
+            conn.execute("UPDATE chain_state SET tip_hash = NULL WHERE id = 1")
+            order.append("first ends")
+
+    def second() -> None:
+        with transaction(conn):  # waits: it can't BEGIN, or join first's transaction, while first runs
+            order.append("second begins")
+
+    a = threading.Thread(target=first)
+    a.start()
+    assert inside.wait(5)
+    b = threading.Thread(target=second)
+    b.start()
+    b.join(0.2)
+    assert b.is_alive() and order == ["first begins"]
+    release.set()
+    a.join(5)
+    b.join(5)
+    assert order == ["first begins", "first ends", "second begins"]
+    conn.close()
+
+
+def test_the_lock_is_released_whatever_the_body_or_begin_does(dd: DataDir) -> None:
+    conn = open_db(dd)
+    lock = db.writer_lock(conn)
+    assert lock is not None
+    with pytest.raises(ValueError), transaction(conn):
+        raise ValueError
+    with transaction(conn), transaction(conn):  # nested on one thread: the lock is re-entrant
+        pass
+    other = sqlite3.connect(dd.root / DB_NAME, timeout=0)
+    other.execute("BEGIN IMMEDIATE")  # another process holds the write lock: BEGIN fails
+    with pytest.raises(sqlite3.OperationalError), transaction(conn):
+        pass
+    other.execute("ROLLBACK")
+    other.close()
+    assert lock.acquire(blocking=False)  # nothing still holds it
+    lock.release()
+    conn.close()
+
+
+def test_a_snapshot_read_waits_for_the_writers_transaction(dd: DataDir) -> None:
+    conn = open_db(dd)
+    wallet = accounts.add_tax_account(conn, "Cold storage", "self_custody")
+    inside, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    def writer() -> None:
+        with transaction(conn):
+            accounts.add_addresses(
+                conn,
+                [("0014" + "11" * 20, None)],
+                entity_id=accounts.ME,
+                tax_account_id=wallet,
+                source="manual",
+            )
+            inside.set()
+            release.wait(5)
+
+    seen: list[int] = []
+
+    def reader() -> None:
+        seen.append(len(accounts.addresses(conn)))  # a snapshot read: it takes the writer's lock
+        done.set()
+
+    a = threading.Thread(target=writer)
+    a.start()
+    assert inside.wait(5)
+    threading.Thread(target=reader).start()
+    assert not done.wait(0.2)
+    release.set()
+    assert done.wait(5) and seen == [1]
+    a.join(5)
+    conn.close()
+
+
+def test_a_reader_reads_committed_rows_only_and_can_never_write(dd: DataDir) -> None:
+    conn = open_db(dd)
+    record_chain(conn, "regtest")
+    reader = db.open_reader(dd)
+    try:
+        assert db.writer_lock(reader) is None
+        assert recorded_chain(reader) == "regtest"
+        with transaction(conn):
+            set_tip(conn, Tip("ab" * 32, 5))
+            assert last_tip(reader) is None  # the writer's open transaction isn't visible
+        assert last_tip(reader) == Tip("ab" * 32, 5)
+        with pytest.raises(sqlite3.OperationalError):
+            reader.execute("UPDATE chain_state SET tip_hash = NULL WHERE id = 1")
+        assert reader.execute("PRAGMA query_only").fetchone() == (1,)
+        assert reader.execute("PRAGMA trusted_schema").fetchone() == (0,)
+        assert reader.execute("PRAGMA temp_store").fetchone() == (2,)
+    finally:
+        reader.close()
+        conn.close()
+
+
+def test_a_reader_never_creates_or_migrates_the_db(dd: DataDir) -> None:
+    with pytest.raises(DbError):
+        db.open_reader(dd)
+    assert not (dd.root / DB_NAME).exists()
+    conn = open_db(dd, steps=migrations()[:1])  # an older schema
+    conn.close()
+    with pytest.raises(DbError, match="schema version"):
+        db.open_reader(dd)
+
+
+def test_a_reader_refuses_a_linked_or_shared_db_t401(dd: DataDir, tmp_path: Path) -> None:
+    conn = open_db(dd)
+    conn.close()
+    path = dd.root / DB_NAME
+    path.chmod(0o644)
+    with pytest.raises(DbError, match="mode 600"):
+        db.open_reader(dd)
+    path.chmod(0o600)
+    moved = tmp_path / "plain-disk.sqlite"
+    path.rename(moved)
+    path.symlink_to(moved)
+    with pytest.raises(DbError, match="link"):
+        db.open_reader(dd)
+
+
+def test_a_reader_opens_the_file_read_only(dd: DataDir) -> None:
+    conn = open_db(dd)
+    record_chain(conn, "regtest")
+    path = dd.root / DB_NAME
+    path.chmod(0o400)  # a file the user made read-only still opens for reading
+    try:
+        reader = db.open_reader(dd)
+        assert recorded_chain(reader) == "regtest"
+        reader.close()
+    finally:
+        path.chmod(0o600)
+        conn.close()

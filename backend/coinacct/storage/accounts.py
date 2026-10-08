@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Final, Literal
 
 from coinacct.domain.keys import refuse_private
-from coinacct.storage.db import DbError, transaction
+from coinacct.storage.db import DbError, transaction, writer_lock
 
 ME: Final = 1  # the user entity, seeded by the schema
 
@@ -104,14 +104,16 @@ def _no_keys(*texts: str) -> None:
 def _snapshot(conn: sqlite3.Connection) -> Iterator[None]:
     """A read in one snapshot: a deferred transaction, which under WAL takes no write lock (unlike
     `transaction`'s BEGIN IMMEDIATE). Inside a transaction already, that transaction's snapshot."""
-    if conn.in_transaction:
-        yield
-        return
-    conn.execute("BEGIN")
-    try:
-        yield
-    finally:
-        conn.execute("COMMIT")
+    lock = writer_lock(conn)
+    with lock if lock is not None else nullcontext():  # the writer's lock (architecture §3)
+        if conn.in_transaction:
+            yield
+            return
+        conn.execute("BEGIN")
+        try:
+            yield
+        finally:
+            conn.execute("COMMIT")
 
 
 def _gap_free(derived: Sequence[tuple[int, str, str | None]], first: int) -> int:
