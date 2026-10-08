@@ -70,13 +70,33 @@ def test_large_batches_are_split(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [len(c[0]) for c in node.calls] == [2, 2, 1]
 
 
-def test_the_earlier_bip30_duplicate_coinbase_is_unspendable_t208() -> None:
-    dup = "d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599"
-    earlier = Tx(dup, "cc" * 32, 1, 0, (TxIn(None, 0xFFFFFFFF),), (PAY,))
-    later = Tx(dup, spenders.BIP30_LATER[dup], 1, 0, (TxIn(None, 0xFFFFFFFF),), (PAY,))
+@pytest.mark.parametrize(
+    ("dup", "earlier", "later"),
+    [
+        (  # heights 91812 and 91842
+            "d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599",
+            "00000000000af0aed4792b1acee3d966af36cf5def14935db8de83d6f9306f2f",
+            "00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec",
+        ),
+        (  # heights 91722 and 91880
+            "e3bf3d07d4b0375638d5f1db5255fe07ba2c4cb067cd81b84ee974b6585fb468",
+            "00000000000271a2dc26e7667f8419f2e15416dc6955e5a6c6cdf3f2574dd08e",
+            "00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721",
+        ),
+    ],
+)
+def test_the_earlier_bip30_duplicate_coinbase_is_unspendable_t208(dup: str, earlier: str, later: str) -> None:
+    def copy(blockhash: str | None) -> Tx:
+        return Tx(
+            dup, blockhash, 1 if blockhash else 0, 0 if blockhash else None, (TxIn(None, 0xFFFFFFFF),), (PAY,)
+        )
+
     node = FakeNode()
-    assert spend_of(node, earlier, 0).state is SpendState.UNSPENDABLE and node.calls == []
-    assert spend_of(node, later, 0).state is SpendState.UNSPENT and len(node.calls) == 1
+    assert spend_of(node, copy(earlier), 0).state is SpendState.UNSPENDABLE and node.calls == []
+    # The later copy, one in any other block, or one without a block: Core's answer (txindex keeps the later).
+    for blockhash in (later, "cc" * 32):
+        assert spend_of(node, copy(blockhash), 0).state is SpendState.UNSPENT
+    assert len(node.calls) == 2
 
 
 def test_a_call_has_an_output_budget_t205(monkeypatch: pytest.MonkeyPatch) -> None:

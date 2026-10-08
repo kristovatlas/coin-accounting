@@ -34,14 +34,16 @@ from coinacct.domain.chain import Outpoint, Tx, is_hash
 MAX_BATCH: Final = 100
 # Outputs per `spends` call: about the outputs of a standard (100 kvB) transaction (T-205).
 MAX_OUTPUTS: Final = 4000
-# BIP30: the duplicate coinbase txids, each with the later block, whose copy Core's indexes keep
-# (Bitcoin Core src/validation.cpp, the two BIP30 exceptions at heights 91842 and 91880).
-BIP30_LATER: Final = {
-    "d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599": (
-        "00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec"
-    ),
+# BIP30: the two early coinbases whose txids recur later, each with the EARLIER block it sits in, whose
+# outputs were overwritten (Bitcoin Core src/validation.cpp, IsBIP30Unspendable: heights 91722 and
+# 91812). Matching the earlier block, not "anything but the later one", fails safe: a wrong constant
+# here only means Core's own answer is used.
+BIP30_OVERWRITTEN: Final = {
     "e3bf3d07d4b0375638d5f1db5255fe07ba2c4cb067cd81b84ee974b6585fb468": (
-        "00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721"
+        "00000000000271a2dc26e7667f8419f2e15416dc6955e5a6c6cdf3f2574dd08e"
+    ),
+    "d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599": (
+        "00000000000af0aed4792b1acee3d966af36cf5def14935db8de83d6f9306f2f"
     ),
 }
 
@@ -92,9 +94,8 @@ def spends(rpc: ChainRpc, txs_and_outputs: Sequence[tuple[Tx, int]]) -> list[Spe
 
 
 def _overwritten(tx: Tx) -> bool:
-    """The earlier copy of a BIP30 duplicate coinbase: same txid, not the block Core kept."""
-    later = BIP30_LATER.get(tx.txid)
-    return later is not None and tx.blockhash is not None and tx.blockhash != later
+    """The earlier copy of a BIP30 duplicate coinbase: that txid in its earlier block."""
+    return tx.blockhash is not None and BIP30_OVERWRITTEN.get(tx.txid) == tx.blockhash
 
 
 def spend_of(rpc: ChainRpc, tx: Tx, n: int) -> Spend:
