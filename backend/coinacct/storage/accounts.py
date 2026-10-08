@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Final, Literal
 
 from coinacct.domain.keys import refuse_private
+from coinacct.storage import change_log
 from coinacct.storage.db import DbError, hold, transaction
 
 ME: Final = 1  # the user entity, seeded by the schema
@@ -225,11 +226,13 @@ def add_addresses(  # noqa: PLR0913 - one batch of addresses and the owner, acco
     label: str = "",
     start_height: int = 0,
     client_ids: Sequence[int] = (),
+    at: str | None = None,
 ) -> Added:
     """Add `(script_hex, text)` pairs in one transaction. A script already known under the same owner
     and account gets the new client links (PLAN §2: an address can live in several wallets) and the
     earlier of the two start heights; one known under another owner or account is left as it is and
-    reported."""
+    reported. New client links on a known address are a tag edit: they are logged in the change log
+    (T-408), at `at` or now."""
     rows = list(addresses)
     _no_keys(label, *(t for _, t in rows if t))
     added: list[str] = []
@@ -248,7 +251,8 @@ def add_addresses(  # noqa: PLR0913 - one batch of addresses and the owner, acco
                 elif not _owned_by(conn, script_hex, entity_id, tax_account_id):
                     conflicts.append(script_hex)
                     continue
-                else:
+                before = None if cur.rowcount else change_log.address_state(conn, script_hex)
+                if before is not None:
                     # Imported again with an earlier start: its earlier history is scanned too.
                     conn.execute(
                         "UPDATE address SET start_height = MIN(start_height, ?) WHERE script_hex = ?",
@@ -258,6 +262,12 @@ def add_addresses(  # noqa: PLR0913 - one batch of addresses and the owner, acco
                     "INSERT INTO address_client (script_hex, client_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
                     [(script_hex, c) for c in client_ids],
                 )
+                if before is not None:
+                    after = change_log.address_state(conn, script_hex)
+                    if after != before:
+                        change_log.append(
+                            conn, at or change_log.now(), ("address_tag", script_hex, before, after)
+                        )
     except sqlite3.IntegrityError:
         raise _refused(
             "addresses (an unknown owner, account or client,"
