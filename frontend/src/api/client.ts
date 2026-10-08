@@ -142,3 +142,54 @@ export const previewDescriptor = (session: string, text: string, gapLimit: numbe
 
 export const importDescriptor = (session: string, text: string, gapLimit: number, owner: Owner) =>
   call<{ id: number }>(session, "POST", "/api/imports/descriptor", { text, gap_limit: gapLimit, ...owner });
+
+// --- History (the routes of services/history; PLAN §3) ---------------------------------------------
+
+export type Tip = { blockhash: string; height: number };
+export type AddressSummary = {
+  script: string;
+  address: string | null;
+  entity_id: number;
+  tax_account_id: number | null;
+  label: string;
+  balance: number;
+  utxos: number;
+  received: number;
+  transactions: number;
+  last_height: number | null;
+  scanned_to: number | null;
+};
+export type Addresses = { as_of: Tip | null; catching_up: boolean; addresses: AddressSummary[] };
+export type HistoryEvent = {
+  kind: "receive" | "spend";
+  txid: string;
+  n: number;
+  sats: number;
+  height: number;
+  blockhash: string;
+  prevout: { txid: string; vout: number } | null;
+};
+export type Utxo = {
+  txid: string;
+  vout: number;
+  sats: number;
+  script: string;
+  address: string | null;
+  height: number;
+  complete: boolean;
+};
+
+export const getAddresses = (session: string) => call<Addresses>(session, "GET", "/api/addresses");
+
+/** One address's events. A POST, so its script never appears in a URL (T-105). */
+export const getAddressEvents = (session: string, script: string) =>
+  call<{ events: HistoryEvent[] }>(session, "POST", "/api/addresses/events", { script });
+
+export const getUtxos = (session: string) => call<{ utxos: Utxo[] }>(session, "GET", "/api/utxos");
+
+/** Sats as BTC with eight decimals, by integer arithmetic only (no floats near amounts). */
+export function btc(sats: number): string {
+  const negative = sats < 0;
+  const digits = String(Math.abs(Math.trunc(sats))).padStart(9, "0");
+  return `${negative ? "-" : ""}${digits.slice(0, -8)}.${digits.slice(-8)}`;
+}
