@@ -2,25 +2,45 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Context, Decimal, localcontext
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from coinacct.domain.money import share, usd
+from coinacct.domain.money import add, share, subtract, usd
 
 
-@pytest.mark.parametrize(("text", "value"), [("0", "0.00"), ("12.5", "12.50"), (" 1000.00 ", "1000.00")])
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [("0", "0.00"), ("12.5", "12.50"), (" 1000.00 ", "1000.00"), ("1.230", "1.23"), ("1E+2", "100.00")],
+)
 def test_usd_reads_exact_cents(text: str, value: str) -> None:
     assert usd(text) == Decimal(value)
     assert usd(text).as_tuple().exponent == -2
 
 
-@pytest.mark.parametrize("text", ["0.001", "1.234", "-1", "NaN", "Infinity", "abc", ""])
-def test_usd_refuses_what_isnt_exact_cents(text: str) -> None:
-    with pytest.raises(ValueError):
+# 61 significant digits: a 60-digit context would round it to 1.00 while parsing and accept it.
+LONG = "1." + "0" * 59 + "1"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["0.001", "1.234", "-1", "NaN", "Infinity", "abc", "", "1e100", "1000000000000000", LONG, "1" + "0" * 70],
+)
+def test_usd_refuses_what_isnt_exact_cents_below_a_quadrillion(text: str) -> None:
+    with pytest.raises(ValueError):  # never decimal.InvalidOperation or Overflow
         usd(text)
+
+
+def test_usd_refuses_a_huge_decimal_and_keeps_the_bound() -> None:
+    with pytest.raises(ValueError, match="quadrillion"):
+        usd(Decimal("1E+60"))
+    assert usd("999999999999999.99") == Decimal("999999999999999.99")
+
+
+def test_minus_zero_is_zero() -> None:
+    assert str(usd("-0.00")) == "0.00"
 
 
 def test_usd_refuses_a_float_t502() -> None:
@@ -33,6 +53,14 @@ def test_a_share_rounds_half_to_even_once() -> None:
     assert share(Decimal("0.07"), 1, 2) == Decimal("0.04")  # 0.035: half to even
     assert share(Decimal("0.05"), 1, 2) == Decimal("0.02")  # 0.025: half to even
     assert share(Decimal("60000.00"), 100_000_000, 120_000_000) == Decimal("50000.00")
+
+
+def test_money_arithmetic_ignores_the_callers_context_t502() -> None:
+    with localcontext(Context(prec=3)):
+        assert share(Decimal("1000.00"), 1, 3) == Decimal("333.33")
+        assert subtract(Decimal("1000.00"), Decimal("333.33")) == Decimal("666.67")
+        assert add(Decimal("999999.99"), Decimal("0.01")) == Decimal("1000000.00")
+        assert subtract(Decimal("1.00"), Decimal("2.50")) == Decimal("-1.50")
 
 
 def test_the_whole_share_is_the_amount_and_none_is_zero() -> None:

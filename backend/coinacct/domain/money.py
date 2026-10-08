@@ -1,11 +1,15 @@
-"""USD amounts for the tax engine: exact cents, and the one division the engine may do (PLAN §7; T-502).
+"""USD amounts for the tax engine: exact cents, and the arithmetic the engine may do (PLAN §7; T-502).
 
-Pure. USD is a `Decimal` with at most two fractional digits, never a float (ENGINEERING §5.2). An
-amount with more digits is refused rather than rounded: rounding is the caller's explicit choice.
+Pure. USD is a `Decimal` with at most two fractional digits, never a float (ENGINEERING §5.2), and
+less than `MAX_USD`. An amount with more digits is refused rather than rounded: rounding is explicit.
 
-`share` is the only way `tax/` divides money (ENGINEERING §5.2 bans `/` there). It rounds once, to
-the cent, half to even. The engine splits an amount by always taking a share of what remains and
-giving the last part the remainder, so the parts of every split add up to the whole exactly.
+All money arithmetic runs in `CONTEXT`, a fixed context, never the caller's: a lowered precision
+elsewhere in the process can't change a figure (T-502). Amounts are bounded so that every sum,
+difference and `amount * part` is exact in it; only `share` rounds, once.
+
+`share` is the only way `tax/` divides money (ENGINEERING §5.2 bans `/` there). It rounds to the
+cent, half to even. The engine splits an amount by always taking a share of what remains and giving
+the last part the remainder, so the parts of every split add up to the whole exactly.
 """
 
 from __future__ import annotations
@@ -14,34 +18,58 @@ from decimal import (
     ROUND_HALF_EVEN,
     Context,
     Decimal,
+    DecimalException,
     DivisionByZero,
     FloatOperation,
+    Inexact,
     InvalidOperation,
     Overflow,
+    Rounded,
 )
 from typing import Final
 
 CENT: Final = Decimal("0.01")
-# Enough digits for any USD amount the app can meet, and for `amount * part` before the division.
-_CONTEXT: Final = Context(
+MAX_USD: Final = Decimal(10) ** 15  # a quadrillion dollars: far above any real figure
+# 60 digits hold any sum of bounded amounts, and any amount times a satoshi count, exactly; Inexact
+# and Rounded are trapped so that no operation but `share`'s final quantize can ever round.
+CONTEXT: Final = Context(
+    prec=60,
+    rounding=ROUND_HALF_EVEN,
+    traps=[FloatOperation, InvalidOperation, DivisionByZero, Overflow, Inexact, Rounded],
+)
+_DIVIDE: Final = Context(
     prec=60, rounding=ROUND_HALF_EVEN, traps=[FloatOperation, InvalidOperation, DivisionByZero, Overflow]
 )
 
 
 def usd(value: str | Decimal) -> Decimal:
-    """A USD amount from text or a `Decimal`: finite, not negative, at most two fractional digits."""
+    """A USD amount from text or a `Decimal`: finite, not negative, below `MAX_USD`, at most two
+    fractional digits. Anything else raises `ValueError`; nothing is rounded."""
     if isinstance(value, str):
         try:
-            value = _CONTEXT.create_decimal(value.strip())
-        except InvalidOperation:
+            value = Decimal(value.strip())  # exact: no context applies to the constructor
+        except DecimalException:
             raise ValueError("a USD amount must be a number") from None
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ValueError("a USD amount must be a finite Decimal")
     if value < 0:
         raise ValueError("a USD amount can't be negative")
-    if value != value.quantize(CENT, context=_CONTEXT):
+    if value >= MAX_USD:
+        raise ValueError("a USD amount must be below a quadrillion dollars")
+    cents = value.quantize(CENT, context=_DIVIDE)  # bounded above, so this can't overflow
+    if cents != value:  # an exact comparison: "1.230" is 1.23, "1.234" is refused
         raise ValueError("a USD amount has at most two fractional digits")
-    return value.quantize(CENT, context=_CONTEXT)
+    return cents.copy_abs()  # -0.00 is 0.00
+
+
+def add(a: Decimal, b: Decimal) -> Decimal:
+    """`a + b`, exactly."""
+    return CONTEXT.add(a, b)
+
+
+def subtract(a: Decimal, b: Decimal) -> Decimal:
+    """`a - b`, exactly (a gain or a loss can be negative)."""
+    return CONTEXT.subtract(a, b)
 
 
 def share(amount: Decimal, part: int, whole: int) -> Decimal:
@@ -56,7 +84,8 @@ def share(amount: Decimal, part: int, whole: int) -> Decimal:
         raise TypeError("part and whole are integer satoshis")
     if whole <= 0 or not 0 <= part <= whole:
         raise ValueError("a share needs 0 <= part <= whole and whole > 0")
+    cents = usd(amount)
     if part == whole:
-        return usd(amount)
-    exact = _CONTEXT.divide(_CONTEXT.multiply(usd(amount), Decimal(part)), Decimal(whole))
-    return exact.quantize(CENT, rounding=ROUND_HALF_EVEN, context=_CONTEXT)
+        return cents
+    exact = _DIVIDE.divide(CONTEXT.multiply(cents, Decimal(part)), Decimal(whole))
+    return exact.quantize(CENT, rounding=ROUND_HALF_EVEN, context=_DIVIDE)
