@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from coinacct.storage import db
+from coinacct.storage import accounts, db
 from coinacct.storage.chain_state import (
     Tip,
     last_tip,
@@ -611,3 +612,338 @@ def test_peeking_at_the_recorded_chain_writes_nothing_and_never_follows_a_link_t
     empty = tmp_path / "empty.sqlite"
     sqlite3.connect(empty).close()
     assert peek_recorded_chain(empty) is None  # no chain_state table
+
+
+# --- One writer, many readers (architecture §3) -----------------------------------------------------
+
+
+def free_elsewhere(lock: Any) -> bool:
+    """Whether another thread can take `lock` now: an RLock is always re-enterable by its owner, so a
+    leaked acquisition only shows from elsewhere."""
+    result: list[bool] = []
+
+    def attempt() -> None:
+        got = lock.acquire(blocking=False)
+        if got:
+            lock.release()
+        result.append(got)
+
+    t = threading.Thread(target=attempt)
+    t.start()
+    t.join(5)
+    return result == [True]
+
+
+def watch_acquire(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """An event set when some thread calls the writer's lock acquisition (so a test knows a contender
+    reached the lock before checking that it waits)."""
+    attempted = threading.Event()
+    real = db._acquire
+
+    def instrumented(conn: sqlite3.Connection) -> Any:
+        if threading.current_thread() is not threading.main_thread():
+            attempted.set()
+        return real(conn)
+
+    monkeypatch.setattr(db, "_acquire", instrumented)
+    return attempted
+
+
+def test_a_transaction_on_the_writer_holds_its_lock_across_threads(
+    dd: DataDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = open_db(dd)
+    record_chain(conn, "regtest")
+    order: list[str] = []
+    inside, release = threading.Event(), threading.Event()
+
+    def first() -> None:
+        with transaction(conn):
+            order.append("first begins")
+            inside.set()
+            release.wait(5)
+            conn.execute("UPDATE chain_state SET tip_hash = NULL WHERE id = 1")
+            order.append("first ends")
+
+    def second() -> None:
+        with transaction(conn):  # waits: it can't BEGIN, or join first's transaction, while first runs
+            order.append("second begins")
+
+    a = threading.Thread(target=first)
+    b = threading.Thread(target=second)
+    a.start()
+    try:
+        assert inside.wait(5)
+        attempted = watch_acquire(monkeypatch)  # after first took the lock: only second sets it
+        b.start()
+        assert attempted.wait(5)  # second has reached the lock …
+        b.join(0.2)
+        assert b.is_alive() and order == ["first begins"]  # … and waits there
+    finally:
+        release.set()
+        a.join(5)
+        if b.is_alive() or b.ident is not None:
+            b.join(5)
+    assert order == ["first begins", "first ends", "second begins"]
+    conn.close()
+
+
+def test_the_lock_is_released_whatever_the_body_or_begin_does(dd: DataDir) -> None:
+    conn = open_db(dd, timeout=0.05)  # the failed BEGIN below waits only this long
+    lock = db.writer_lock(conn)
+    assert lock is not None
+    with pytest.raises(ValueError), transaction(conn):
+        raise ValueError
+    with transaction(conn), transaction(conn):  # nested on one thread: the lock is re-entrant
+        pass
+    other = sqlite3.connect(dd.root / DB_NAME, timeout=0)
+    other.execute("BEGIN IMMEDIATE")  # another process holds the write lock: BEGIN fails
+    with pytest.raises(sqlite3.OperationalError), transaction(conn):
+        pass
+    other.execute("ROLLBACK")
+    other.close()
+    assert free_elsewhere(lock)  # no path left an acquisition behind
+    conn.close()
+
+
+def test_a_snapshot_read_waits_for_the_writers_transaction(
+    dd: DataDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = open_db(dd)
+    wallet = accounts.add_tax_account(conn, "Cold storage", "self_custody")
+    inside, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    def writer() -> None:
+        with transaction(conn):
+            accounts.add_addresses(
+                conn,
+                [("0014" + "11" * 20, None)],
+                entity_id=accounts.ME,
+                tax_account_id=wallet,
+                source="manual",
+            )
+            inside.set()
+            release.wait(5)
+
+    seen: list[int] = []
+
+    def reader() -> None:
+        seen.append(len(accounts.addresses(conn)))  # a snapshot read: it takes the writer's lock
+        done.set()
+
+    a = threading.Thread(target=writer)
+    b = threading.Thread(target=reader)
+    a.start()
+    try:
+        assert inside.wait(5)
+        attempted = watch_acquire(monkeypatch)
+        b.start()
+        assert attempted.wait(5)  # the snapshot read has reached the lock …
+        assert not done.wait(0.2)  # … and waits there
+    finally:
+        release.set()
+        a.join(5)
+        if b.ident is not None:
+            b.join(5)
+    assert done.is_set() and seen == [1]
+    conn.close()
+
+
+def test_a_reader_reads_committed_rows_only_and_can_never_write(dd: DataDir) -> None:
+    conn = open_db(dd)
+    record_chain(conn, "regtest")
+    reader = db.open_reader(dd)
+    try:
+        assert db.writer_lock(reader) is None
+        assert recorded_chain(reader) == "regtest"
+        with transaction(conn):
+            set_tip(conn, Tip("ab" * 32, 5))
+            assert last_tip(reader) is None  # the writer's open transaction isn't visible
+        assert last_tip(reader) == Tip("ab" * 32, 5)
+        with pytest.raises(sqlite3.OperationalError):
+            reader.execute("UPDATE chain_state SET tip_hash = NULL WHERE id = 1")
+        assert reader.execute("PRAGMA query_only").fetchone() == (1,)
+        assert reader.execute("PRAGMA trusted_schema").fetchone() == (0,)
+        assert reader.execute("PRAGMA temp_store").fetchone() == (2,)
+    finally:
+        reader.close()
+        conn.close()
+
+
+def test_a_reader_never_creates_or_migrates_the_db(dd: DataDir) -> None:
+    with pytest.raises(DbError):
+        db.open_reader(dd)
+    assert not (dd.root / DB_NAME).exists()
+    conn = open_db(dd, steps=migrations()[:1])  # an older schema
+    conn.close()
+    with pytest.raises(DbError, match="schema version"):
+        db.open_reader(dd)
+
+
+def test_a_reader_refuses_a_linked_or_shared_db_t401(dd: DataDir, tmp_path: Path) -> None:
+    conn = open_db(dd)
+    conn.close()
+    path = dd.root / DB_NAME
+    path.chmod(0o644)
+    with pytest.raises(DbError, match="mode 600"):
+        db.open_reader(dd)
+    path.chmod(0o600)
+    moved = tmp_path / "plain-disk.sqlite"
+    path.rename(moved)
+    path.symlink_to(moved)
+    with pytest.raises(DbError, match="link"):
+        db.open_reader(dd)
+
+
+def test_a_reader_opens_the_file_read_only(dd: DataDir) -> None:
+    conn = open_db(dd)
+    record_chain(conn, "regtest")
+    path = dd.root / DB_NAME
+    path.chmod(0o400)  # a file the user made read-only still opens for reading
+    try:
+        reader = db.open_reader(dd)
+        assert recorded_chain(reader) == "regtest"
+        reader.close()
+    finally:
+        path.chmod(0o600)
+        conn.close()
+
+
+def test_waiting_for_the_writers_lock_is_bounded(dd: DataDir) -> None:
+    conn = open_db(dd, timeout=0.1)
+    inside, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with transaction(conn):
+            inside.set()
+            release.wait(5)
+
+    a = threading.Thread(target=holder)
+    a.start()
+    try:
+        assert inside.wait(5)
+        with pytest.raises(DbError, match="busy"), transaction(conn):
+            pass
+        with pytest.raises(DbError, match="busy"), db.hold(conn):
+            pass
+    finally:
+        release.set()
+        a.join(5)
+    lock = db.writer_lock(conn)
+    assert lock is not None and free_elsewhere(lock)  # the busy refusals took nothing
+    conn.close()
+
+
+def test_a_reader_belongs_to_the_thread_that_opened_it(dd: DataDir) -> None:
+    conn = open_db(dd)
+    record_chain(conn, "regtest")
+    reader = db.open_reader(dd)
+    errors: list[BaseException] = []
+
+    def elsewhere() -> None:
+        try:
+            recorded_chain(reader)
+        except BaseException as e:  # recorded for the assertion below
+            errors.append(e)
+
+    t = threading.Thread(target=elsewhere)
+    t.start()
+    t.join(5)
+    assert len(errors) == 1 and isinstance(errors[0], sqlite3.ProgrammingError)
+    reader.close()
+    conn.close()
+
+
+def test_a_reader_opens_with_no_writer_and_checks_the_side_files_it_makes(dd: DataDir) -> None:
+    conn = open_db(dd)
+    record_chain(conn, "regtest")
+    conn.close()  # SQLite removes the WAL files with the last connection
+    reader = db.open_reader(dd)
+    try:
+        assert recorded_chain(reader) == "regtest"
+        for side in ("-wal", "-shm"):
+            st = (dd.root / f"{DB_NAME}{side}").stat()
+            assert st.st_mode & 0o777 == 0o600 and st.st_dev == dd.device
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize("side", ["-wal", "-shm"])
+def test_a_reader_refuses_a_linked_or_shared_side_file_t402(dd: DataDir, tmp_path: Path, side: str) -> None:
+    conn = open_db(dd)
+    conn.close()
+    side_file = dd.root / f"{DB_NAME}{side}"
+    elsewhere = tmp_path / f"plain-disk{side}"
+    elsewhere.touch(mode=0o600)
+    side_file.unlink(missing_ok=True)
+    side_file.symlink_to(elsewhere)
+    with pytest.raises(DbError, match="link"):
+        db.open_reader(dd)
+    side_file.unlink()
+    side_file.touch(mode=0o644)
+    side_file.chmod(0o644)
+    with pytest.raises(DbError, match="mode 600"):
+        db.open_reader(dd)
+
+
+def test_a_reader_refuses_a_newer_schema_or_a_damaged_file_t408(dd: DataDir) -> None:
+    conn = open_db(dd)
+    conn.execute(f"PRAGMA user_version = {len(migrations()) + 1}")
+    conn.close()
+    with pytest.raises(DbError, match="newer version"):
+        db.open_reader(dd)
+    (dd.root / DB_NAME).write_bytes(b"not a database" * 100)
+    for side in ("-wal", "-shm"):
+        (dd.root / f"{DB_NAME}{side}").unlink(missing_ok=True)
+    with pytest.raises(DbError, match="can't be read"):
+        db.open_reader(dd)
+
+
+def test_a_reader_refuses_a_db_swapped_after_its_checks_t401(
+    dd: DataDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = open_db(dd)
+    conn.close()
+    real = db._check_fd
+
+    def swap(fd: int, path: Path, data_dir: DataDir) -> int:
+        inode = real(fd, path, data_dir)
+        path.rename(path.with_name("moved-aside"))  # keep the inode allocated (see the writer's test)
+        # A valid DB at the current schema version, so only the inode check can refuse it.
+        other = sqlite3.connect(path)
+        other.execute(f"PRAGMA user_version = {len(migrations())}")
+        other.close()
+        path.chmod(0o600)
+        return inode
+
+    monkeypatch.setattr(db, "_check_fd", swap)
+    with pytest.raises(DbError, match="replaced"):
+        db.open_reader(dd)
+
+
+def test_the_writers_lock_wait_is_the_timeout_open_db_was_given(dd: DataDir) -> None:
+    conn = open_db(dd, timeout=0.25)
+    assert isinstance(conn, db.WriterConnection) and conn.lock_timeout == 0.25
+    conn.close()
+
+
+def test_a_negative_timeout_never_waits_forever_for_the_lock(dd: DataDir) -> None:
+    conn = open_db(dd, timeout=-1)
+    assert isinstance(conn, db.WriterConnection) and conn.lock_timeout == 0
+    inside, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with transaction(conn):
+            inside.set()
+            release.wait(5)
+
+    a = threading.Thread(target=holder)
+    a.start()
+    try:
+        assert inside.wait(5)
+        with pytest.raises(DbError, match="busy"), transaction(conn):
+            pass
+    finally:
+        release.set()
+        a.join(5)
+    conn.close()
