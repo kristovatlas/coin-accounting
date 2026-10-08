@@ -39,6 +39,12 @@ test("an imported address shows its scanned balance, outputs and history", async
     await row.locator(".show-history").click();
     await expect(page.locator("#address-events tbody tr")).toHaveCount(101);
     await expect(page.locator("#address-events tbody tr").first()).toContainText("received");
+    await expect(page.locator("#address-history-incomplete")).toHaveCount(0); // scanned through the sync
+
+    // Refresh reloads the open history with the holdings, so both are from one snapshot (T-207).
+    await page.locator("#holdings-refresh").click();
+    await expect(page.locator("#address-history h3")).toHaveText(`History of ${MINED_TO}`);
+    await expect(page.locator("#address-events tbody tr")).toHaveCount(101);
     expect(await violations()).toEqual([]);
   } finally {
     await stop(app);

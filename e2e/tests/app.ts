@@ -44,14 +44,15 @@ export async function startApp(): Promise<Started> {
   }
 }
 
-/** Stop the app (if it still runs) and remove its workdir, whose launch file held a bootstrap token. */
+/** Stop the app (if it still runs) and remove its workdir, whose launch file held a bootstrap token.
+ * It waits for the harness to exit: the harness stops the launcher and the node before it does, so
+ * nothing still runs in the workdir when it is removed (a stuck teardown is the test's timeout). */
 export async function stop(app: Started): Promise<void> {
   try {
     if (app.proc.exitCode === null && app.proc.signalCode === null) {
       const exited = new Promise((done) => app.proc.once("exit", done));
       app.proc.kill("SIGTERM");
-      await Promise.race([exited, new Promise((done) => setTimeout(done, 15_000))]);
-      if (app.proc.exitCode === null && app.proc.signalCode === null) app.proc.kill("SIGKILL");
+      await exited;
     }
   } finally {
     rmSync(app.workdir, { recursive: true, force: true });

@@ -2,7 +2,7 @@
 // works offline. Every figure is as of the last finished sync (`as_of`); an address that isn't scanned
 // that far yet is marked, never shown as a settled zero (T-207, T-210). React renders every value as
 // text (T-104). An address's events are fetched by POST, so its script never appears in a URL (T-105).
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type Accounts,
@@ -23,15 +23,25 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : "Something went wrong.";
 }
 
+/** Whether an address's history is known through the last finished sync (T-210). */
+function scanned(a: AddressSummary, asOf: number | null): boolean {
+  return a.scanned_to !== null && asOf !== null && a.scanned_to >= asOf;
+}
+
 /** How far an address's history is known, in words. */
 function scanState(a: AddressSummary, asOf: number | null): string {
   if (a.scanned_to === null) return "not scanned yet";
-  if (asOf !== null && a.scanned_to >= asOf) return "scanned";
+  if (scanned(a, asOf)) return "scanned";
   return `scanned to block ${a.scanned_to}`;
 }
 
-function Events({ events }: { events: HistoryEvent[] }) {
-  if (events.length === 0) return <p>No activity as of the last sync.</p>;
+/** The open history panel: one address's events, fetched with the holdings they belong to. */
+type Panel = { script: string; events: HistoryEvent[] | null; error: string | null };
+
+function Events({ events, complete }: { events: HistoryEvent[]; complete: boolean }) {
+  // Until the address is scanned through the last sync, no activity means "unknown", not "none" (T-210).
+  if (events.length === 0)
+    return <p>{complete ? "No activity as of the last sync." : "No activity found so far."}</p>;
   return (
     <table id="address-events">
       <thead>
@@ -62,23 +72,44 @@ export function Holdings({ session }: { session: string }) {
   const [addresses, setAddresses] = useState<Addresses | null>(null);
   const [accounts, setAccounts] = useState<Accounts | null>(null);
   const [utxos, setUtxos] = useState<Utxo[]>([]);
-  const [selected, setSelected] = useState<string | null>(null); // a script
-  const [events, setEvents] = useState<HistoryEvent[] | null>(null);
+  const [panel, setPanel] = useState<Panel | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Each load and each history request takes a new number; a response is used only while its number
+  // is the latest of its kind, so a slow answer never lands under another address or over a newer
+  // snapshot. A load also reloads the open history, so the page never mixes two snapshots (T-207).
+  const loads = useRef(0);
+  const views = useRef(0);
+  const open = useRef<string | null>(null); // the script whose history is shown
 
   const load = useCallback(async () => {
+    const mine = ++loads.current;
+    const script = open.current;
+    const view = script === null ? 0 : ++views.current;
+    const ours = () => script !== null && view === views.current;
     setBusy(true);
     setError(null);
+    if (script !== null) setPanel({ script, events: null, error: null });
     try {
       const [a, acc, u] = await Promise.all([getAddresses(session), getAccounts(session), getUtxos(session)]);
-      setAddresses(a);
-      setAccounts(acc);
-      setUtxos(u.utxos);
+      if (mine === loads.current) {
+        setAddresses(a);
+        setAccounts(acc);
+        setUtxos(u.utxos);
+      }
     } catch (e) {
-      setError(message(e));
+      if (mine === loads.current) setError(message(e));
+      if (ours()) setPanel({ script: script as string, events: null, error: "Not loaded: see the error above." });
+      return;
     } finally {
-      setBusy(false);
+      if (mine === loads.current) setBusy(false);
+    }
+    if (script === null) return;
+    try {
+      const { events } = await getAddressEvents(session, script);
+      if (ours()) setPanel({ script, events, error: null });
+    } catch (e) {
+      if (ours()) setPanel({ script, events: null, error: message(e) });
     }
   }, [session]);
 
@@ -87,12 +118,14 @@ export function Holdings({ session }: { session: string }) {
   }, [load]);
 
   async function show(script: string) {
-    setSelected(script);
-    setEvents(null);
+    const view = ++views.current;
+    open.current = script;
+    setPanel({ script, events: null, error: null });
     try {
-      setEvents((await getAddressEvents(session, script)).events);
+      const { events } = await getAddressEvents(session, script);
+      if (view === views.current) setPanel({ script, events, error: null });
     } catch (e) {
-      setError(message(e));
+      if (view === views.current) setPanel({ script, events: null, error: message(e) });
     }
   }
 
@@ -101,7 +134,8 @@ export function Holdings({ session }: { session: string }) {
   const asOf = addresses.as_of?.height ?? null;
   const own = addresses.addresses.filter((a) => a.entity_id === ME);
   const others = addresses.addresses.filter((a) => a.entity_id !== ME);
-  const complete = own.every((a) => a.scanned_to !== null && asOf !== null && a.scanned_to >= asOf);
+  const complete = own.every((a) => scanned(a, asOf));
+  const shown = panel === null ? undefined : addresses.addresses.find((a) => a.script === panel.script);
   const total = own.reduce((sum, a) => sum + a.balance, 0);
   const accountName = (id: number | null) => accounts.tax_accounts.find((t) => t.id === id)?.name ?? "";
   const ownerName = (id: number) => accounts.entities.find((e) => e.id === id)?.name ?? "another owner";
@@ -152,10 +186,21 @@ export function Holdings({ session }: { session: string }) {
         </tbody>
       </table>
 
-      {selected !== null && (
+      {panel !== null && (
         <section id="address-history">
-          <h3>History of {addresses.addresses.find((a) => a.script === selected)?.address ?? selected}</h3>
-          {events === null ? <p>Loading…</p> : <Events events={events} />}
+          <h3>History of {shown?.address ?? panel.script}</h3>
+          {shown !== undefined && !scanned(shown, asOf) && (
+            <p id="address-history-incomplete">
+              This address is {scanState(shown, asOf)}, so its history may be incomplete.
+            </p>
+          )}
+          {panel.error !== null ? (
+            <p id="address-history-error">{panel.error}</p>
+          ) : panel.events === null ? (
+            <p>Loading…</p>
+          ) : (
+            <Events events={panel.events} complete={shown !== undefined && scanned(shown, asOf)} />
+          )}
         </section>
       )}
 
