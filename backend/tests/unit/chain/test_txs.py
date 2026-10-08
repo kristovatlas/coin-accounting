@@ -213,8 +213,11 @@ def test_fill_prevouts_has_a_parent_budget_t205(monkeypatch: pytest.MonkeyPatch)
     child = mempool_child()
     child["vin"].append({"txid": other, "vout": 0, "sequence": 0})
     node = FakeNode({PARENT: confirmed_parent(), CHILD: child, other: confirmed_parent() | {"txid": other}})
+    tx = fetch_tx(node, CHILD)
+    calls = len(node.calls)
     with pytest.raises(BudgetExceededError):
-        fill_prevouts(node, fetch_tx(node, CHILD))
+        fill_prevouts(node, tx)
+    assert len(node.calls) == calls  # refused before any parent is fetched
     monkeypatch.setattr(txs, "MAX_PARENTS", 2)
     assert fill_prevouts(node, fetch_tx(node, CHILD)).prevouts_known
 

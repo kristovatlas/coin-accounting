@@ -11,6 +11,7 @@ import pytest
 
 from coinacct.chain.spenders import SpendState, spend_of, spends
 from coinacct.chain.txs import fetch_tx
+from coinacct.rpc import RpcCallError
 from harness.regtest import RegtestNode, regtest_node
 from tests.integration.conftest import app_client
 
@@ -56,5 +57,21 @@ def test_an_op_return_output_is_unspendable(wallet_node: RegtestNode) -> None:
     txid = wallet_node.admin("sendrawtransaction", [signed])
     [block] = wallet_node.mine(1)
     tx = fetch_tx(rpc, txid, block)
-    states = {s.state for s in spends(rpc, [(tx, n) for n in range(len(tx.outputs))])}
-    assert SpendState.UNSPENDABLE in states
+    states = [s.state for s in spends(rpc, [(tx, n) for n in range(len(tx.outputs))])]
+    assert states == [
+        SpendState.UNSPENDABLE if o.script_type == "nulldata" else SpendState.UNSPENT for o in tx.outputs
+    ]
+    assert states.count(SpendState.UNSPENDABLE) == 1
+
+
+def test_a_node_without_txospenderindex_fails_loudly_never_reads_unspent_t210(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    indexes = ("txindex", "blockfilterindex")  # no txospenderindex
+    with regtest_node(tmp_path_factory.mktemp("regtest-noindex"), indexes=indexes) as n:
+        n.mine(101)
+        rpc = app_client(n)
+        coinbase = n.admin("getblock", [n.admin("getblockhash", [1])])["tx"][0]
+        tx = fetch_tx(rpc, coinbase, n.admin("getblockhash", [1]))
+        with pytest.raises(RpcCallError):
+            spend_of(rpc, tx, 0)

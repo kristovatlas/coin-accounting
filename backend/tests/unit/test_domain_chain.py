@@ -55,6 +55,14 @@ def test_the_conversion_ignores_the_ambient_decimal_context_t502(ambient: decima
         assert btc_to_sats(Decimal("21000000.00000000000000000000000000000000")) == MAX_SATS
 
 
+def test_a_fraction_of_a_satoshi_is_a_value_error_whatever_the_caller_traps_t502() -> None:
+    with (
+        decimal.localcontext(decimal.Context(traps=[decimal.Inexact, decimal.Rounded])),
+        pytest.raises(ValueError),
+    ):
+        btc_to_sats(Decimal("1.234567891"))
+
+
 def test_only_a_decimal_is_converted() -> None:
     with pytest.raises(ValueError, match="Decimal"):
         btc_to_sats(0.1)  # type: ignore[arg-type]  # a float must never reach here

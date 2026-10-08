@@ -63,11 +63,12 @@ def btc_to_sats(value: Decimal) -> int:
     with localcontext(_EXACT):
         try:
             sats = value * SATS_PER_BTC
+            whole = sats == sats.to_integral_value()
         except DecimalException:
             raise ValueError("an amount isn't a whole number of satoshis") from None
-    if sats != sats.to_integral_value():
-        raise ValueError("an amount isn't a whole number of satoshis")
-    return int(sats)
+        if not whole:
+            raise ValueError("an amount isn't a whole number of satoshis")
+        return int(sats)
 
 
 @dataclass(frozen=True, slots=True)

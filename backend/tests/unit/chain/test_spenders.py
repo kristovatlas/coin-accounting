@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
 
 from coinacct.chain import spenders
 from coinacct.chain.spenders import Spend, SpendState, spend_of, spends
-from coinacct.chain.txs import MalformedTxError
+from coinacct.chain.txs import BudgetExceededError, MalformedTxError
 from coinacct.domain.chain import Outpoint, Tx, TxIn, TxOut
 
 TXID, SPENDER, BLOCK = "11" * 32, "22" * 32, "bb" * 32
@@ -69,6 +70,37 @@ def test_large_batches_are_split(monkeypatch: pytest.MonkeyPatch) -> None:
     assert [len(c[0]) for c in node.calls] == [2, 2, 1]
 
 
+def test_the_earlier_bip30_duplicate_coinbase_is_unspendable_t208() -> None:
+    dup = "d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599"
+    earlier = Tx(dup, "cc" * 32, 1, 0, (TxIn(None, 0xFFFFFFFF),), (PAY,))
+    later = Tx(dup, spenders.BIP30_LATER[dup], 1, 0, (TxIn(None, 0xFFFFFFFF),), (PAY,))
+    node = FakeNode()
+    assert spend_of(node, earlier, 0).state is SpendState.UNSPENDABLE and node.calls == []
+    assert spend_of(node, later, 0).state is SpendState.UNSPENT and len(node.calls) == 1
+
+
+def test_a_call_has_an_output_budget_t205(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(spenders, "MAX_OUTPUTS", 2)
+    t = tx(PAY, PAY, PAY)
+    with pytest.raises(BudgetExceededError):
+        spends(FakeNode(), [(t, 0), (t, 1), (t, 2)])
+    assert len(spends(FakeNode(), [(t, 0), (t, 1)])) == 2
+
+
+@pytest.mark.parametrize(
+    ("state", "spender", "block"),
+    [
+        (SpendState.SPENT, SPENDER, None),
+        (SpendState.SPENT_UNCONFIRMED, None, None),
+        (SpendState.UNSPENT, SPENDER, None),
+        (SpendState.UNSPENDABLE, None, BLOCK),
+    ],
+)
+def test_a_spend_must_match_its_state(state: SpendState, spender: str | None, block: str | None) -> None:
+    with pytest.raises(ValueError, match="match its state"):
+        Spend(Outpoint(TXID, 0), state, spender, block)
+
+
 def test_an_output_the_tx_doesnt_have_is_refused() -> None:
     for n in (1, -1):  # -1 must not wrap around to the last output
         with pytest.raises(IndexError):
@@ -90,6 +122,8 @@ class Broken:
         [],  # fewer answers than outputs
         [{"txid": SPENDER, "vout": 0}],  # another output
         [{"txid": TXID, "vout": 1}],
+        [{"txid": TXID, "vout": False}],  # a bool isn't an output index, even though False == 0
+        [{"txid": TXID, "vout": Decimal("0.0")}],
         [{"txid": TXID, "vout": 0, "blockhash": BLOCK}],  # a block without a spender
         [{"txid": TXID, "vout": 0, "spendingtxid": "nothex"}],
         [{"txid": TXID, "vout": 0, "spendingtxid": SPENDER, "blockhash": 7}],
