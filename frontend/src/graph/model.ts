@@ -46,7 +46,13 @@ export function ownerClass(node: OutputNode): "mine" | "tagged" | "untagged" | "
 export function label(node: Node): string {
   if (node.kind === "tx") return short(node.txid);
   const amount = node.sats === null ? "?" : btc(node.sats);
-  const where = node.address ?? (node.unspendable ? "unspendable" : node.script ? short(node.script) : "");
+  const where = node.address
+    ? short(node.address)
+    : node.unspendable
+      ? "unspendable"
+      : node.script
+        ? short(node.script)
+        : "";
   return `${amount}\n${where}`;
 }
 
@@ -123,7 +129,8 @@ export function layout(graph: Graph): Map<string, { x: number; y: number }> {
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: "LR", nodesep: 30, ranksep: 70 });
   g.setDefaultEdgeLabel(() => ({}));
-  for (const node of graph.nodes.values()) g.setNode(node.id, { width: 40, height: 40 });
+  // wide enough for the two-line label under each node (style.ts: text-max-width 160px)
+  for (const node of graph.nodes.values()) g.setNode(node.id, { width: 160, height: 56 });
   for (const e of graph.edges.values()) g.setEdge(e.source, e.target);
   dagre.layout(g);
   const positions = new Map<string, { x: number; y: number }>();
