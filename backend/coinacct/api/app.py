@@ -38,7 +38,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from coinacct.api.placeholder import APP_JS, INDEX_HTML
-from coinacct.api.security import SecurityMiddleware
+from coinacct.api.security import MAX_BODY_BYTES, SecurityMiddleware
 from coinacct.api.session import ClaimError, Sessions
 from coinacct.domain.keys import PrivateKeyError
 from coinacct.services import imports as import_service
@@ -89,11 +89,16 @@ class NewClient(Strict):
 
 
 class Upload(Strict):
-    text: str = Field(max_length=import_service.MAX_UPLOAD_BYTES)
+    # The security layer's body limit comes first (a 413 above it), so it is the real upload limit:
+    # a longer list is imported in parts.
+    text: str = Field(max_length=MAX_BODY_BYTES)
+
+
+class DescriptorUpload(Upload):
     gap_limit: int = Field(default=import_service.DEFAULT_GAP_LIMIT, ge=1, le=import_service.MAX_GAP_LIMIT)
 
 
-class OwnedUpload(Upload):
+class Owned(Strict):
     entity_id: int
     tax_account_id: int | None
     label: str = Field(default="", max_length=200)
@@ -104,6 +109,14 @@ class OwnedUpload(Upload):
         return Owner(
             self.entity_id, self.tax_account_id, self.label, self.start_height, tuple(self.client_ids)
         )
+
+
+class OwnedUpload(Upload, Owned):
+    pass
+
+
+class OwnedDescriptorUpload(DescriptorUpload, Owned):
+    pass
 
 
 def _known(known: Any) -> list[dict[str, Any]]:
@@ -252,7 +265,7 @@ def _import_routes(app: FastAPI, imports: Imports, authenticated: list[Any]) -> 
         return {"added": list(result.added), "conflicts": list(result.conflicts)}
 
     @app.post("/api/imports/descriptor/preview", dependencies=authenticated)
-    def preview_descriptor(body: Upload) -> dict[str, Any]:
+    def preview_descriptor(body: DescriptorUpload) -> dict[str, Any]:
         p = imports.preview_descriptor(body.text, body.gap_limit)
         return {
             "descriptor": p.info.text,
@@ -264,5 +277,5 @@ def _import_routes(app: FastAPI, imports: Imports, authenticated: list[Any]) -> 
         }
 
     @app.post("/api/imports/descriptor", status_code=201, dependencies=authenticated)
-    def import_descriptor(body: OwnedUpload) -> dict[str, int]:
+    def import_descriptor(body: OwnedDescriptorUpload) -> dict[str, int]:
         return {"id": imports.import_descriptor(body.text, body.owner(), body.gap_limit)}

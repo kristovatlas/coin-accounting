@@ -19,13 +19,14 @@ from coinacct.api import runtime
 from coinacct.api.app import create_app
 from coinacct.api.session import Sessions
 from coinacct.domain.secret import Secret
+from coinacct.rpc import RpcTransportError
 from coinacct.services.imports import Imports, service
 from coinacct.services.startup import NodeStatus
 from coinacct.storage import accounts as ac
 from coinacct.storage import db as db_module
 from coinacct.storage.chain_state import record_chain
 from coinacct.storage.datadir import open_data_dir
-from coinacct.storage.db import open_db, open_reader, transaction
+from coinacct.storage.db import DbError, open_db, open_reader, transaction
 from tests.unit.services.test_imports import TPUB_DESC, Node, p2wpkh
 
 from .asgi import PORT, Reply, call
@@ -181,8 +182,9 @@ def test_an_address_list_is_previewed_then_imported_and_scanned_t701(world: Worl
     owner = {"entity_id": ac.ME, "tax_account_id": wallet, "label": "cold"}
     reply = world.post("/api/imports/addresses", {"text": upload, **owner})
     assert reply.json() == {"added": [s1, s2], "conflicts": []} and world.syncs == 1
-    again = world.post("/api/imports/addresses", {"text": upload, **owner})
-    assert again.json() == {"added": [], "conflicts": []} and world.syncs == 1  # nothing new to scan
+    earlier = world.post("/api/imports/addresses", {"text": upload, **owner, "start_height": 0})
+    # Nothing added, but a known script may now start earlier: its earlier history needs a scan.
+    assert earlier.json() == {"added": [], "conflicts": []} and world.syncs == 2
 
 
 def test_a_private_key_is_refused_and_never_repeated_t703(world: World) -> None:
@@ -209,10 +211,14 @@ def test_a_descriptor_is_previewed_through_the_node_then_imported_and_scanned(wo
 
 def test_offline_a_descriptor_is_refused_before_anything_is_sent_t203(tmp_path: Path) -> None:
     w = World(tmp_path, online=False)
-    reply = w.post("/api/imports/descriptor/preview", {"text": TPUB_DESC})
-    assert reply.status == 409 and "offline" in reply.json()["error"]
-    assert w.get("/api/accounts").json()["online"] is False and w.node.calls == []
-    w.db.close()
+    try:
+        for path in ("/api/imports/descriptor/preview", "/api/imports/descriptor"):
+            body = {"text": TPUB_DESC, "entity_id": ac.ME, "tax_account_id": None}
+            reply = w.post(path, body if path.endswith("descriptor") else {"text": TPUB_DESC})
+            assert reply.status == 409 and "offline" in reply.json()["error"]
+        assert w.get("/api/accounts").json()["online"] is False and w.node.calls == []
+    finally:
+        w.db.close()
 
 
 def test_a_busy_db_is_a_503_not_a_hang(tmp_path: Path) -> None:
@@ -233,7 +239,7 @@ def test_a_busy_db_is_a_503_not_a_hang(tmp_path: Path) -> None:
     finally:
         release.set()
         t.join(5)
-    w.db.close()
+        w.db.close()
 
 
 def test_an_upload_over_the_body_limit_is_refused_before_the_service(world: World) -> None:
@@ -246,10 +252,12 @@ def test_import_owner_fields_are_validated(world: World) -> None:
         {"text": "x", "entity_id": ac.ME, "tax_account_id": None, "start_height": -1},
         {"text": "x", "entity_id": ac.ME, "tax_account_id": None, "client_ids": list(range(51))},
         {"text": "x", "tax_account_id": None},
-        {"text": "x", "entity_id": ac.ME, "tax_account_id": None, "gap_limit": 0},
     ]
     for body in bad:
-        assert world.post("/api/imports/addresses", body).json() == {"error": "invalid request"}
+        reply = world.post("/api/imports/addresses", body)
+        assert reply.status == 422 and reply.json() == {"error": "invalid request"}
+    extra = {"text": "x", "entity_id": ac.ME, "tax_account_id": None, "gap_limit": 5}
+    assert world.post("/api/imports/addresses", extra).status == 422  # no gap limit for address lists
 
 
 @pytest.mark.parametrize("online", [True, False])
@@ -315,3 +323,73 @@ def test_an_address_import_parses_and_writes_under_one_writer_transaction(
     body = {"text": p2wpkh(1)[0], "entity_id": ac.ME, "tax_account_id": wallet}
     assert world.post("/api/imports/addresses", body).status == 200
     assert held == [True]  # the parse and the write share one transaction, under the writer's lock
+
+
+def test_a_reader_that_fails_its_file_checks_never_shows_the_path_t401(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret_path = "/media/veracrypt1/coinacct-data/db.sqlite"
+
+    def failing_reader() -> Any:
+        raise DbError(f"{secret_path} was replaced while it was opened (T-401)")
+
+    world.imports._open_reader = failing_reader
+    reply = world.get("/api/accounts")
+    assert reply.status == 422 and secret_path not in reply.body.decode()
+    assert "can't be used right now" in reply.json()["error"]
+    assert "replaced" in caplog.text  # the reason is in the log
+
+
+class AwayNode(Node):
+    def call(self, method: str, params: Any = ()) -> Any:
+        self.calls.append((method, params))
+        raise RpcTransportError(method, "connection refused")
+
+
+def test_a_node_gone_after_start_up_is_a_409_not_a_500(tmp_path: Path) -> None:
+    w = World(tmp_path)
+    try:
+        w.imports._rpc = AwayNode()
+        reply = w.post("/api/imports/descriptor/preview", {"text": TPUB_DESC})
+        assert reply.status == 409 and "didn't answer" in reply.json()["error"]
+    finally:
+        w.db.close()
+
+
+def test_another_process_holding_the_write_lock_is_a_503(tmp_path: Path) -> None:
+    w = World(tmp_path, timeout=0.05)
+    path = tmp_path / "data" / "db.sqlite"
+    other = sqlite3.connect(path, timeout=0)
+    other.execute("BEGIN IMMEDIATE")
+    try:
+        reply = w.post("/api/clients", {"name": "A phone wallet", "kind": "mobile"})
+        assert reply.status == 503 and "busy" in reply.json()["error"]
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
+        w.db.close()
+
+
+def test_known_scripts_and_conflicts_reach_the_ui(world: World) -> None:
+    wallet = world.wallet()
+    exchange = world.post("/api/entities", {"name": "An exchange", "kind": "exchange"}).json()["id"]
+    (a1, s1), (a2, s2) = p2wpkh(1), p2wpkh(2)
+    ac.add_addresses(world.db, [(s1, a1)], entity_id=exchange, tax_account_id=None, source="manual")
+    preview = world.post("/api/imports/addresses/preview", {"text": f"{a1}\n{a2}"}).json()
+    assert preview["known"] == [{"script": s1, "address": a1, "entity_id": exchange, "tax_account_id": None}]
+    assert preview["new"] == [{"script": s2, "address": a2}]
+    body = {"text": f"{a1}\n{a2}", "entity_id": ac.ME, "tax_account_id": wallet}
+    assert world.post("/api/imports/addresses", body).json() == {"added": [s2], "conflicts": [s1]}
+
+
+def test_the_account_overview_is_one_snapshot(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[bool] = []
+    real = ac.entities
+
+    def watched(conn: Any) -> Any:
+        seen.append(conn.in_transaction)
+        return real(conn)
+
+    monkeypatch.setattr(ac, "entities", watched)
+    assert world.get("/api/accounts").status == 200
+    assert seen == [True]  # read inside the reader's snapshot, with the accounts and clients

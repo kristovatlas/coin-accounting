@@ -698,7 +698,7 @@ def test_the_lock_is_released_whatever_the_body_or_begin_does(dd: DataDir) -> No
         pass
     other = sqlite3.connect(dd.root / DB_NAME, timeout=0)
     other.execute("BEGIN IMMEDIATE")  # another process holds the write lock: BEGIN fails
-    with pytest.raises(sqlite3.OperationalError), transaction(conn):
+    with pytest.raises(db.DbBusy), transaction(conn):
         pass
     other.execute("ROLLBACK")
     other.close()

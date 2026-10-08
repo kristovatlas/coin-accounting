@@ -34,6 +34,7 @@ coverage, so it names exactly what is scanned:
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -42,14 +43,16 @@ from typing import Final
 from coinacct.chain import descriptors, node_checks
 from coinacct.chain.descriptors import DescriptorError, DescriptorInfo
 from coinacct.chain.scans import Scan
-from coinacct.chain.txs import ChainRpc
+from coinacct.chain.txs import ChainRpc, NodeError
 from coinacct.domain.addresses import AddressError, parse_address
 from coinacct.domain.keys import refuse_private
 from coinacct.domain.secret import Secret
 from coinacct.storage import accounts
 from coinacct.storage.accounts import AccountsError, Source
 from coinacct.storage.chain_state import recorded_chain
-from coinacct.storage.db import Connection, DbError, transaction
+from coinacct.storage.db import Connection, DbBusy, DbError, transaction
+
+log = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES: Final = 1_000_000
 MAX_LINES: Final = 10_000
@@ -72,16 +75,31 @@ class Busy(Exception):
 
 @contextmanager
 def _db_errors() -> Iterator[None]:
-    """The storage layer's refusals as this module's: a busy writer is `Busy`, anything else the DB
-    refused is `ImportRefused`. Their messages are fixed and never repeat the data (`storage.db`)."""
+    """The storage layer's refusals as this module's, for the API:
+    - a write the schema refused (`AccountsError`, a fixed message that never repeats the data) is
+      `ImportRefused` with that message;
+    - a busy DB (`DbBusy`) is `Busy`;
+    - anything else (a reader that failed its file checks, T-401) is `ImportRefused` with a fixed
+      message: those carry the DB's path, which stays in the log, never in a response."""
     try:
         yield
     except AccountsError as e:
         raise ImportRefused(str(e)) from None
+    except DbBusy as e:
+        raise Busy(str(e)) from None
     except DbError as e:
-        if "busy" in str(e):
-            raise Busy(str(e)) from None
-        raise ImportRefused(str(e)) from None
+        log.warning("the user DB couldn't be used for an import or account request: %s", e)
+        raise ImportRefused("the user DB can't be used right now; see the log") from None
+
+
+@contextmanager
+def _node_errors() -> Iterator[None]:
+    """A node that went away, or refused the call outright, after start-up: the import can't run now.
+    Node error text never reaches a message (`chain.descriptors`)."""
+    try:
+        yield
+    except NodeError:
+        raise OfflineError("the node didn't answer; check that it's running and try again") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,10 +345,16 @@ class Imports:
         return self._rpc is not None
 
     def _read[T](self, read: Callable[[Connection], T]) -> T:
+        """`read` on a reader of its own, in one snapshot (a deferred transaction: under WAL it takes
+        no write lock), so related rows read together are consistent."""
         with _db_errors():
             reader = self._open_reader()
             try:
-                return read(reader)
+                reader.execute("BEGIN")
+                try:
+                    return read(reader)
+                finally:
+                    reader.execute("COMMIT")
             finally:
                 reader.close()
 
@@ -368,12 +392,14 @@ class Imports:
                 start_height=owner.start_height,
                 client_ids=owner.client_ids,
             )
-        if result.added:
+        # A new script, or a known one whose start height went down: something to scan either way.
+        if len(preview.new) + len(preview.known) > len(result.conflicts):
             self._request_sync()
         return result
 
     def preview_descriptor(self, upload: str, gap_limit: int = DEFAULT_GAP_LIMIT) -> DescriptorPreview:
-        return self._read(lambda r: preview_descriptor(self._rpc, r, upload, gap_limit=gap_limit))
+        with _node_errors():
+            return self._read(lambda r: preview_descriptor(self._rpc, r, upload, gap_limit=gap_limit))
 
     def import_descriptor(self, upload: str, owner: Owner, gap_limit: int = DEFAULT_GAP_LIMIT) -> int:
         preview = self.preview_descriptor(upload, gap_limit)  # the node first, without the writer's lock
