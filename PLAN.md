@@ -375,7 +375,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
    - the graph libraries, `cytoscape` and `@dagrejs/dagre` (#204, ADR 0037)
    - transaction and spender expansion for the graph (#205)
    - tagging from the graph, the mixing flag and the append-only change log (#207)
-   - tagging follow-ups: the address text checked against its script, the log guarded against replacement, a hand-edited log refused at upgrade, and import edits logged (#214, #217, #219, #221)
+   - tagging follow-ups: the address text checked against its script, the log guarded against replacement, a log holding an id only an outside edit can write refused at upgrade, and import edits logged (#214, #217, #219, #221)
    - the graph view and its tagging side panel (#223)
 
    As built, it differs from this plan in these ways:
