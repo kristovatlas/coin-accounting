@@ -43,5 +43,6 @@ MADR-format records of significant decisions (see [ADR 0001](0001-record-decisio
 | [0034](0034-launcher-reads-the-frontend-build.md) | The launcher reads the built frontend at start-up |
 | [0035](0035-m1-chain-access-as-built.md) | The architecture text follows M1's chain access as built |
 | [0036](0036-m2-import-and-discovery-as-built.md) | The architecture text follows M2's import and discovery as built |
+| [0037](0037-graph-libraries.md) | Cytoscape.js and @dagrejs/dagre draw the transaction graph |
 
 Template: [0000-template.md](0000-template.md).
