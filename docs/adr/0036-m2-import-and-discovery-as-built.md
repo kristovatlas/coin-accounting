@@ -2,7 +2,7 @@
 status: proposed
 date: 2026-10-08
 deciders: repository owner (human), drafted by Claude Code
-architecture_sha256: 53010c5c27e48341d3d40932e704647c428c29976e5435ece42bfbbd9d67b99b
+architecture_sha256: 4eb3a7398277e83517390893e050e264bf83a3e6de5bb026fe997c0bc19754aa
 ---
 
 # 0036: The architecture text follows M2's import and discovery as built
@@ -18,7 +18,7 @@ The differences that are design choices the reviews kept, not defects:
 3. **§3, same-tip syncs.** An import, or a descriptor window that grew, asks the tip poller for a sync even though the tip hasn't moved. The next poll queues it. Otherwise new subjects would wait for the next block.
 4. **§3, the writer lock and readers.** A write that waits more than 5 s for the lock is refused as busy, and the API answers 503, so a request never waits on a long job write. Readers are opened per request, read-only and query-only, after the writer's file checks (T-401, T-402).
 5. **§8.2, scan subjects.**
-   - Each descriptor is one subject. An address a descriptor already derives gets no subject of its own.
+   - Each descriptor is one subject. An address that a descriptor from the same or an earlier start height already derives gets no subject of its own; one imported from an earlier height keeps its own, so its earlier history is scanned.
    - Addresses are grouped into at most 16 `raw()` subjects per start height, so a list of many addresses doesn't become many scans (PLAN §3, "as few scans as possible").
    - A subject's name is a digest of what it scans, so any change makes a new subject, scanned from its start. That is correct whatever the earlier coverage; the cost is a rescan.
 6. **§8.2 and §8.4, window growth.**
@@ -44,10 +44,10 @@ Not changed, because the code is behind the text and must catch up:
 - Good: no security control is relaxed. §3's "long work never in a request" rule gains one exception, for an import's node calls, which the owner accepts with this ADR.
   - A request's node calls are bounded and read-only, and go through the same `rpcwhitelist` and the app's own allowlist (T-203).
   - The 503 fails closed.
-- Bad: a descriptor preview holds a request thread while the node is slow, for at least the per-call timeout and longer if the node trickles its reply; a fifth concurrent import waits for a free slot. The API refuses the import cleanly rather than hanging the jobs, but the user waits.
+- Bad: a descriptor preview holds a request thread while the node is slow, up to the per-call timeout for a stalled call, and longer across sequential calls, a trickled reply, or a wait for one of the client's 4 slots. The API refuses the import cleanly rather than hanging the jobs, but the user waits.
 - Bad: each subject rename rescans the subject's whole history, and its scripts show "not scanned yet" until the rescan finishes (#188, #198).
 - Bad: confirmed use by a third party can still grow a window up to the cap. Anyone who knows the xpub can pay addresses at several successive window edges in one transaction, and each rescan then reveals the next, so one fee can drive several growth steps (T-205; #190).
-- Bad: a grown window's new scripts read "not scanned yet" from the moment it grows until the next poll scans them, after the sync has already recorded its tip as done (T-210 shows it; architecture §8.4).
+- Bad: a grown window's new scripts read "not scanned yet" from the moment it grows until the next poll scans them. Growth runs when the sync returns, whether or not the sync recorded its tip as done (T-210 shows it; architecture §8.2, §8.4).
 
 ## References
 

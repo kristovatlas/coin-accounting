@@ -162,7 +162,7 @@ flowchart TD
   | Thread | Job |
   |---|---|
   | Event loop (uvicorn) | Serves the API. Long work is handed to the job worker, never run in a request |
-  | **Request workers** (the framework's thread pool) | Run the synchronous route handlers: DB reads and short writes, and the node calls an import needs to answer (a descriptor's `getdescriptorinfo` and `deriveaddresses`, at most 1,000 indexes, never `scanblocks`), through the API's own node client. Each call has a 120 s per-operation timeout, and at most 4 run at once; a stalled or trickling node can hold a request longer (ADR 0036) |
+  | **Request workers** (the framework's thread pool) | Run the synchronous route handlers: DB reads and short writes, and the node calls an import needs to answer (a descriptor's `getdescriptorinfo` and `deriveaddresses`, at most 1,000 indexes, never `scanblocks`), through the API's own node client. Each call has a 120 s per-operation timeout, and the import client runs at most 4 calls at once; a stalled or trickling node can hold a request longer (ADR 0036) |
   | **Job worker** (1 thread) | Runs queued jobs one at a time: scan ranges, activity batches, price refreshes, report generation. Sequential, because Core allows one `scanblocks` at a time. Jobs have ids, progress and cancel |
   | **Tip poller** | Calls `getbestblockhash` every 30 s. A change queues a tip-change job (§8.4). An import, or a descriptor window that grew (§8.2), requests a sync at the same tip, which the next poll queues. No ZMQ, because that would be a new flow |
   | **Watchdog** | Checks every 2 s that the data directory still exists on the verified device. If not, it starts shutdown |
@@ -333,7 +333,7 @@ Progress for the user comes from the job's range counter. `scanblocks status` ne
 
 **Scan subjects.** Each imported descriptor is one subject: its window (indexes 0 to its end) from its start height. Imported addresses are grouped into `raw(<script>)` subjects, at most 16 per start height, by a hash of each script. An address that a descriptor already derives, from the same or an earlier start height, gets no subject of its own. A subject's name is a digest of what it scans, so a wider window, a new address in a group, or an earlier start height is a new subject, scanned from its start (T-210).
 
-**Window growth.** After each sync, every ranged descriptor whose own scan finished, and whose highest **confirmed** used index is within its gap limit of the window's end, grows: to at least that index plus the gap limit, and at least to double its size, by at most 1,000 indexes at once, and never past index 10,000 by itself (provisional until the perf check; beyond it the window is reported as full). A descriptor still waiting, or over its budget, isn't grown. Growth runs after the sync has recorded its tip, and the wider window is scanned at the next poll; until then its new scripts read "not scanned yet" (T-210). Unconfirmed use never grows a window: anyone who knows the xpub could otherwise grow it, and force a rescan, at will (T-205, ADR 0036).
+**Window growth.** After each sync, every ranged descriptor whose own scan finished, and whose highest **confirmed** used index is within its gap limit of the window's end, grows: to at least that index plus the gap limit, and at least to double its size, by at most 1,000 indexes at once, and never past index 10,000 by itself (provisional until the perf check; beyond it the window is reported as full). A descriptor still waiting, or over its budget, isn't grown. Growth runs once the sync returns, whether or not every subject reached the target (so a finished descriptor can grow while another subject keeps the target unfinished), and the wider window is scanned at the next poll; until then its new scripts read "not scanned yet" (T-210). Unconfirmed use never grows a window: anyone who knows the xpub could otherwise grow it, and force a rescan, at will (T-205, ADR 0036).
 
 The scan target is the tip the last catch-up (§8.4) recorded. A subject that can't be extended now (a range that failed its guard three times, a busy scan slot, a lagging filter index, a budget the user hasn't agreed to) doesn't fail the job: it leaves the catch-up unfinished, and the tip poller queues the sync again. A subject over its budget alone waits for the next tip instead, so its refused range isn't rescanned every poll (ADR 0035).
 
@@ -379,7 +379,7 @@ sequenceDiagram
   C-->>P: invalidation set
   P->>P: extend coverage to the scan target (8.2), rebuild mempool pass, flag changed events for review
   C->>C: once every subject reaches it, the scan target becomes the last-seen tip
-  P->>P: after the sync, grow the windows of descriptors whose scan finished (8.2); if any grew, request a sync at the same tip
+  P->>P: when the sync returns (finished or not), grow the windows of descriptors whose own scan finished (8.2); if any grew, request a sync at the same tip
 ```
 
 The reference tip is the unfinished scan target if there is one, otherwise the last-seen tip. The review queue keeps the removed txids in the user DB until their events have been flagged, so a crash or a failed sync never loses them (ADR 0035).
