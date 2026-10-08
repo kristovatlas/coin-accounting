@@ -13,6 +13,7 @@ from coinacct.storage.migrations import (
     m0002_chain_cache,
     m0003_scan_marker,
     m0004_review_queue,
+    m0005_accounts,
 )
 
 STEPS: Final[tuple[tuple[int, str], ...]] = (
@@ -20,4 +21,5 @@ STEPS: Final[tuple[tuple[int, str], ...]] = (
     (2, m0002_chain_cache.SQL),
     (3, m0003_scan_marker.SQL),
     (4, m0004_review_queue.SQL),
+    (5, m0005_accounts.SQL),
 )
