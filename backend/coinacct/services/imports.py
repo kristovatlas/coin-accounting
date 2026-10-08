@@ -351,6 +351,11 @@ class Imports:
     def online(self) -> bool:
         return self._rpc is not None
 
+    def node(self) -> ChainRpc | None:
+        """The API's node client (None offline), shared with `services.graph`, so the app keeps
+        three node clients in all (architecture §3)."""
+        return self._rpc
+
     def _read[T](self, read: Callable[[Connection], T]) -> T:
         """`read` on a reader of its own, in one snapshot (a deferred transaction: under WAL it takes
         no write lock), so related rows read together are consistent."""
