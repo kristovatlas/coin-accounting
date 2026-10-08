@@ -103,11 +103,12 @@ backend/coinacct/
   services/        # orchestration, job worker, tip poller
   doxx/            # pure doxx rules
   tax/             # engine.py, rules/<year>.py, reports.py (pure)
-  chain/           # node_checks.py, scans.py, spenders.py, mempool.py, cache.py, reorg.py
+  chain/           # node_checks.py, txs.py, scans.py, spenders.py, mempool.py, reorg.py
   rpc.py
   prices/          # fetch.py, bitstamp.py, fx.py, csv_import.py
   storage/         # volume.py (VeraCrypt detection; macOS via diskutil), db.py, models.py,
-                   # migrations/, config_file.py, exports.py, logfile.py, watchdog.py
+                   # migrations/, chain_cache.py, chain_state.py (the chain cache's tables),
+                   # config_file.py, exports.py, logfile.py, watchdog.py
 backend/tests/
   unit/<module>/   # e.g. unit/tax/, unit/doxx/, unit/chain/
   integration/<module>/
@@ -169,7 +170,7 @@ flowchart TD
 - **Shutdown** (SIGINT/SIGTERM, watchdog, or quit from the UI):
   1. Stop accepting requests.
   2. Cancel the current job. If an in-flight scan marker exists (§8.2), call `scanblocks abort`.
-  3. Finish or roll back the open transaction, checkpoint WAL, close the DB.
+  3. Finish or roll back the open transaction, checkpoint WAL, close the DB. A job that hasn't stopped within its short join keeps the DB open: it is left for the OS to close, and WAL rolls its open transaction back on the next open (ADR 0035).
   4. Flush and close logs. Exit with code 0. This also lets coverage data be written (ENGINEERING §3.3).
 
 ## 4. Local authentication: launch and session
@@ -292,19 +293,20 @@ sequenceDiagram
   participant C as chain/scans
   participant N as Bitcoin Core
   C->>N: getindexinfo (filter index height H), getblockcount (tip)
-  C->>C: S = min(H, tip − 100), record getblockhash(S)
+  C->>C: S = min(H, scan target − 100), record getblockhash(S)
   loop bounded ranges up to S
     C->>C: write in-flight scan marker
+    C->>C: job cancelled? clear marker, stop (no range starts after a shutdown abort)
     C->>N: scanblocks start [{desc, range}] from to
     N-->>C: relevant_blocks, completed
     C->>C: clear marker
     C->>N: getindexinfo, getblockhash(S)
     alt completed is false, index height below S, or stop hash changed
-      C->>C: discard range, retry (max 3, then fail the job)
+      C->>C: discard range, retry (max 3, then the subject waits for the next sync)
     else ok
       C->>J: candidate block count (busy-script budget, T-205)
       opt over budget
-        J->>J: pause job, ask the user to continue or stop
+        J->>J: leave the subject unfinished until the user agrees to continue
       end
       loop batches of at most a few hundred blocks
         C->>N: getdescriptoractivity [blocks] [descs] false
@@ -322,6 +324,8 @@ sequenceDiagram
 ```
 
 Progress for the user comes from the job's range counter. `scanblocks status` needs a second connection, and is used only for diagnostics.
+
+The scan target is the tip the last catch-up (§8.4) recorded. A subject that can't be extended now (a range that failed its guard three times, a busy scan slot, a lagging filter index, a budget the user hasn't agreed to) doesn't fail the job: it leaves the catch-up unfinished, and the tip poller queues the sync again. A subject over its budget alone waits for the next tip instead, so its refused range isn't rescanned every poll (ADR 0035).
 
 ### 8.3 Forward expansion (click on an output)
 
@@ -359,11 +363,14 @@ sequenceDiagram
   participant N as Bitcoin Core
   P->>N: getbestblockhash (every 30 s)
   P->>C: tip changed: queue tip-change job
-  C->>N: getblockheader(last_seen), walk back while confirmations = −1
-  C->>C: fork height F: invalidate rows, coverage, snapshots above F (any depth)
+  C->>N: getblockheader(reference tip), walk back while confirmations = −1
+  C->>C: fork height F: invalidate rows, coverage, snapshots above F (any depth); record the removed txids in the review queue
+  C->>C: record the new tip as the scan target
   C-->>P: invalidation set
-  P->>P: extend coverage to new tip (8.2), rebuild mempool pass, flag changed events for review
-  C->>C: persist new last-seen tip
+  P->>P: extend coverage to the scan target (8.2), rebuild mempool pass, flag changed events for review
+  C->>C: once every subject reaches it, the scan target becomes the last-seen tip
+
+The reference tip is the unfinished scan target if there is one, otherwise the last-seen tip. The review queue keeps the removed txids in the user DB until their events have been flagged, so a crash or a failed sync never loses them (ADR 0035).
 ```
 
 ## 9. Build and development flows (never at runtime)
@@ -401,3 +408,4 @@ flowchart LR
 | 2026-10-01 | 0.2.3 | §9: the pinned osv-scanner, and `make audit` as a development-time flow to the OSV API (ADR 0027) |
 | 2026-10-02 | 0.2.4 | §1, §8.1: the minimum Bitcoin Core version is 31.1 (ADR 0029) |
 | 2026-10-06 | 0.2.5 | §1, §2: the launcher reads the built frontend into memory at start-up; `api/` serves it from memory (ADR 0034) |
+| 2026-10-08 | 0.2.6 | M1 as built (ADR 0035): §2 module tree (`chain/txs.py`; the chain cache's tables in `storage/`); §3 a stuck job keeps the DB open at shutdown; §8.2 the scan target, the cancel check before each range, a subject that waits instead of failing the job, a refused budget that waits for the user; §8.4 two tips (the scan target and the last-seen tip) and the review queue |
