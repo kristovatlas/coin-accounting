@@ -378,7 +378,7 @@ def test_a_malformed_reply_at_start_up_means_offline_mode(conn: sqlite3.Connecti
     assert reason == "the chain catch-up at start-up failed (MalformedHeaderError)"
 
 
-def test_a_tip_moving_during_start_up_is_left_to_the_poller(conn: sqlite3.Connection) -> None:
+def test_a_tip_that_keeps_moving_during_start_up_means_offline_mode(conn: sqlite3.Connection) -> None:
     set_tip(conn, Tip(bh(400), 400))
 
     class Moving(Node):
@@ -387,7 +387,10 @@ def test_a_tip_moving_during_start_up_is_left_to_the_poller(conn: sqlite3.Connec
                 return {"hash": bh(500), "height": 500, "confirmations": -1, "previousblockhash": bh(499)}
             return super().call(method, params)
 
-    assert chain_sync.at_startup(Moving(500), conn) is None
+    # The fork-point check never finished: §8.1, any failed node step means offline mode.
+    assert (
+        chain_sync.at_startup(Moving(500), conn) == "the node's tip kept moving during the start-up catch-up"
+    )
     assert last_tip(conn) == Tip(bh(400), 400)
 
 

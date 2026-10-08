@@ -89,7 +89,8 @@ def at_startup(rpc: ChainRpc, conn: Connection) -> str | None:
     except NodeSyncingError:
         return "the node is still syncing its chain; chain access waits for it"
     except (TipMovedError, StaleTipError):
-        log.info("the node's tip keeps moving during start-up; the tip poller catches up")
+        # The fork-point check didn't finish, and §8.1 says any failed node step means offline mode.
+        return "the node's tip kept moving during the start-up catch-up"
     except Exception as e:  # a node or DB problem here means offline mode, not a failed start
         return f"the chain catch-up at start-up failed ({type(e).__name__})"
     return None
