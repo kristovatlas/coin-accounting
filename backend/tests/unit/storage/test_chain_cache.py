@@ -249,6 +249,17 @@ def test_a_catch_up_writes_against_its_target_and_moves_the_tip_only_when_done(
     assert last_tip(conn) == target and cc.scan_target(conn) is None and cc.reference_tip(conn) == target
 
 
+@pytest.mark.parametrize("bad", [block(99), block(100, branch=1)])
+def test_a_scan_target_below_the_reference_tip_is_refused_t207(conn: sqlite3.Connection, bad: Tip) -> None:
+    with pytest.raises(DbError, match="invalidate first"):
+        cc.set_scan_target(conn, bad)
+    cc.set_scan_target(conn, TIP)  # the reference tip itself is fine (a no-op catch-up)
+    cc.set_scan_target(conn, block(105))
+    with pytest.raises(DbError, match="invalidate first"):
+        cc.set_scan_target(conn, block(104))  # below the current target
+    assert cc.scan_target(conn) == block(105)
+
+
 def test_a_reorg_removes_everything_above_the_fork_at_any_depth_t207(conn: sqlite3.Connection) -> None:
     keep, drop = Outpoint(h(40), 0), Outpoint(h(41), 0)
     cc.put_tx(conn, tx_at(55, txid=h(50)), 55, TIP)  # at the fork height: kept

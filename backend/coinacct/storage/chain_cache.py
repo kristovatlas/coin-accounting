@@ -91,15 +91,26 @@ def reference_tip(conn: sqlite3.Connection) -> Tip | None:
 
 
 def set_scan_target(conn: sqlite3.Connection, target: Tip) -> None:
-    """Start (or restart) a catch-up towards `target`. Rows from blocks no longer in the active chain
-    must already be gone (`invalidate_above`): the target is the new reference tip."""
+    """Start (or restart) a catch-up towards `target`, the new reference tip. Rows from blocks no
+    longer in the active chain must already be gone (`invalidate_above`), so `target` can't lie
+    below the reference tip, or at its height in another block (#167): either would leave rows above
+    the reference tip, or orphaned rows no later walk back from `target` finds (T-207)."""
     with transaction(conn):
-        cur = conn.execute(
-            "UPDATE chain_state SET target_hash = ?, target_height = ? WHERE id = 1",
-            (target.blockhash, target.height),
-        )
-        if cur.rowcount != 1:
-            raise DbError("the chain must be recorded before a tip")
+        ref = reference_tip(conn)
+        if ref is not None and (
+            target.height < ref.height or (target.height == ref.height and target != ref)
+        ):
+            raise DbError("a scan target can't be below the reference tip; invalidate first (T-207)")
+        _write_target(conn, target)
+
+
+def _write_target(conn: sqlite3.Connection, target: Tip) -> None:
+    cur = conn.execute(
+        "UPDATE chain_state SET target_hash = ?, target_height = ? WHERE id = 1",
+        (target.blockhash, target.height),
+    )
+    if cur.rowcount != 1:
+        raise DbError("the chain must be recorded before a tip")
 
 
 def complete_scan_target(conn: sqlite3.Connection, target: Tip) -> None:
@@ -336,7 +347,7 @@ def invalidate_above(conn: sqlite3.Connection, fork: Tip) -> Invalidated:
         )
         last = last_tip(conn)
         if last is None or fork.height > last.height:
-            set_scan_target(conn, fork)
+            _write_target(conn, fork)  # below the old target: it moves back, by design
         else:
             set_tip(conn, fork)
             conn.execute("UPDATE chain_state SET target_hash = NULL, target_height = NULL WHERE id = 1")

@@ -28,6 +28,9 @@ from coinacct.storage.datadir import DataDir, DataDirError, require_device
 from coinacct.storage.migrations import STEPS
 
 DB_NAME: Final = "db.sqlite"
+
+# For modules outside `storage/`, which may hold a connection but not import `sqlite3` (architecture §2).
+type Connection = sqlite3.Connection
 SIDE_FILES: Final = ("-wal", "-shm", "-journal")
 
 
