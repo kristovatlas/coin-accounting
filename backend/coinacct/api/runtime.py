@@ -44,6 +44,7 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
     bootstrap_token: str,
     rpc: Any,
     volume: Any,
+    db: Any,
     allow_unencrypted: bool,
     on_claimed: Callable[[], None],
     check: Callable[..., NodeStatus] = startup.check_configured_node,
@@ -51,19 +52,17 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
     shutdown: Shutdown | None = None,
     bundle: Mapping[str, bytes] | None = None,
 ) -> Runtime:
-    """`rpc` is `config.RpcConfig` and `volume` is `storage.volume.VolumeStatus`, passed as values
-    (architecture §2: `api/` imports neither). Raises `StorageRefused` when the storage policy
-    forbids running (T-401); a node problem only means offline mode.
-
-    There is no user DB yet (M2), so no chain is recorded for the data directory: the node's chain
-    decides the storage policy, and a mismatch check (T-206) comes with the DB.
+    """`rpc` is `config.RpcConfig`, `volume` is `storage.volume.VolumeStatus` and `db` the open user
+    DB, passed as values (architecture §2: `api/` imports none of them). Raises `StorageRefused` when
+    the storage policy forbids running (T-401); a node problem, including a chain other than the
+    one recorded in the DB (T-206), only means offline mode.
     """
     status = check(
         rpc.host,
         rpc.port,
         rpc.user,
         rpc.password,
-        expected_chain=None,
+        db=db,
         volume=volume,
         allow_unencrypted=allow_unencrypted,
     )
