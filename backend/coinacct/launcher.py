@@ -58,6 +58,8 @@ import uvicorn
 from coinacct import config
 from coinacct.api import runtime
 from coinacct.storage import config_file, datadir, volume
+from coinacct.storage.chain_state import peek_recorded_chain
+from coinacct.storage.db import DB_NAME, DbError, open_db
 from coinacct.storage.logfile import open_log_handler
 from coinacct.storage.watchdog import Watchdog
 
@@ -438,6 +440,8 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
     token = new_bootstrap_token()
     launch_file: list[Path] = []
     servers: list[Any] = []
+    dbs: list[Any] = []  # the user DB, once open
+    db_path = data.root / DB_NAME
     server_running = threading.Event()  # set just before uvicorn runs
     server_stopped = threading.Event()  # set once it has returned
     phase_lock = threading.Lock()
@@ -454,10 +458,21 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
         for server in servers:
             server.should_exit = True
         # A server about to start sees the request and doesn't (see below). One that runs is waited
-        # for, so later steps (closing the DB, from M2) never run under a request; within the
+        # for, so later steps (closing the DB) never run under a request; within the
         # coordinator's deadline, which ends the process if this doesn't.
         if server_running.is_set() and not server_stopped.wait(SERVER_STOP_SECONDS):
             raise RuntimeError("the server didn't stop in time")
+
+    def close_db() -> None:
+        # Only once nothing else can be using it (§3): not while start-up may still be in the node
+        # checks (the last step ends that process), and not if the server failed to stop in time.
+        # An unclosed DB is safe: WAL and synchronous=FULL roll an open transaction back on reopen.
+        with phase_lock:
+            starting = phase[0] in ("starting", "ended")
+        if starting or (server_running.is_set() and not server_stopped.is_set()):
+            return
+        for conn in dbs:
+            conn.close()
 
     def end_a_stalled_start_up() -> None:
         # Shutdown was asked for before uvicorn ran, and start-up hasn't taken over the report: the
@@ -491,6 +506,7 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
     watchdog = make_watchdog(data, shutdown.request)
     shutdown.add_step("report the reason", lambda: stderr_line(f"shutting down: {shutdown.reason}"))
     shutdown.add_step("stop the server", stop_server)
+    shutdown.add_step("close the user DB", close_db)
     shutdown.add_step("stop the watchdog", watchdog.stop)
     shutdown.add_step("remove the launch file", remove_launch_file)
     shutdown.add_step("clear the temp directory", clear_tmp_if_trusted)  # §6
@@ -527,6 +543,21 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
 
     with shutdown_signals(shutdown.request, force_exit):
         try:
+            # §8.1: the user DB (its checks, integrity check and migrations), then the watchdog, then
+            # the node checks, which compare the node's chain with the DB's (T-206).
+            if prepared.needs_test_chain and db_path.exists():
+                # Unencrypted storage is allowed only on a test chain (T-401): an existing DB that
+                # records another chain is refused before anything writes to it.
+                recorded = peek_recorded_chain(db_path)
+                if recorded is not None and recorded not in datadir.TEST_CHAINS:
+                    raise refuse(
+                        f"this data directory is for {recorded}, which never runs on unencrypted storage"
+                        " (T-401)"
+                    )
+            try:
+                dbs.append(open_db(data))
+            except DbError as e:
+                raise refuse(str(e)) from None
             watchdog.start()  # before the node checks (§8.1)
             try:
                 rt = build(
@@ -534,6 +565,7 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
                     bootstrap_token=token,
                     rpc=prepared.config.rpc,
                     volume=data.volume,
+                    db=dbs[0],
                     allow_unencrypted=prepared.needs_test_chain,
                     on_claimed=remove_launch_file,
                     shutdown=shutdown,
@@ -557,6 +589,11 @@ def serve(  # noqa: PLR0912, PLR0913, PLR0915 - the parts are injectable for the
             if shutdown.requested:  # asked for while the server was being made
                 raise refuse(shutdown.reason or "shutdown was requested")
         except runtime.StorageRefused as e:
+            # A DB this start created is left as it is (schema only, no chain recorded): telling it
+            # apart from one another launch is using at the same time isn't possible here, and
+            # deleting a DB in use would lose data.
+            raise refuse(str(e)) from None
+        except DbError as e:  # the DB failed during the node checks (recording the chain)
             raise refuse(str(e)) from None
         except LaunchError:
             raise

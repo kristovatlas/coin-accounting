@@ -11,7 +11,14 @@ from typing import Any
 import pytest
 
 from coinacct.storage import db
-from coinacct.storage.chain_state import Tip, last_tip, record_chain, recorded_chain, set_tip
+from coinacct.storage.chain_state import (
+    Tip,
+    last_tip,
+    peek_recorded_chain,
+    record_chain,
+    recorded_chain,
+    set_tip,
+)
 from coinacct.storage.datadir import DataDir, open_data_dir
 from coinacct.storage.db import DB_NAME, DbError, migrate, migrations, open_db, transaction
 
@@ -579,3 +586,28 @@ def test_foreign_keys_left_off_after_the_migrations_are_refused(dd: DataDir) -> 
             migrate(proxy, migrations())  # type: ignore[arg-type]
     finally:
         conn.close()
+
+
+def test_peeking_at_the_recorded_chain_writes_nothing_and_never_follows_a_link_t401(
+    dd: DataDir, tmp_path: Path
+) -> None:
+    path = dd.root / DB_NAME
+    assert peek_recorded_chain(path) is None  # no DB yet
+    conn = open_db(dd)
+    assert peek_recorded_chain(path) is None  # a DB with no chain recorded
+    record_chain(conn, "signet")
+    conn.close()
+    before = sorted(p.name for p in dd.root.iterdir())
+    assert peek_recorded_chain(path) == "signet"
+    assert sorted(p.name for p in dd.root.iterdir()) == before  # no WAL or shm files appeared
+    elsewhere = tmp_path / "plain.sqlite"
+    elsewhere.write_bytes(path.read_bytes())
+    link = tmp_path / "link.sqlite"
+    link.symlink_to(elsewhere)
+    assert peek_recorded_chain(link) is None
+    not_a_db = tmp_path / "not-a-db"
+    not_a_db.write_text("hello")
+    assert peek_recorded_chain(not_a_db) is None
+    empty = tmp_path / "empty.sqlite"
+    sqlite3.connect(empty).close()
+    assert peek_recorded_chain(empty) is None  # no chain_state table
