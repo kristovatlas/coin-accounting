@@ -186,7 +186,8 @@ class transaction:
             # Undo the body's changes, but let its own exception be the one that propagates, even
             # if SQLite already rolled the whole transaction back (no savepoint left). If the
             # savepoint can't be rolled back while the transaction is still open, the whole
-            # transaction is rolled back, so the body's partial writes can never be committed.
+            # transaction is rolled back, so the body's partial writes can never be committed; if
+            # even that fails, the failure propagates instead, so no caller carries on and commits.
             try:
                 self.conn.execute("ROLLBACK TO coinacct")
                 self.conn.execute("RELEASE coinacct")
@@ -195,7 +196,7 @@ class transaction:
                     try:
                         self.conn.execute("ROLLBACK")
                     except sqlite3.Error:
-                        pass
+                        raise DbError("a failed change couldn't be rolled back; close the user DB") from None
             return
         if kind is not None:
             # Roll back, but let the body's own exception be the one that propagates.

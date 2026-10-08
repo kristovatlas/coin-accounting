@@ -83,9 +83,12 @@ def test_a_cached_transaction_cant_change(conn: sqlite3.Connection) -> None:
         cc.put_tx(conn, other, 90, TIP)
 
 
-def test_a_transactions_confirmations_must_match_its_height_t207(conn: sqlite3.Connection) -> None:
-    with pytest.raises(ValueError, match="confirmations"):
-        cc.put_tx(conn, tx_at(90), 80, TIP)  # 11 confirmations at height 80 would be a tip at 90
+def test_a_transaction_fetched_while_the_node_was_ahead_is_cached(conn: sqlite3.Connection) -> None:
+    # The node had two more blocks than the reference tip when the tx was fetched.
+    tx = tx_at(90, tip=block(102))
+    cc.put_tx(conn, tx, 90, TIP)
+    got = cc.get_tx(conn, tx.txid, tx.blockhash or "")
+    assert got is not None and got.confirmations == 11  # counted from the reference tip
 
 
 def test_both_copies_of_a_duplicate_txid_are_kept_by_block_t208(conn: sqlite3.Connection) -> None:
@@ -289,6 +292,16 @@ def test_a_reorg_removes_everything_above_the_fork_at_any_depth_t207(conn: sqlit
     cc.put_activity(conn, [receive(60, txid=h(61), branch=1)], new_tip)
 
 
+def test_a_fork_inside_an_unfinished_catch_up_keeps_it_unfinished_t207(conn: sqlite3.Connection) -> None:
+    cc.set_scan_target(conn, block(110))  # last-seen 100; the catch-up to 110 hadn't finished
+    cc.put_activity(conn, [receive(104, txid=h(80)), receive(106, txid=h(81))], block(110))
+    gone = cc.invalidate_above(conn, block(105))
+    assert gone.txids == {h(81)}
+    assert last_tip(conn) == TIP  # never moved forward by a reorg
+    assert cc.scan_target(conn) == block(105) and cc.reference_tip(conn) == block(105)
+    assert cc.activity_for(conn, PAY.script_hex) == [receive(104, txid=h(80))]
+
+
 def test_a_fork_at_the_reference_tip_changes_nothing(conn: sqlite3.Connection) -> None:
     cc.put_activity(conn, [receive(100)], TIP)
     gone = cc.invalidate_above(conn, TIP)
@@ -345,6 +358,11 @@ DEEP = "[" * 950 + "]" * 950
         '{"time":null,"in":[[null,null,0,null]],"out":[[2000000000000000,"00","x",null],'
         '[2000000000000000,"00","x",null]]}',
         '{"time":null,"in":[["' + "aa" * 32 + '",0,0,[5,"00","x",null]]],"out":[[6,"00","x",null]]}',
+        '{"time":null,"in":[["'
+        + "aa" * 32
+        + '",0,0,[2000000000000000,"00","x",null]],["'
+        + "aa" * 32
+        + '",1,0,[2000000000000000,"00","x",null]]],"out":[[1,"00","x",null]]}',
         '{"time":null,"in":' + DEEP + ',"out":[]}',
     ],
 )

@@ -541,6 +541,24 @@ def test_a_nested_rollback_that_fails_rolls_back_the_whole_transaction(dd: DataD
         conn.close()
 
 
+def test_a_rollback_that_cant_be_done_at_all_is_an_error_not_a_commit(dd: DataDir) -> None:
+    conn = open_db(dd)
+    try:
+        record_chain(conn, "regtest")
+        proxy = _Proxy(conn, {"ROLLBACK TO coinacct", "ROLLBACK"})
+        with pytest.raises(DbError, match="couldn't be rolled back"), transaction(conn):
+            set_tip(conn, Tip("ab" * 32, 1))
+            try:
+                with transaction(proxy):  # type: ignore[arg-type]
+                    conn.execute("UPDATE chain_state SET tip_height = 2")
+                    raise KeyError("the body's error")
+            except KeyError:  # the rollback failure isn't a KeyError, so it reaches the outer block
+                pass
+        assert not conn.in_transaction and last_tip(conn) is None
+    finally:
+        conn.close()
+
+
 def test_the_path_is_checked_again_before_wal_is_switched_on_t401(
     dd: DataDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:

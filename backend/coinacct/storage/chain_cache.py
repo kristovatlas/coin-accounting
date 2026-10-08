@@ -121,11 +121,11 @@ def _at(conn: sqlite3.Connection, at: Tip, height: int, blockhash: str) -> None:
 
 
 def put_tx(conn: sqlite3.Connection, tx: Tx, height: int, at: Tip) -> None:
-    """Cache a confirmed transaction, found in its block at `height` while the node's tip was `at`."""
+    """Cache a confirmed transaction, found in its block at `height` (from that block's header, not
+    from the transaction's confirmations, which count from whatever the node's tip was). Its
+    confirmations aren't stored: `get_tx` counts them from the reference tip."""
     if tx.blockhash is None or not tx.confirmed:
         raise ValueError("only confirmed transactions are cached")
-    if tx.confirmations != at.height - height + 1:
-        raise ValueError("the transaction's confirmations don't match its height and the tip")
     data = _encode(tx)
     with transaction(conn):
         _at(conn, at, height, tx.blockhash)
@@ -299,9 +299,12 @@ def coverage(conn: sqlite3.Connection, subject: str) -> Coverage | None:
 
 def invalidate_above(conn: sqlite3.Connection, fork: Tip) -> Invalidated:
     """After a reorg: remove every row, snapshot and stretch of coverage above the fork point, at any
-    depth, and record the fork block as the last-seen tip (clearing any scan target), all in one
-    transaction (T-207). The fork block is on both chains, so coverage that reaches past it now
-    stops there."""
+    depth, all in one transaction (T-207). The fork block is on both chains, so coverage that reaches
+    past it now stops there. The fork must be found by walking back from the reference tip.
+
+    The last-seen tip only ever moves back here: to the fork, if the fork is below it. A fork above
+    it (inside an unfinished catch-up) becomes the scan target instead, so the catch-up still counts
+    as unfinished and is retried."""
     with transaction(conn):
         ref = reference_tip(conn)
         if ref is None or fork.height > ref.height or (fork.height == ref.height and fork != ref):
@@ -331,8 +334,12 @@ def invalidate_above(conn: sqlite3.Connection, fork: Tip) -> Invalidated:
             "UPDATE coverage SET stop_height = ?, stop_hash = ? WHERE stop_height > ?",
             (f, fork.blockhash, f),
         )
-        set_tip(conn, fork)
-        conn.execute("UPDATE chain_state SET target_hash = NULL, target_height = NULL WHERE id = 1")
+        last = last_tip(conn)
+        if last is None or fork.height > last.height:
+            set_scan_target(conn, fork)
+        else:
+            set_tip(conn, fork)
+            conn.execute("UPDATE chain_state SET target_hash = NULL, target_height = NULL WHERE id = 1")
     return Invalidated(fork, frozenset(txids), unspent, subjects)
 
 
@@ -373,6 +380,8 @@ def _decode(txid: str, blockhash: str, confirmations: int, data: str) -> Tx:
         tx = Tx(txid, blockhash, confirmations, time, inputs, outputs)
         # What the node's parser guarantees (chain/txs.py, T-502) holds for a cached copy too.
         if not inputs or not outputs or sum(o.sats for o in outputs) > MAX_SATS:
+            raise ValueError
+        if sum(i.spent.sats for i in inputs if i.spent is not None) > MAX_SATS:
             raise ValueError
         fee = tx.fee_sats
         if fee is not None and fee < 0:
