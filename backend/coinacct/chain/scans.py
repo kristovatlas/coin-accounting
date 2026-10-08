@@ -49,7 +49,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from coinacct.chain.txs import RPC_NOT_FOUND, ChainRpc
 from coinacct.domain.chain import Outpoint, btc_to_sats, is_hash, is_hex
@@ -315,13 +315,24 @@ def _commit(
 def _event(raw: object) -> Activity:
     if not isinstance(raw, dict):
         raise MalformedScanError("an activity event isn't an object")
-    kind, blockhash, height = raw.get("type"), raw.get("blockhash"), raw.get("height")
+    blockhash, height = raw.get("blockhash"), raw.get("height")
     if not is_hash(blockhash) or type(height) is not int or height < 0:
         raise MalformedScanError("an activity event has no block")
+    kind, script_hex, txid, n, sats, prevout = event_body(raw)
+    return Activity(kind, script_hex, txid, n, sats, blockhash, height, prevout)
+
+
+def event_body(
+    raw: dict[str, Any],
+) -> tuple[Literal["receive", "spend"], str, str, int, int, Outpoint | None]:
+    """What a `getdescriptoractivity` event says, apart from its block: (kind, script, txid, the
+    output or input index, sats, and the spent output for a spend). Shared with the mempool pass,
+    whose events have no block."""
     try:
         sats = btc_to_sats(raw.get("amount"))  # type: ignore[arg-type]  # refuses anything but a Decimal
     except ValueError:
         raise MalformedScanError("an activity event's amount isn't whole satoshis") from None
+    kind = raw.get("type")
     if kind == "receive":
         txid, n, spk = raw.get("txid"), raw.get("vout"), raw.get("output_spk")
         prevout = None
@@ -338,7 +349,7 @@ def _event(raw: object) -> Activity:
     script_hex = spk.get("hex") if isinstance(spk, dict) else None
     if not is_hex(script_hex):
         raise MalformedScanError("an activity event has no script")
-    return Activity(kind, script_hex, txid, n, sats, blockhash, height, prevout)
+    return kind, script_hex, txid, n, sats, prevout
 
 
 def _filter_height(rpc: ChainRpc) -> int:
