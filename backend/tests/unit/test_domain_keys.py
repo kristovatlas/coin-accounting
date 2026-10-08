@@ -51,6 +51,15 @@ WIF_TESTNET = "cMahea7zqjxrtgAbB7LSGbcQUr1uX1ojuat9jZodMN87JcbXMTcA"
         XPRV[:40],  # a truncated extended key
         XPRV + "Q",  # a stray character after an extended key
         f"wpkh({XPRV[:60]}",  # pasted only in part
+        XPRV + "0",  # a stray character that isn't Base58, at either end
+        XPRV + "l",
+        "0" + XPRV,  # a "0x"-style prefix
+        WIF_COMPRESSED + "O",
+        "0" + WIF_COMPRESSED,
+        "l" + WIF_UNCOMPRESSED,
+        WIF_COMPRESSED[:20] + "0" + WIF_COMPRESSED[20:],  # a non-Base58 typo inside the key
+        WIF_COMPRESSED + "0abc" * 5,  # something glued after the key
+        XPRV[:50] + "I" + XPRV[50:],
     ],
 )
 def test_private_key_material_is_refused_t703(text: str) -> None:
@@ -77,9 +86,12 @@ def test_public_material_passes_unchanged_t703(text: str) -> None:
     assert not has_private_material(text) and refuse_private(text) == text
 
 
-def test_a_key_shaped_run_inside_a_longer_base58_run_is_not_a_separate_key() -> None:
-    # An xpub is one long base58 run; no 51- or 52-character slice of it counts as a WIF key.
-    assert not has_private_material("K" + XPUB[4:])
+def test_a_key_shaped_run_inside_an_xpub_is_not_a_separate_key() -> None:
+    # Matching is by whole token: an xpub is one token starting with its own prefix, so no 48-character
+    # slice of it (one starting with K, say) counts as a WIF key.
+    slices = [XPUB[i : i + 52] for i in range(len(XPUB) - 51) if XPUB[i] in "59KLc"]
+    assert slices  # the xpub does hold WIF-shaped slices
+    assert not has_private_material(XPUB) and not has_private_material(f"wpkh({XPUB}/0/*)")
 
 
 def test_a_wif_shaped_run_inside_a_bech32_address_is_not_a_key_t703() -> None:
@@ -95,3 +107,36 @@ def test_a_wif_shaped_run_inside_a_bech32_address_is_not_a_key_t703() -> None:
 def test_hex_scripts_and_keys_are_never_taken_for_wif_t703() -> None:
     assert not has_private_material("raw(c" + "1234567" * 7 + "a)")  # a 51-digit hex run starting with "c"
     assert not has_private_material("pk(5" + "abcdef12" * 6 + "3)")
+
+
+B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def synthetic(first: str, length: int) -> str:
+    """A Base58 run that isn't hex (it holds letters past f), `length` characters long."""
+    return (first + (B58 * 2))[:length]
+
+
+@pytest.mark.parametrize("first", ["5", "9", "K", "L", "c"])
+def test_a_wif_shaped_token_is_48_characters_or_more_t703(first: str) -> None:
+    assert all(has_private_material(synthetic(first, n)) for n in (48, 56, 57, 100))
+    assert not has_private_material(synthetic(first, 47))
+    assert not has_private_material(synthetic("b", 60))  # any other first character
+
+
+def test_an_extended_key_prefix_needs_20_characters_after_it_t703() -> None:
+    assert has_private_material("xprv" + B58[:20])
+    assert not has_private_material("xprv" + B58[:19])
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "BC1P" + "QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L" * 2,  # upper-case bech32, 68 characters
+        "bcrt1q" + "qpzry9x8gf2tvdw0s3jn54khce6mua7l",
+        "c" + "0123456789abcdef" * 3,  # hex only
+        "0x5" + "1" * 50,  # hex with a prefix
+    ],
+)
+def test_long_public_tokens_are_not_keys_t703(text: str) -> None:
+    assert not has_private_material(text)

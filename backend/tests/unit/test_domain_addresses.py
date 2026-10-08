@@ -148,7 +148,7 @@ def test_a_base58check_payload_of_the_wrong_length_is_refused_t701(hash_bytes: i
 def test_every_chain_the_app_knows_has_its_address_rules() -> None:
     assert set(NETWORKS) == set(KNOWN_CHAINS) == set(CHAINS)
     with pytest.raises(TypeError):
-        NETWORKS["main"] = NETWORKS["regtest"]  # type: ignore[index]
+        NETWORKS["main"] = NETWORKS["regtest"]  # type: ignore[index]  # the write must fail at run time
 
 
 @pytest.mark.parametrize("chain", ["test", "testnet4", "signet"])
