@@ -53,9 +53,11 @@ from coinacct.api.security import MAX_BODY_BYTES, SecurityMiddleware
 from coinacct.api.session import ClaimError, Sessions
 from coinacct.domain.keys import PrivateKeyError
 from coinacct.services import imports as import_service
+from coinacct.services.graph import Graph, NotFound
 from coinacct.services.history import History
 from coinacct.services.imports import Busy, ImportRefused, Imports, OfflineError, Owner
 from coinacct.services.startup import NodeStatus
+from coinacct.services.tags import Tagging
 
 log = logging.getLogger(__name__)
 
@@ -152,6 +154,8 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
     bundle: Mapping[str, bytes] | None = None,
     imports: Imports | None = None,
     history: History | None = None,
+    graph: Graph | None = None,
+    tagging: Tagging | None = None,
 ) -> SecurityMiddleware:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -185,6 +189,10 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
     @app.exception_handler(Busy)
     async def busy(request: Request, exc: Busy) -> Response:
         return JSONResponse({"error": str(exc)}, status_code=503)
+
+    @app.exception_handler(NotFound)
+    async def not_found(request: Request, exc: NotFound) -> Response:
+        return JSONResponse({"error": "not found"}, status_code=404)
 
     if bundle is not None:
         index_html = bundle["index.html"]
@@ -233,6 +241,10 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
         _import_routes(app, imports, authenticated)
     if history is not None:
         _history_routes(app, history, authenticated)
+    if graph is not None:
+        _graph_routes(app, graph, authenticated)
+    if tagging is not None:
+        _tag_routes(app, tagging, authenticated)
     return SecurityMiddleware(app, port=port)
 
 
@@ -371,3 +383,122 @@ def _import_routes(app: FastAPI, imports: Imports, authenticated: list[Any]) -> 
     @app.post("/api/imports/descriptor", status_code=201, dependencies=authenticated)
     def import_descriptor(body: OwnedDescriptorUpload) -> dict[str, int]:
         return {"id": imports.import_descriptor(body.text, body.owner(), body.gap_limit)}
+
+
+HASH = r"^[0-9a-f]{64}$"
+
+
+class TxQuery(Strict):
+    txid: str = Field(pattern=HASH)
+    blockhash: str | None = Field(default=None, pattern=HASH)  # None: unconfirmed, or let the node find it
+
+
+class SpenderQuery(TxQuery):
+    n: int = Field(ge=0, le=100_000)
+
+
+def _owner(o: Any) -> dict[str, Any] | None:
+    return (
+        None
+        if o is None
+        else {"entity_id": o.entity_id, "tax_account_id": o.tax_account_id, "label": o.label}
+    )
+
+
+# POST, with txids in the body: which transactions the user expands would otherwise sit in URLs the
+# browser may keep, outside the volume (T-105).
+def _graph_routes(app: FastAPI, graph: Graph, authenticated: list[Any]) -> None:
+    @app.post("/api/graph/tx", dependencies=authenticated)
+    def tx(body: TxQuery) -> dict[str, Any]:
+        found = graph.tx(body.txid, body.blockhash)
+        return {
+            "txid": found.txid,
+            "blockhash": found.blockhash,
+            "confirmations": found.confirmations,
+            "block_time": found.block_time,
+            "mixing": found.mixing,
+            "inputs": [
+                {
+                    "prevout": None
+                    if i.prevout is None
+                    else {"txid": i.prevout.txid, "vout": i.prevout.vout},
+                    "sats": i.sats,
+                    "script": i.script_hex,
+                    "address": i.address,
+                    "owner": _owner(i.owner),
+                }
+                for i in found.inputs
+            ],
+            "outputs": [
+                {
+                    "n": o.n,
+                    "sats": o.sats,
+                    "script": o.script_hex,
+                    "address": o.address,
+                    "unspendable": o.unspendable,
+                    "owner": _owner(o.owner),
+                }
+                for o in found.outputs
+            ],
+        }
+
+    @app.post("/api/graph/spender", dependencies=authenticated)
+    def spender(body: SpenderQuery) -> dict[str, Any]:
+        found = graph.spender(body.txid, body.blockhash, body.n)
+        return {
+            "state": found.state,
+            "spending_txid": found.spending_txid,
+            "blockhash": found.blockhash,
+            "as_of": _tip(found.as_of),
+        }
+
+
+RowId = Annotated[int, Field(ge=1, le=2**63 - 1)]  # SQLite's integer range: no OverflowError, no 500
+
+
+class AddressTag(Strict):
+    script: str = Field(pattern=r"^(?:[0-9a-f]{2}){1,10000}$")
+    address: str | None = Field(default=None, min_length=1, max_length=90)
+    entity_id: RowId
+    tax_account_id: RowId | None = None
+    label: str = Field(default="", max_length=200)
+    client_ids: list[RowId] = Field(default_factory=list, max_length=100)
+
+
+class MixingFlag(Strict):
+    txid: str = Field(pattern=HASH)
+    mixing: bool
+
+
+class Subject(Strict):
+    kind: Literal["address_tag", "tx_flag"]  # a 32-byte script and a txid look alike
+    subject: str = Field(pattern=r"^(?:[0-9a-f]{2}){1,10000}$")  # a script or a txid
+
+
+# POST bodies, as for the graph: scripts and txids stay out of URLs (T-105).
+def _tag_routes(app: FastAPI, tagging: Tagging, authenticated: list[Any]) -> None:
+    @app.post("/api/tags/address", dependencies=authenticated)
+    def tag_address(body: AddressTag) -> dict[str, Any]:
+        new = tagging.tag_address(
+            body.script,
+            text=body.address,
+            entity_id=body.entity_id,
+            tax_account_id=body.tax_account_id,
+            label=body.label,
+            client_ids=body.client_ids,
+        )
+        return {"new": new}
+
+    @app.post("/api/tags/mixing", dependencies=authenticated)
+    def set_mixing(body: MixingFlag) -> dict[str, Any]:
+        tagging.set_mixing(body.txid, body.mixing)
+        return {"mixing": body.mixing}
+
+    @app.post("/api/tags/history", dependencies=authenticated)
+    def history(body: Subject) -> dict[str, Any]:
+        return {
+            "changes": [
+                {"at": c.at, "kind": c.kind, "before": c.before, "after": c.after}
+                for c in tagging.changes(body.kind, body.subject)
+            ]
+        }
