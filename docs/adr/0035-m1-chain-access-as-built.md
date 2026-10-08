@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-08
 deciders: repository owner (human), drafted by Claude Code
 architecture_sha256: 4d786de1e965d6e48a8c73094f53c91ade374059fe6da41fffebeeca7f505195
