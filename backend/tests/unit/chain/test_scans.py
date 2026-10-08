@@ -26,7 +26,7 @@ from coinacct.chain.scans import (
     stop_height,
 )
 from coinacct.domain.chain import Outpoint
-from coinacct.rpc import RpcCallError, RpcTransportError
+from coinacct.rpc import RpcCallError, RpcResponseTooLargeError, RpcTransportError
 from coinacct.storage import chain_cache as cc
 from coinacct.storage.chain_state import Tip, record_chain
 from coinacct.storage.datadir import open_data_dir
@@ -69,6 +69,8 @@ class FakeNode:
             return {scans.FILTER_INDEX: {"synced": True, "best_block_height": self.filter_height}}
         if method == "getblockhash":
             return self.hash_at(params[0])
+        if method == "scanblocks" and params == ["status"]:
+            return {"progress": 40, "current_height": 7} if self.running else None
         if method == "scanblocks" and params == ["abort"]:
             return self.running
         if method == "scanblocks":
@@ -242,7 +244,7 @@ def test_a_bad_scan_reply_is_refused(reply: Any, error: type[Exception]) -> None
     node = FakeNode(1000, {})
     node.scan_reply = reply
     with pytest.raises(error):
-        scan_range(node, DESC, 0, 900, bh(900))
+        scan_range(node, DESC, 0, 900, Tip(bh(900), 900))
 
 
 @pytest.mark.parametrize("state", [{"best_block_height": True}, {"best_block_height": "900"}, {}, None])
@@ -259,9 +261,11 @@ def test_a_malformed_filter_index_reply_is_refused(state: Any) -> None:
 
 def test_a_scan_range_is_bounded() -> None:
     with pytest.raises(ValueError, match="RANGE_BLOCKS"):
-        scan_range(FakeNode(10**6, {}), DESC, 0, scans.RANGE_BLOCKS, bh(scans.RANGE_BLOCKS))
+        scan_range(
+            FakeNode(10**6, {}), DESC, 0, scans.RANGE_BLOCKS, Tip(bh(scans.RANGE_BLOCKS), scans.RANGE_BLOCKS)
+        )
     with pytest.raises(ValueError):
-        scan_range(FakeNode(10, {}), DESC, 5, 4, bh(4))
+        scan_range(FakeNode(10, {}), DESC, 5, 4, Tip(bh(4), 4))
 
 
 def test_a_busy_scan_queue_is_its_own_error_t212() -> None:
@@ -272,7 +276,7 @@ def test_a_busy_scan_queue_is_its_own_error_t212() -> None:
             return super().call(method, params)
 
     with pytest.raises(ScanBusyError):
-        scan_range(Busy(1000, {}), DESC, 0, 900, bh(900))
+        scan_range(Busy(1000, {}), DESC, 0, 900, Tip(bh(900), 900))
 
 
 @pytest.mark.parametrize(
@@ -339,7 +343,9 @@ def test_an_event_from_a_block_not_asked_for_is_refused() -> None:
 
 
 def test_an_event_outside_its_range_is_refused(conn: sqlite3.Connection) -> None:
+    # A node consistent with itself (block 20 is also "at" 40) but not with the range asked for.
     node = FakeNode(30, {20: [{**receive(1), "height": 40}]})
+    node.hash_at = lambda h: bh(20) if h == 40 else bh(h)  # type: ignore[method-assign,assignment]
     target(conn, node)
     with pytest.raises(MalformedScanError, match="outside the range"):
         extend(node, conn, Scan("s", tuple(DESC)))
@@ -419,13 +425,177 @@ def test_recovery_aborts_a_scan_the_app_left_running_t212(conn: sqlite3.Connecti
     assert recover(node, conn) is False and node.calls == []  # no marker: never touch others' scans
     cc.set_scan_marker(conn, "s")
     assert recover(node, conn) is running
-    assert ("scanblocks", ["abort"]) in node.calls and cc.scan_marker(conn) is None
+    assert node.calls[0] == ("scanblocks", ["status"])  # §8.1: status, then abort only if running
+    assert (("scanblocks", ["abort"]) in node.calls) is running and cc.scan_marker(conn) is None
 
 
 def test_a_malformed_abort_reply_keeps_the_marker(conn: sqlite3.Connection) -> None:
     node = FakeNode(10, {})
-    node.running = "yes"  # type: ignore[assignment]
+    node.running = True
+
+    class Odd(FakeNode):
+        def call(self, method: str, params: Any = ()) -> Any:
+            return "yes" if params == ["abort"] else super().call(method, params)
+
+    node = Odd(10, {})
+    node.running = True
     cc.set_scan_marker(conn, "s")
     with pytest.raises(MalformedScanError):
         recover(node, conn)
     assert cc.scan_marker(conn) == "s"
+
+
+def test_every_range_is_guarded_by_the_same_stop_block_t210(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scans, "RANGE_BLOCKS", 300)
+    node = FakeNode(1000, {5: [receive(1)], 400: [receive(2)]})
+    target(conn, node)
+    flips = iter([None, "flip"])
+
+    def switch_after_the_first_range() -> None:
+        if next(flips, None):  # the node is on another branch below S during the second range
+            node.hash_at = lambda h: bh(h) if h < 350 else f"{h + 7 * 10**9:064x}"  # type: ignore[method-assign,assignment]
+
+    node.after_scan = switch_after_the_first_range
+    with pytest.raises(StaleScanError):
+        extend(node, conn, Scan("s", tuple(DESC)))
+    assert cc.coverage(conn, "s") == cc.Coverage("s", 0, 299, bh(299))  # the second range wasn't committed
+    guards = [p[0] for m, p in node.calls if m == "getblockhash"]
+    assert guards.count(900) >= 3  # S read once up front, then re-checked after each range
+
+
+def test_an_event_whose_block_isnt_at_its_height_is_stale_t207() -> None:
+    odd = FakeNode(10, {3: [{**receive(1), "height": 4}]})
+    with pytest.raises(StaleScanError, match="at its height"):
+        activity(odd, [bh(3)], DESC)
+
+
+def test_a_chain_shorter_than_the_target_is_stale_not_an_error(conn: sqlite3.Connection) -> None:
+    class Shorter(FakeNode):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "getblockhash" and params[0] > 25:
+                raise RpcCallError(method, -8, "Block height out of range")
+            return super().call(method, params)
+
+    node = Shorter(30, {})
+    target(conn, node)
+    with pytest.raises(StaleScanError, match="shorter"):
+        extend(node, conn, Scan("s", tuple(DESC)))
+
+
+@pytest.mark.parametrize("message", ["Invalid descriptor", "Block not found"])
+def test_only_a_missing_block_is_stale_t210(message: str) -> None:
+    class Failing(FakeNode):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "getdescriptoractivity":
+                raise RpcCallError(method, -5, message)
+            return super().call(method, params)
+
+    with pytest.raises(StaleScanError if message == "Block not found" else RpcCallError):
+        activity(Failing(10, {}), [bh(1)], DESC)
+
+
+def test_a_filter_index_far_behind_is_waited_for_not_read_directly_t210(conn: sqlite3.Connection) -> None:
+    node = FakeNode(1000, {5: [receive(1)], 700: [receive(2)]}, filter_height=600)
+    target(conn, node)
+    with pytest.raises(scans.FilterIndexBehindError):
+        extend(node, conn, Scan("s", tuple(DESC)))
+    assert cc.coverage(conn, "s") == cc.Coverage("s", 0, 600, bh(600))  # what the index reached
+    assert all(len(p[0]) < 200 for m, p in node.calls if m == "getdescriptoractivity")
+
+
+def test_the_tip_window_is_read_in_bounded_calls_t205(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scans, "ACTIVITY_BLOCKS", 30)
+    node = FakeNode(80, {h: [receive(h)] for h in (0, 40, 80)})
+    target(conn, node)
+    extend(node, conn, Scan("s", tuple(DESC)))
+    assert [len(p[0]) for m, p in node.calls if m == "getdescriptoractivity"] == [30, 30, 21]
+    assert [a.height for a in cc.activity_for(conn, SPK)] == [0, 40, 80]
+
+
+def test_the_budget_counts_the_subjects_whole_history_across_calls_t205(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scans, "RANGE_BLOCKS", 300)
+    node = FakeNode(1000, {h: [receive(h)] for h in [*range(10, 15), *range(400, 410)]})
+    target(conn, node)
+    with pytest.raises(ActivityBudgetError):
+        extend(node, conn, Scan("s", tuple(DESC), budget=12))
+    with pytest.raises(ActivityBudgetError) as e:  # retrying with the same budget doesn't reset it
+        extend(node, conn, Scan("s", tuple(DESC), budget=12))
+    assert e.value.candidates == 15
+
+
+def test_a_marker_left_by_a_lost_call_blocks_new_scans_until_recovery_t212(conn: sqlite3.Connection) -> None:
+    class Lost(FakeNode):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "scanblocks" and params[0] == "start":
+                raise RpcTransportError("scanblocks: timed out")
+            return super().call(method, params)
+
+    target(conn, FakeNode(1000, {}))
+    with pytest.raises(RpcTransportError):
+        extend(Lost(1000, {}), conn, Scan("s", tuple(DESC)))
+    node = FakeNode(1000, {})
+    with pytest.raises(scans.ScanInFlightError):  # never overwrite the marker of a scan that may run
+        extend(node, conn, Scan("s", tuple(DESC)))
+    assert cc.scan_marker(conn) == "s" and not [p for m, p in node.calls if m == "scanblocks"]
+    node.running = True
+    assert recover(node, conn) is True
+    extend(node, conn, Scan("s", tuple(DESC)))  # free again
+
+
+def test_the_marker_is_cleared_as_soon_as_the_node_has_answered_t212(conn: sqlite3.Connection) -> None:
+    class GuardLost(FakeNode):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "getindexinfo" and any(m == "scanblocks" for m, _ in self.calls):
+                raise RpcTransportError("getindexinfo: connection reset")
+            return super().call(method, params)
+
+    target(conn, FakeNode(1000, {}))
+    with pytest.raises(RpcTransportError):
+        extend(GuardLost(1000, {}), conn, Scan("s", tuple(DESC)))
+    assert cc.scan_marker(conn) is None  # scanblocks had answered: nothing of ours is running
+
+
+def test_a_failure_in_a_later_range_keeps_the_earlier_ones(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scans, "RANGE_BLOCKS", 300)
+
+    class Busy(FakeNode):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "scanblocks" and params[0] == "start" and params[2] >= 300:
+                raise RpcCallError(method, -8, "Scan already in progress")
+            return super().call(method, params)
+
+    node = Busy(1000, {5: [receive(1)]})
+    target(conn, node)
+    with pytest.raises(ScanBusyError):
+        extend(node, conn, Scan("s", tuple(DESC)))
+    assert (
+        cc.coverage(conn, "s") == cc.Coverage("s", 0, 299, bh(299)) and len(cc.activity_for(conn, SPK)) == 1
+    )
+    assert cc.scan_marker(conn) is None
+
+
+@pytest.mark.parametrize("bad", [{"subject": ""}, {"start_height": -1}, {"budget": -1}])
+def test_a_malformed_scan_is_refused(bad: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="a scan needs"):
+        Scan(**{"subject": "s", "scanobjects": tuple(DESC), **bad})
+
+
+def test_an_oversized_scan_reply_still_clears_the_marker_t212(conn: sqlite3.Connection) -> None:
+    class TooLarge(FakeNode):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "scanblocks" and params[0] == "start":
+                raise RpcResponseTooLargeError("scanblocks: the reply is too large")
+            return super().call(method, params)
+
+    target(conn, FakeNode(1000, {}))
+    with pytest.raises(RpcResponseTooLargeError):
+        extend(TooLarge(1000, {}), conn, Scan("s", tuple(DESC)))
+    assert cc.scan_marker(conn) is None  # the node answered: its scan is over

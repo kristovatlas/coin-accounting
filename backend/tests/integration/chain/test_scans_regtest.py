@@ -113,7 +113,18 @@ def test_a_second_scan_resumes_and_finds_only_new_activity(
     node.mine(1)
     second = catch_up(rpc, conn)
     assert second is not None and second.invalidated is None
-    reached = extend(rpc, conn, Scan(subject, (subject,)))
+    calls: list[tuple[str, Any]] = []
+
+    class Spy:
+        def call(self, method: str, params: Any = ()) -> Any:
+            calls.append((method, params))
+            return rpc.call(method, params)
+
+    reached = extend(Spy(), conn, Scan(subject, (subject,)))
     assert reached.stop_height == second.new.height
+    # It resumed: nothing at or below the first scan's tip was scanned or read again.
+    assert not [p for m, p in calls if m == "scanblocks" and p[2] <= first.new.height]
+    read = {b for m, p in calls if m == "getdescriptoractivity" for b in p[0]}
+    assert read == {second.new.blockhash}
     spk = node.admin("getaddressinfo", [watched])["scriptPubKey"]
     assert [e.txid for e in cc.activity_for(conn, spk)] == [txid]

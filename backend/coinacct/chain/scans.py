@@ -5,26 +5,37 @@ Core's `scanblocks` skips a filter range it can't read without saying so: `compl
 `to_height` is the requested stop height. So every scan follows this protocol:
 
 1. **The stop height** S is at most the filter index's height and at most the tip minus `TIP_WINDOW`,
-   and its block hash is recorded first.
+   and `getblockhash(S)` is recorded once, before the first range.
 2. **Bounded ranges** of at most `RANGE_BLOCKS`, each processed and committed on its own.
-3. **After each range** the filter index must still be at or above S and `getblockhash(S)` unchanged;
-   otherwise the range's results are discarded (`StaleScanError`) and the range is retried.
+3. **After each range** the filter index must still reach S and `getblockhash(S)` must be unchanged;
+   otherwise the range's results are discarded (`StaleScanError`). Every range is checked against the
+   same S, so the node switching branches between ranges can't mix two branches in one coverage.
+   Each event's block hash must also be the block at its height.
 4. **The newest blocks** (above S, up to the scan target) never go through `scanblocks`: their hashes
-   go straight to `getdescriptoractivity`, which errors rather than skips.
-5. **A block that left the active chain** during a call is `StaleScanError` (retry the range); any
-   other failure is a hard error.
+   go straight to `getdescriptoractivity`, which errors rather than skips. They are at most
+   `TIP_WINDOW` blocks: a filter index further behind is `FilterIndexBehindError`, never a longer
+   direct read.
+5. **A block that left the active chain** during a call is `StaleScanError`; any other failure is a
+   hard error.
+
+`extend` doesn't retry. Its caller (the scan job) retries a `StaleScanError` or `ScanBusyError`
+range a few times, runs `recover` after any client error, and calls `extend` again, which resumes
+after the coverage committed so far.
 
 **Busy scripts (T-205):** a tagged third-party script, such as an exchange's hot wallet, can have
-activity in 100k+ blocks, and `getdescriptoractivity` has no paging or abort. So each scan has an
-activity budget: the candidate count `scanblocks` reports comes first, and a range that would take
-the scan past its budget is refused (`ActivityBudgetError`) before any of its blocks is read. The
-caller asks the user, then scans again with a larger budget, or none.
+activity in 100k+ blocks, and `getdescriptoractivity` has no paging or abort. So each subject has
+an activity budget: the candidate blocks `scanblocks` reports are counted with its coverage, and a
+range that would take the subject's total past its budget is refused (`ActivityBudgetError`) before
+any of its blocks is read. Retrying doesn't reset the count. The caller asks the user, then scans
+again with a larger budget, or none.
 
 **Scans the app left running (T-212):** Core runs one `scanblocks` at a time for all RPC users, and
 a scan keeps running after the client disconnects. So an in-flight marker is written just before
-each `scanblocks` call and cleared once the node has answered (with results or an error). A marker
-left behind by a crash or a client timeout makes `recover` abort the node's scan at the next
-start-up. Core can't say whose scan is running, so the marker is what makes it ours.
+each `scanblocks` call and cleared as soon as the node has answered it (with results or an error).
+A transport error or timeout leaves it, since the node may still be scanning. While it is set, no
+new scan starts (`ScanInFlightError`): `recover` (at start-up and after any client error) checks
+`scanblocks status`, aborts a running scan, and clears it. Core can't say whose scan is running, so
+the marker is what makes it ours: without one, `recover` never aborts anything.
 
 Candidate blocks are read with `getdescriptoractivity` in calls of at most `ACTIVITY_BLOCKS` blocks,
 with `include_mempool` always false: the mempool is a separate, ephemeral pass. Its exact matching
@@ -40,12 +51,13 @@ from typing import Any, Final
 
 from coinacct.chain.txs import RPC_NOT_FOUND, ChainRpc
 from coinacct.domain.chain import Outpoint, btc_to_sats, is_hash, is_hex
-from coinacct.rpc import RpcCallError
+from coinacct.rpc import RpcCallError, RpcTransportError
 from coinacct.storage.chain_cache import (
     Activity,
     Coverage,
     clear_scan_marker,
     coverage,
+    coverage_candidates,
     extend_coverage,
     put_activity,
     reference_tip,
@@ -73,14 +85,24 @@ class StaleScanError(RuntimeError):
     """The chain or the filter index moved under the scan: discard the range's results and retry."""
 
 
+class FilterIndexBehindError(StaleScanError):
+    """The filter index is more than `TIP_WINDOW` blocks behind the scan target: wait for it, rather
+    than read the blocks it hasn't reached one by one (T-205, T-210)."""
+
+
+class ScanInFlightError(RuntimeError):
+    """A `scanblocks` call the app started may still be running on the node (the in-flight marker is
+    set): run `recover` before scanning again (T-212)."""
+
+
 class ScanBusyError(RuntimeError):
     """Another `scanblocks` is running on the node (Core runs one at a time for all users): the
     queue is busy; retry with backoff (T-212)."""
 
 
 class ActivityBudgetError(RuntimeError):
-    """The scan would read more candidate blocks than its budget allows (T-205). What was scanned
-    before stays committed. `candidates` is how many blocks the scan has found so far."""
+    """The subject would read more candidate blocks than its budget allows (T-205). What was scanned
+    before stays committed. `candidates` is the subject's total with the refused range."""
 
     def __init__(self, candidates: int, budget: int) -> None:
         super().__init__(f"{candidates} candidate blocks, over the budget of {budget}")
@@ -96,12 +118,17 @@ class ScanAbortedError(RuntimeError):
 class Scan:
     """What to scan: `subject` names it in the coverage table; `scanobjects` are what Core is given
     (descriptor strings or `{desc, range}` objects); `start_height` is where its history begins;
-    `budget` is how many candidate blocks this scan may read (None: no limit, after the user agreed)."""
+    `budget` is how many candidate blocks the subject may have in all (None: no limit, after the
+    user agreed)."""
 
     subject: str
     scanobjects: tuple[Any, ...]
     start_height: int = 0
     budget: int | None = ACTIVITY_BUDGET
+
+    def __post_init__(self) -> None:
+        if not self.subject or self.start_height < 0 or (self.budget is not None and self.budget < 0):
+            raise ValueError("a scan needs a subject, a start height >= 0 and a budget >= 0")
 
 
 def stop_height(rpc: ChainRpc, target: Tip) -> int:
@@ -110,16 +137,24 @@ def stop_height(rpc: ChainRpc, target: Tip) -> int:
     return min(_filter_height(rpc), target.height - TIP_WINDOW)
 
 
-def scan_range(rpc: ChainRpc, scanobjects: Sequence[Any], start: int, stop: int, stop_hash: str) -> list[str]:
-    """The candidate blocks between `start` and `stop`, checked against the silent-skip gap (T-210)."""
+def scan_range(  # noqa: PLR0913 - the range, its guard, and where to keep the in-flight marker
+    rpc: ChainRpc,
+    scanobjects: Sequence[Any],
+    start: int,
+    stop: int,
+    guard: Tip,
+    *,
+    marker: tuple[Connection, str] | None = None,
+) -> list[str]:
+    """The candidate blocks between `start` and `stop`, checked against the silent-skip gap (T-210):
+    afterwards the filter index must still reach `guard` (S and the hash recorded for it before the
+    first range), and S must still be that block. With `marker` (the user DB and the subject), the
+    `scanblocks` call runs inside the in-flight marker (T-212)."""
+    if stop > guard.height:
+        raise ValueError("a scan range can't go past its guard block")
     if not 0 <= start <= stop or stop - start + 1 > RANGE_BLOCKS:
         raise ValueError("a scan range is 0 <= start <= stop, at most RANGE_BLOCKS blocks")
-    try:
-        result = rpc.call("scanblocks", ["start", list(scanobjects), start, stop, "basic"])
-    except RpcCallError as e:
-        if e.code == RPC_INVALID_PARAMETER and "already in progress" in e.node_message:
-            raise ScanBusyError("another scan is running on the node") from None
-        raise
+    result = _scanblocks(rpc, ["start", list(scanobjects), start, stop, "basic"], marker)
     if not isinstance(result, dict):
         raise MalformedScanError("scanblocks didn't return an object")
     if result.get("completed") is not True:
@@ -131,8 +166,8 @@ def scan_range(rpc: ChainRpc, scanobjects: Sequence[Any], start: int, stop: int,
     blocks = result.get("relevant_blocks")
     if not isinstance(blocks, list) or not all(is_hash(b) for b in blocks) or len(set(blocks)) != len(blocks):
         raise MalformedScanError("scanblocks returned malformed block hashes")
-    # The gap guard: the filter index still covers the stop block, and it is still the same block.
-    if _filter_height(rpc) < stop or _block_hash(rpc, stop) != stop_hash:
+    # The gap guard: the filter index still reaches S, and S is still the same block.
+    if _filter_height(rpc) < guard.height or _block_hash(rpc, guard.height) != guard.blockhash:
         raise StaleScanError("the chain or the filter index moved during the scan")
     return list(blocks)
 
@@ -146,7 +181,7 @@ def activity(rpc: ChainRpc, blockhashes: Sequence[str], scanobjects: Sequence[An
         try:
             result = rpc.call("getdescriptoractivity", [chunk, list(scanobjects), False])
         except RpcCallError as e:
-            if e.code == RPC_NOT_FOUND or (
+            if (e.code == RPC_NOT_FOUND and "Block not found" in e.node_message) or (
                 e.code == RPC_INVALID_PARAMETER and "not in main chain" in e.node_message
             ):
                 raise StaleScanError("a block left the active chain during the scan") from None
@@ -159,6 +194,10 @@ def activity(rpc: ChainRpc, blockhashes: Sequence[str], scanobjects: Sequence[An
             if event.blockhash not in wanted:
                 raise MalformedScanError("getdescriptoractivity reported a block that wasn't asked for")
             events.append(event)
+    # Each event's block must be the block at its height, or a reorg could later miss it (T-207).
+    for blockhash, height in sorted({(e.blockhash, e.height) for e in events}, key=lambda b: b[1]):
+        if _block_hash(rpc, height) != blockhash:
+            raise StaleScanError("an event's block isn't the block at its height")
     return events
 
 
@@ -172,28 +211,27 @@ def extend(rpc: ChainRpc, conn: Connection, scan: Scan) -> Coverage:
     now = coverage(conn, scan.subject)
     start = scan.start_height if now is None else now.stop_height + 1
     stop = stop_height(rpc, target)
-    candidates = 0
-    while start <= stop:
+    seen = coverage_candidates(conn, scan.subject)
+    guard = Tip(_block_hash(rpc, stop), stop) if start <= stop else None
+    while guard is not None and start <= stop:
         end = min(start + RANGE_BLOCKS - 1, stop)
         end_hash = _block_hash(rpc, end)
-        blocks = _marked_scan(rpc, conn, scan, Coverage(scan.subject, start, end, end_hash))
-        candidates += len(blocks)
-        if scan.budget is not None and candidates > scan.budget:
-            raise ActivityBudgetError(candidates, scan.budget)
-        _commit(
-            conn,
-            activity(rpc, blocks, scan.scanobjects),
-            Coverage(scan.subject, start, end, end_hash),
-            target,
-        )
+        blocks = scan_range(rpc, scan.scanobjects, start, end, guard, marker=(conn, scan.subject))
+        if scan.budget is not None and seen + len(blocks) > scan.budget:
+            raise ActivityBudgetError(seen + len(blocks), scan.budget)
+        covered = Coverage(scan.subject, start, end, end_hash)
+        _commit(conn, activity(rpc, blocks, scan.scanobjects), covered, target, len(blocks))
+        seen += len(blocks)
         start = end + 1
     if start <= target.height:
+        if target.height - start + 1 > TIP_WINDOW:
+            raise FilterIndexBehindError("the filter index is behind the chain; wait for it (T-210)")
         # The tip window: every block by hash, straight to getdescriptoractivity.
         hashes = [_block_hash(rpc, h) for h in range(start, target.height + 1)]
         if hashes[-1] != target.blockhash:
             raise StaleScanError("the scan target left the active chain")
         window = Coverage(scan.subject, start, target.height, target.blockhash)
-        _commit(conn, activity(rpc, hashes, scan.scanobjects), window, target)
+        _commit(conn, activity(rpc, hashes, scan.scanobjects), window, target, 0)
     reached = coverage(conn, scan.subject)
     if reached is None:
         raise ValueError("the scan's start height is above the scan target")
@@ -201,39 +239,62 @@ def extend(rpc: ChainRpc, conn: Connection, scan: Scan) -> Coverage:
 
 
 def recover(rpc: ChainRpc, conn: Connection) -> bool:
-    """At start-up, and after any client error: abort the node's scan if the app may have left one
-    running (an in-flight marker is set), then clear the marker. Returns whether a scan was aborted."""
+    """At start-up, and after any client error (architecture §8.1): if the app may have left a scan
+    running (an in-flight marker is set), check `scanblocks status` and abort a running scan, then
+    clear the marker. Returns whether a scan was aborted. Without a marker it never touches the
+    node's scan slot, which may be another RPC user's."""
     if scan_marker(conn) is None:
         return False
-    aborted = rpc.call("scanblocks", ["abort"])
-    if type(aborted) is not bool:
-        raise MalformedScanError("scanblocks abort didn't say whether a scan was running")
+    status = rpc.call("scanblocks", ["status"])
+    aborted = False
+    if status is not None:
+        if not isinstance(status, dict):
+            raise MalformedScanError("scanblocks status didn't return a scan's progress")
+        aborted = rpc.call("scanblocks", ["abort"])
+        if type(aborted) is not bool:
+            raise MalformedScanError("scanblocks abort didn't say whether a scan was running")
     clear_scan_marker(conn)
     return aborted
 
 
-def _marked_scan(rpc: ChainRpc, conn: Connection, scan: Scan, covered: Coverage) -> list[str]:
-    """`scan_range` inside the in-flight marker. The marker is cleared once the node has answered;
-    on a transport error or timeout it stays, since the node may still be scanning."""
-    set_scan_marker(conn, scan.subject)
+def _scanblocks(rpc: ChainRpc, params: list[Any], marker: tuple[Connection, str] | None) -> Any:
+    """The `scanblocks` call itself, inside the in-flight marker: cleared as soon as the node has
+    answered, kept on a transport error or timeout, since the node may still be scanning."""
+    conn = None if marker is None else marker[0]
+    if marker is not None:
+        if scan_marker(marker[0]) is not None:
+            raise ScanInFlightError("a scan the app started may still be running; recover first")
+        set_scan_marker(*marker)
     try:
-        blocks = scan_range(
-            rpc, scan.scanobjects, covered.start_height, covered.stop_height, covered.stop_hash
-        )
-    except (RpcCallError, MalformedScanError, StaleScanError, ScanBusyError, ScanAbortedError):
-        clear_scan_marker(conn)
+        result = rpc.call("scanblocks", params)
+    except RpcTransportError:
         raise
-    clear_scan_marker(conn)
-    return blocks
+    except RpcCallError as e:
+        _clear(conn)
+        if e.code == RPC_INVALID_PARAMETER and "already in progress" in e.node_message:
+            raise ScanBusyError("another scan is running on the node") from None
+        raise
+    except Exception:
+        _clear(conn)
+        raise
+    _clear(conn)
+    return result
 
 
-def _commit(conn: Connection, events: list[Activity], covered: Coverage, target: Tip) -> None:
-    """A range's activity and coverage, together or not at all."""
+def _clear(conn: Connection | None) -> None:
+    if conn is not None:
+        clear_scan_marker(conn)
+
+
+def _commit(
+    conn: Connection, events: list[Activity], covered: Coverage, target: Tip, candidates: int
+) -> None:
+    """A range's activity, coverage and candidate count, together or not at all."""
     if any(not covered.start_height <= e.height <= covered.stop_height for e in events):
         raise MalformedScanError("getdescriptoractivity reported an event outside the range")
     with transaction(conn):
         put_activity(conn, events, target)
-        extend_coverage(conn, covered, target)
+        extend_coverage(conn, covered, target, candidates=candidates)
 
 
 def _event(raw: object) -> Activity:
@@ -275,7 +336,13 @@ def _filter_height(rpc: ChainRpc) -> int:
 
 
 def _block_hash(rpc: ChainRpc, height: int) -> str:
-    blockhash = rpc.call("getblockhash", [height])
+    try:
+        blockhash = rpc.call("getblockhash", [height])
+    except RpcCallError as e:
+        if e.code == RPC_INVALID_PARAMETER and "out of range" in e.node_message:
+            # The active chain got shorter (a reorg to a higher-work, shorter chain).
+            raise StaleScanError("the chain is shorter than the scan expected") from None
+        raise
     if not is_hash(blockhash):
         raise MalformedScanError("getblockhash didn't return a block hash")
     return blockhash
