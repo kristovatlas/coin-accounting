@@ -10,7 +10,9 @@ doesn't parse exactly is refused, never guessed at, and the error never repeats 
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final
 
 _BASE58: Final = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -28,13 +30,16 @@ class Network:
 
 
 # Keyed by the chain name Core reports (`getblockchaininfo.chain`), as recorded in the user DB.
-NETWORKS: Final = {
-    "main": Network("bc", 0x00, 0x05),
-    "test": Network("tb", 0x6F, 0xC4),
-    "testnet4": Network("tb", 0x6F, 0xC4),
-    "signet": Network("tb", 0x6F, 0xC4),
-    "regtest": Network("bcrt", 0x6F, 0xC4),
-}
+# Read-only, so no importer can change which addresses a chain accepts.
+NETWORKS: Final[Mapping[str, Network]] = MappingProxyType(
+    {
+        "main": Network("bc", 0x00, 0x05),
+        "test": Network("tb", 0x6F, 0xC4),
+        "testnet4": Network("tb", 0x6F, 0xC4),
+        "signet": Network("tb", 0x6F, 0xC4),
+        "regtest": Network("bcrt", 0x6F, 0xC4),
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +53,7 @@ class AddressError(ValueError):
 
 
 def parse_address(text: str, chain: str) -> Address:
+    """`text` exactly as given: the caller strips surrounding whitespace (one address per line)."""
     network = NETWORKS.get(chain)
     if network is None:
         raise AddressError("the chain is unknown")
@@ -115,10 +121,10 @@ def _segwit(text: str, network: Network) -> Address:
     if text != text.lower() and text != text.upper():
         raise AddressError("an address mixes upper and lower case")
     lowered = text.lower()
-    sep = lowered.rfind("1")
-    hrp, data_part = lowered[:sep], lowered[sep + 1 :]
-    if hrp != network.hrp:
-        raise AddressError("an address of another chain")
+    # Split at this chain's prefix (the caller checked it), so a stray "1" later in the data part is
+    # a bad character, not a different prefix.
+    data_part = lowered[len(network.hrp) + 1 :]
+    hrp = network.hrp
     if len(data_part) < 7 or any(c not in _BECH32 for c in data_part):
         raise AddressError("not an address")
     data = [_BECH32.index(c) for c in data_part]

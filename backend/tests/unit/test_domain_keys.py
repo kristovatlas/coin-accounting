@@ -45,6 +45,12 @@ WIF_TESTNET = "cMahea7zqjxrtgAbB7LSGbcQUr1uX1ojuat9jZodMN87JcbXMTcA"
         f"wsh(multi(2,{XPUB}/0/*,{WIF_COMPRESSED}))",
         f"one line\n{WIF_TESTNET}\nanother",
         WIF_COMPRESSED[:-1] + ("o" if WIF_COMPRESSED[-1] != "o" else "p"),  # a bad checksum still counts
+        WIF_COMPRESSED[:-1],  # a character dropped while copying
+        WIF_COMPRESSED + "x",  # a stray character added
+        WIF_UNCOMPRESSED[:-2],
+        XPRV[:40],  # a truncated extended key
+        XPRV + "Q",  # a stray character after an extended key
+        f"wpkh({XPRV[:60]}",  # pasted only in part
     ],
 )
 def test_private_key_material_is_refused_t703(text: str) -> None:
@@ -74,3 +80,18 @@ def test_public_material_passes_unchanged_t703(text: str) -> None:
 def test_a_key_shaped_run_inside_a_longer_base58_run_is_not_a_separate_key() -> None:
     # An xpub is one long base58 run; no 51- or 52-character slice of it counts as a WIF key.
     assert not has_private_material("K" + XPUB[4:])
+
+
+def test_a_wif_shaped_run_inside_a_bech32_address_is_not_a_key_t703() -> None:
+    # In lower-case bech32, "0" and "l" aren't Base58: a 52-character run starting with "c" between
+    # them looked like a WIF key to a Base58-only boundary. Tokens are now whole runs of letters and
+    # digits, so the address is one token and passes.
+    run = "c" + "qpzry9x8gf2tvdw" * 4  # Base58 and bech32 characters only
+    address = "bc1p0" + run[:51] + "l" + "qqqq"
+    assert len(run[:51]) == 51 and not has_private_material(address)
+    assert not has_private_material(address.upper())
+
+
+def test_hex_scripts_and_keys_are_never_taken_for_wif_t703() -> None:
+    assert not has_private_material("raw(c" + "1234567" * 7 + "a)")  # a 51-digit hex run starting with "c"
+    assert not has_private_material("pk(5" + "abcdef12" * 6 + "3)")

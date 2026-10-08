@@ -6,7 +6,9 @@ import hashlib
 
 import pytest
 
-from coinacct.domain.addresses import AddressError, parse_address
+from coinacct.chain.node_checks import KNOWN_CHAINS
+from coinacct.domain.addresses import NETWORKS, AddressError, parse_address
+from coinacct.storage.chain_state import CHAINS
 
 # BIP350 "Test vectors for v0-v16 native segregated witness addresses" (valid), with their scripts.
 VALID_SEGWIT = [
@@ -141,3 +143,25 @@ def test_a_base58check_payload_of_the_wrong_length_is_refused_t701(hash_bytes: i
     assert (
         parse_address(base58check(b"\x00" + b"\x11" * 20), "main").script_hex == "76a914" + "11" * 20 + "88ac"
     )
+
+
+def test_every_chain_the_app_knows_has_its_address_rules() -> None:
+    assert set(NETWORKS) == set(KNOWN_CHAINS) == set(CHAINS)
+    with pytest.raises(TypeError):
+        NETWORKS["main"] = NETWORKS["regtest"]  # type: ignore[index]
+
+
+@pytest.mark.parametrize("chain", ["test", "testnet4", "signet"])
+def test_the_testnets_share_the_tb_prefix_t701(chain: str) -> None:
+    text = "tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7"
+    assert parse_address(text, chain).script_hex.startswith("0020")
+
+
+def test_a_stray_1_inside_a_segwit_address_is_not_another_chain_t701() -> None:
+    with pytest.raises(AddressError, match="not an address"):
+        parse_address("bc1qw508d6qejxtdg4y5r3zarv1ry0c5xw7kv8f3t4", "main")
+
+
+def test_a_segwit_address_over_90_characters_is_refused_t701() -> None:
+    with pytest.raises(AddressError, match="not an address"):
+        parse_address("bc1" + "q" * 88, "main")
