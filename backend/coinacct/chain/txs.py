@@ -12,8 +12,8 @@ parser here (T-205). The reply is checked field by field, and anything of the wr
   than read as "this transaction doesn't exist".
 - **Prevouts:** Core includes the spent outputs only for confirmed transactions. For an unconfirmed
   one, `fill_prevouts` fetches each parent, up to `MAX_PARENTS` (T-205).
-- **Amounts (T-502):** every amount is exact satoshis; output totals above 21M BTC, and a fee below
-  zero once the spent outputs are known, are malformed.
+- **Amounts (T-502):** every amount is exact satoshis; an output total or a spent-output total above
+  21M BTC, and a fee below zero once the spent outputs are known, are malformed.
 - **Not found:** the genesis coinbase, and any txid the node doesn't know, are `TxNotFoundError`.
 """
 
@@ -30,7 +30,8 @@ from coinacct.rpc import RpcCallError
 RPC_NOT_FOUND: Final = -5
 MAX_SEQUENCE: Final = 0xFFFFFFFF
 # Distinct parents `fill_prevouts` fetches for one transaction (T-205: a budget, failing closed).
-MAX_PARENTS: Final = 500
+# About as many inputs as a standard (100 kvB) transaction can have, so an ordinary consolidation fits.
+MAX_PARENTS: Final = 2500
 
 
 class ChainRpc(Protocol):
@@ -79,7 +80,7 @@ def fetch_tx(rpc: ChainRpc, txid: str, blockhash: str | None = None) -> Tx:
             raise MalformedTxError("the node returned the transaction from a different block")
         active = raw.get("in_active_chain") if isinstance(raw, dict) else None
         if not isinstance(active, bool):
-            raise MalformedTxError("in_active_chain is missing")
+            raise MalformedTxError("in_active_chain is missing or not a bool")
         if not active:
             raise StaleBlockError("that block is no longer in the active chain")
         if tx.confirmations < 1 or tx.block_time is None:
@@ -88,8 +89,9 @@ def fetch_tx(rpc: ChainRpc, txid: str, blockhash: str | None = None) -> Tx:
 
 
 def _block_active(rpc: ChainRpc, blockhash: str) -> bool:
-    """Whether the node knows the block and it is in the active chain (`confirmations` -1 means a
-    known block on a side branch)."""
+    """Whether the node knows the block and it is in the active chain. `confirmations` is -1 for a
+    known block on a side branch and at least 1 for an active one; anything else is malformed. The
+    answer holds until the next tip change, which re-checks cached rows anyway (T-207)."""
     try:
         header = rpc.call("getblockheader", [blockhash, True])
     except RpcCallError as e:
@@ -97,8 +99,8 @@ def _block_active(rpc: ChainRpc, blockhash: str) -> bool:
             return False
         raise
     confirmations = header.get("confirmations") if isinstance(header, dict) else None
-    if not _is_int(confirmations):
-        raise MalformedTxError("getblockheader didn't report confirmations")
+    if not _is_int(confirmations) or (confirmations != -1 and confirmations < 1):
+        raise MalformedTxError("getblockheader didn't report a valid confirmation count")
     return confirmations >= 1
 
 
@@ -106,34 +108,46 @@ def fill_prevouts(rpc: ChainRpc, tx: Tx) -> Tx:
     """`tx` with every spent output known, fetching parents where Core didn't include them, which is
     what it does for unconfirmed transactions. A parent is fetched without a block hash: Core finds it
     through `txindex` or the mempool. Only a BIP30 duplicate coinbase is ambiguous, and `txindex`
-    keeps the later of the two, the one whose outputs can still be spent (T-208). More than
-    `MAX_PARENTS` distinct parents is a `BudgetExceededError`."""
+    keeps the later of the two, the one whose outputs can still be spent (T-208).
+
+    Budgets (T-205): more than `MAX_PARENTS` distinct parents is a `BudgetExceededError`, raised before
+    any parent is fetched (callers are expected to show such a transaction as pending with its fee
+    unknown). Only the outputs the inputs spend are kept; each parent is dropped once read, so memory
+    stays bounded by the transaction, not by its parents' sizes."""
     if tx.prevouts_known:
         return tx
-    parents: dict[str, Tx] = {}
-    inputs = []
+    wanted: dict[str, set[int]] = {}
     for i in tx.inputs:
         if i.coinbase or i.spent is not None:
-            inputs.append(i)
             continue
         if i.prevout is None:  # unreachable: only a coinbase input has no prevout
             raise MalformedTxError("an input without a prevout")
-        parent = parents.get(i.prevout.txid)
-        if parent is None:
-            if len(parents) >= MAX_PARENTS:
-                raise BudgetExceededError("the transaction spends from too many parents to look up")
-            parent = parents[i.prevout.txid] = fetch_tx(rpc, i.prevout.txid)
-        if i.prevout.vout >= len(parent.outputs):
-            raise MalformedTxError("an input spends an output its parent doesn't have")
-        inputs.append(TxIn(i.prevout, i.sequence, parent.outputs[i.prevout.vout]))
-    return _checked(Tx(tx.txid, tx.blockhash, tx.confirmations, tx.block_time, tuple(inputs), tx.outputs))
+        wanted.setdefault(i.prevout.txid, set()).add(i.prevout.vout)
+    if len(wanted) > MAX_PARENTS:
+        raise BudgetExceededError("the transaction spends from too many parents to look up")
+    found: dict[Outpoint, TxOut] = {}
+    for txid, vouts in wanted.items():
+        outputs = fetch_tx(rpc, txid).outputs
+        for n in vouts:
+            if n >= len(outputs):
+                raise MalformedTxError("an input spends an output its parent doesn't have")
+            found[Outpoint(txid, n)] = outputs[n]
+    inputs = tuple(
+        i
+        if i.coinbase or i.spent is not None or i.prevout is None
+        else TxIn(i.prevout, i.sequence, found[i.prevout])
+        for i in tx.inputs
+    )
+    return _checked(Tx(tx.txid, tx.blockhash, tx.confirmations, tx.block_time, inputs, tx.outputs))
 
 
 def _checked(tx: Tx) -> Tx:
-    """T-502: the outputs can't total more than all bitcoin, and, once the spent outputs are known,
-    they can't exceed them."""
+    """T-502: neither the outputs nor, once known, the spent outputs can total more than all bitcoin,
+    and the outputs can't exceed what they spend."""
     if sum(o.sats for o in tx.outputs) > MAX_SATS:
         raise MalformedTxError("the outputs total more than 21 million BTC")
+    if sum(i.spent.sats for i in tx.inputs if i.spent is not None) > MAX_SATS:
+        raise MalformedTxError("the spent outputs total more than 21 million BTC")
     fee = tx.fee_sats
     if fee is not None and fee < 0:
         raise MalformedTxError("the outputs are worth more than the outputs they spend")
