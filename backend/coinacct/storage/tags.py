@@ -27,6 +27,7 @@ from typing import Any
 from coinacct.domain.chain import is_hash
 from coinacct.domain.keys import refuse_private
 from coinacct.storage.accounts import AccountsError
+from coinacct.storage.change_log import address_state, append
 from coinacct.storage.db import transaction
 
 
@@ -38,44 +39,6 @@ class Change:
     subject: str
     before: dict[str, Any] | None
     after: dict[str, Any]
-
-
-def _address(conn: sqlite3.Connection, script_hex: str) -> dict[str, Any] | None:
-    row = conn.execute(
-        "SELECT entity_id, tax_account_id, label, text, source FROM address WHERE script_hex = ?",
-        (script_hex,),
-    ).fetchone()
-    if row is None:
-        return None
-    clients = [
-        c
-        for (c,) in conn.execute(
-            "SELECT client_id FROM address_client WHERE script_hex = ? ORDER BY client_id", (script_hex,)
-        )
-    ]
-    return {
-        "entity_id": row[0],
-        "tax_account_id": row[1],
-        "label": row[2],
-        "text": row[3],
-        "source": row[4],
-        "client_ids": clients,
-    }
-
-
-def _log(conn: sqlite3.Connection, at: str, entry: tuple[str, str, Any, Any]) -> None:
-    """Append `(kind, subject, before, after)` to the change log."""
-    kind, subject, before, after = entry
-    conn.execute(
-        "INSERT INTO change_log (at, kind, subject, before, after) VALUES (?, ?, ?, ?, ?)",
-        (
-            at,
-            kind,
-            subject,
-            None if before is None else json.dumps(before, sort_keys=True),
-            json.dumps(after, sort_keys=True),
-        ),
-    )
 
 
 def tag_address(  # noqa: PLR0913 - the address, its owner and account, label, clients and the time
@@ -97,7 +60,7 @@ def tag_address(  # noqa: PLR0913 - the address, its owner and account, label, c
     clients = sorted(set(client_ids))
     try:
         with transaction(conn):
-            before = _address(conn, script_hex)
+            before = address_state(conn, script_hex)
             after: dict[str, Any] = {
                 "entity_id": entity_id,
                 "tax_account_id": tax_account_id,
@@ -133,7 +96,7 @@ def tag_address(  # noqa: PLR0913 - the address, its owner and account, label, c
                 "INSERT INTO address_client (script_hex, client_id) VALUES (?, ?)",
                 [(script_hex, c) for c in clients],
             )
-            _log(conn, at, ("address_tag", script_hex, before, after))
+            append(conn, at, ("address_tag", script_hex, before, after))
     except sqlite3.IntegrityError:
         raise AccountsError(
             "that tag (an unknown owner, account or client; the user's address needs one self-custody"
@@ -157,7 +120,7 @@ def set_mixing(conn: sqlite3.Connection, txid: str, mixing: bool, *, at: str) ->
             " ON CONFLICT (txid) DO UPDATE SET mixing = excluded.mixing, source = 'user'",
             (txid, int(mixing)),
         )
-        _log(conn, at, ("tx_flag", txid, before, after))
+        append(conn, at, ("tx_flag", txid, before, after))
 
 
 def mixing(conn: sqlite3.Connection, txid: str) -> bool | None:
