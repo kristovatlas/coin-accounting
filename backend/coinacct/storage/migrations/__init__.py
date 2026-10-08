@@ -16,6 +16,7 @@ from coinacct.storage.migrations import (
     m0005_accounts,
     m0006_tags,
     m0007_change_log_ids,
+    m0008_change_log_positive_ids,
 )
 
 STEPS: Final[tuple[tuple[int, str], ...]] = (
@@ -26,4 +27,5 @@ STEPS: Final[tuple[tuple[int, str], ...]] = (
     (5, m0005_accounts.SQL),
     (6, m0006_tags.SQL),
     (7, m0007_change_log_ids.SQL),
+    (8, m0008_change_log_positive_ids.SQL),
 )

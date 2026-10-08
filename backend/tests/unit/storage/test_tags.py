@@ -117,7 +117,7 @@ def test_retagging_logs_before_and_after_and_a_no_op_logs_nothing_t408(
     }
 
 
-def test_an_address_text_is_filled_in_once_and_then_kept_t408(
+def test_a_given_address_text_replaces_the_stored_one_and_none_keeps_it_t408(
     conn: sqlite3.Connection, exchange: int
 ) -> None:
     def tag(text: str | None) -> None:
@@ -127,12 +127,33 @@ def test_an_address_text_is_filled_in_once_and_then_kept_t408(
 
     tag(None)
     tag("bcrt1qx")  # filled in, and logged
-    tag("bcrt1qy")  # kept: the text is the address's, not the tag's
-    tag(None)
+    tag("bcrt1qy")  # replaced, and logged
+    tag(None)  # kept: not a change
+    assert ac.addresses(conn)[0].text == "bcrt1qy"
+    texts = [
+        (c.before and c.before["text"], c.after["text"]) for c in tags.changes(conn, ("address_tag", SCRIPT))
+    ]
+    assert texts == [(None, None), (None, "bcrt1qx"), ("bcrt1qx", "bcrt1qy")]
+
+
+def test_a_text_stored_before_the_check_can_be_corrected_t408(
+    conn: sqlite3.Connection, exchange: int
+) -> None:
+    # what #207's route could store: any text, unchecked
+    conn.execute(
+        "INSERT INTO address (script_hex, text, entity_id, label, source)"
+        " VALUES (?, 'not it', ?, '', 'manual')",
+        (SCRIPT, exchange),
+    )
+    tags.tag_address(
+        conn, SCRIPT, text="bcrt1qx", entity_id=exchange, tax_account_id=None, label="", client_ids=[], at=AT
+    )
     assert ac.addresses(conn)[0].text == "bcrt1qx"
-    first, second = tags.changes(conn, ("address_tag", SCRIPT))
-    assert second.before is not None
-    assert (first.after["text"], second.before["text"], second.after["text"]) == (None, None, "bcrt1qx")
+    [change] = tags.changes(conn, ("address_tag", SCRIPT))
+    assert change.before is not None and (change.before["text"], change.after["text"]) == (
+        "not it",
+        "bcrt1qx",
+    )
 
 
 def test_the_history_of_a_script_and_a_txid_that_look_alike_stays_apart(
@@ -144,6 +165,21 @@ def test_the_history_of_a_script_and_a_txid_that_look_alike_stays_apart(
     tags.set_mixing(conn, TXID, True, at=AT)
     assert [c.kind for c in tags.changes(conn, ("address_tag", TXID))] == ["address_tag"]
     assert [c.kind for c in tags.changes(conn, ("tx_flag", TXID))] == ["tx_flag"]
+
+
+@pytest.mark.parametrize("bad_id", [-1, 0])
+def test_no_change_log_id_is_below_1_so_appends_keep_working_t408(
+    conn: sqlite3.Connection, exchange: int, bad_id: int
+) -> None:
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(
+            "INSERT INTO change_log (id, at, kind, subject, after) VALUES (?, ?, 'tx_flag', 'ab', '{}')",
+            (bad_id, AT),
+        )
+    tags.tag_address(
+        conn, SCRIPT, text=None, entity_id=exchange, tax_account_id=None, label="", client_ids=[], at=AT
+    )
+    assert [c.id for c in tags.changes(conn)] == [1]
 
 
 @pytest.mark.parametrize(

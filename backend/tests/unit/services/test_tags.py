@@ -19,7 +19,7 @@ from coinacct.storage.datadir import DataDir, open_data_dir
 from coinacct.storage.db import DbBusy, open_db, open_reader
 
 SCRIPT = "0014" + "cc" * 20
-# BIP173's regtest test vector and the script it pays to (public test data).
+# BIP173's P2WPKH test program in regtest form, and its script (public test data).
 REGTEST_ADDRESS = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"
 REGTEST_SCRIPT = "0014751e76e8199196d454941c45d1b3a323f1433bd6"
 TXID = "ab" * 32
@@ -152,3 +152,23 @@ def test_a_private_key_as_address_text_gets_the_key_refusal_t703(
         tagging.tag_address(
             SCRIPT, text=wif_shaped, entity_id=exchange, tax_account_id=None, label="", client_ids=[]
         )
+
+
+def test_without_a_recorded_chain_an_address_text_is_refused(data: DataDir, syncs: Syncs) -> None:
+    c = open_db(data)  # no chain recorded yet
+    try:
+        imports = Imports(c, lambda: open_reader(data), None)
+        tagging = Tagging(c, lambda: open_reader(data), imports, now=lambda: AT)
+        exchange = ac.add_entity(c, "Some exchange", "exchange")
+        with pytest.raises(ImportRefused, match="no chain is recorded") as caught:
+            tagging.tag_address(
+                REGTEST_SCRIPT,
+                text=REGTEST_ADDRESS,
+                entity_id=exchange,
+                tax_account_id=None,
+                label="",
+                client_ids=[],
+            )
+        assert REGTEST_ADDRESS not in str(caught.value) and ac.addresses(c) == []
+    finally:
+        c.close()
