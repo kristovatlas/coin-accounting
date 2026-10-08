@@ -365,7 +365,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
    As built, it differs from this plan in these ways:
    - **Import format:** an import is pasted text, one address per line, or one full descriptor. CSV upload and a bare xpub tried against the candidate script types are deferred (#188), and so are `pk()`, `raw()` and bare `multi()` descriptors.
    - **History detail:** the history views show activity events, balances and the user's own UTXOs, not decoded transactions. Those come with M3's graph.
-   - **Window cap:** windows grow on confirmed use up to a provisional 10,000 indexes, until the perf check sizes them.
+   - **Window cap:** windows grow on confirmed use through a provisional index 10,000 (10,001 indexes), until the perf check sizes them.
    - **Architecture:** where M2 differed from the architecture text, architecture 0.2.7 follows the code, as ADR 0036 records. The owner accepts that ADR before this lands.
 
    What M2 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues #184, #186, #188, #190, #192, #194, #196, #198 and #200.
