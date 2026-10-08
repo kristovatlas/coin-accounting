@@ -234,7 +234,7 @@ def test_adding_an_address_renames_only_its_bucket(conn: sqlite3.Connection, wal
         conn, imports.preview_addresses(conn, p2wpkh(500)[0]), entity_id=ME, tax_account_id=wallet
     )
     after = {s.subject for s in imports.subjects(conn)}
-    assert len(after - before) == 1 and len(before - after) <= 1  # one bucket is a new subject
+    assert len(after - before) == 1 and len(before - after) == 1  # one bucket is a new subject
 
 
 def test_a_wider_window_is_a_new_subject_scanned_from_its_start_t210(
@@ -350,3 +350,94 @@ def test_an_address_imported_with_an_earlier_start_keeps_its_own_subject(
     subjects = imports.subjects(conn)
     lone = [s for s in subjects if s.subject.startswith("addrs:")]
     assert len(lone) == 1 and lone[0].scanobjects == (f"raw({script})",) and lone[0].start_height == 0
+
+
+class PrivateNormalForm(Node):
+    """A node that turns a public descriptor into a private one while claiming it has no keys."""
+
+    def call(self, method: str, params: Any = ()) -> Any:
+        reply = super().call(method, params)
+        if method == "getdescriptorinfo":
+            tprv_shaped = "tprv" + ("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" * 2)[:100]
+            return {**reply, "descriptor": f"wpkh({tprv_shaped}/0/*)#abcdefgh"}
+        return reply
+
+
+def test_a_private_normal_form_is_never_derived_t703(conn: sqlite3.Connection) -> None:
+    node = PrivateNormalForm()
+    with pytest.raises(PrivateKeyError):
+        imports.preview_descriptor(node, conn, TPUB_DESC)
+    assert [method for method, _ in node.calls] == ["getdescriptorinfo"]
+
+
+class Odd(Node):
+    def __init__(self, *, solvable: bool = True, chain_hrp: str = "bcrt", repeat: bool = False) -> None:
+        super().__init__()
+        self.solvable, self.chain_hrp, self.repeat = solvable, chain_hrp, repeat
+
+    def call(self, method: str, params: Any = ()) -> Any:
+        reply = super().call(method, params)
+        if method == "getdescriptorinfo":
+            return {**reply, "issolvable": self.solvable}
+        if self.repeat:
+            return [p2wpkh(1000)[0]] * len(reply)
+        return [p2wpkh(1000 + i, self.chain_hrp)[0] for i in range(len(reply))]
+
+
+@pytest.mark.parametrize(
+    ("node", "reason"),
+    [
+        (Odd(solvable=False), "solvable"),
+        (Odd(chain_hrp="bc"), "isn't of this chain"),
+        (Odd(repeat=True), "same script twice"),
+    ],
+)
+def test_a_descriptor_whose_scripts_cant_be_trusted_is_refused(
+    conn: sqlite3.Connection, node: Node, reason: str
+) -> None:
+    with pytest.raises(ImportRefused, match=reason):
+        imports.preview_descriptor(node, conn, TPUB_DESC, gap_limit=3)
+
+
+def test_an_address_imported_after_its_descriptor_with_an_earlier_start_is_scanned_from_it(
+    conn: sqlite3.Connection, wallet: int
+) -> None:
+    preview = imports.preview_descriptor(Node(), conn, TPUB_DESC, gap_limit=2)
+    imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=wallet, start_height=100)
+    address, script = p2wpkh(1000)  # the descriptor's index 0
+    again = imports.preview_addresses(conn, address)
+    imports.import_addresses(conn, again, entity_id=ME, tax_account_id=wallet, start_height=0)
+    lone = [s for s in imports.subjects(conn) if s.subject.startswith("addrs:")]
+    assert len(lone) == 1 and lone[0].scanobjects == (f"raw({script})",) and lone[0].start_height == 0
+
+
+def test_a_later_start_on_reimport_keeps_the_earlier_one(conn: sqlite3.Connection, wallet: int) -> None:
+    address, _ = p2wpkh(1)
+    for start in (5, 50):
+        imports.import_addresses(
+            conn,
+            imports.preview_addresses(conn, address),
+            entity_id=ME,
+            tax_account_id=wallet,
+            start_height=start,
+        )
+    assert ac.addresses(conn)[0].start_height == 5
+
+
+def test_a_descriptor_reimported_with_an_earlier_start_is_a_new_subject_from_it(
+    conn: sqlite3.Connection, wallet: int
+) -> None:
+    preview = imports.preview_descriptor(Node(), conn, TPUB_DESC, gap_limit=2)
+    imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=wallet, start_height=100)
+    [before] = imports.subjects(conn)
+    imports.import_descriptor(conn, preview, entity_id=ME, tax_account_id=wallet, start_height=10)
+    [after] = imports.subjects(conn)
+    assert after.subject != before.subject and after.start_height == 10
+
+
+def test_an_upload_of_exactly_the_line_limit_ending_in_a_newline_passes(conn: sqlite3.Connection) -> None:
+    address = p2wpkh(1)[0]
+    preview = imports.preview_addresses(conn, f"{address}\n" * imports.MAX_LINES)
+    assert preview.repeated == imports.MAX_LINES - 1
+    with pytest.raises(ImportRefused, match="more than"):
+        imports.preview_addresses(conn, f"{address}\n" * (imports.MAX_LINES + 1))

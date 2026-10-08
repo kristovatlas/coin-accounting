@@ -22,9 +22,9 @@ the tip poller otherwise queues one only when the tip moves.
 
 `subjects` lists what the chain jobs scan (architecture §8.2). A subject's name is the key of its
 coverage, so it names exactly what is scanned:
-- a descriptor: a digest of its text and its window, so a wider window (or a new descriptor that
-  reuses a deleted one's id) is a new subject, scanned from its start height, never a continuation of
-  the narrower window's coverage (T-207, T-210);
+- a descriptor: a digest of its text, its window and its start height, so a wider window, an earlier
+  start (a re-import) or a new descriptor that reuses a deleted one's id is a new subject, scanned
+  from its start height, never a continuation of the old coverage (T-207, T-210);
 - addresses no descriptor derives (or derives only from a later start height): batched into at
   most `ADDRESS_BUCKETS` subjects per start height, by a hash of each script, so a list of many
   addresses isn't one full scan each (PLAN §3). A bucket's name is a digest of its members, so adding
@@ -107,6 +107,8 @@ def _lines(upload: str) -> list[str]:
         raise ImportRefused(f"the upload is larger than {MAX_UPLOAD_BYTES} bytes")
     # Newlines only, so the reported line numbers match the user's editor.
     lines = upload.replace("\r\n", "\n").split("\n")
+    if lines[-1] == "":
+        lines.pop()  # the final newline ends the last line; it doesn't start another
     if len(lines) > MAX_LINES:
         raise ImportRefused(f"the upload has more than {MAX_LINES} lines")
     stripped = [line.strip() for line in lines]
@@ -256,7 +258,7 @@ def subjects(conn: Connection) -> list[Scan]:
             derived_from[script] = min(derived_from.get(script, d.start_height), d.start_height)
         ranged = "*" in d.text
         scanobject: object = {"desc": d.text, "range": [0, d.range_end]} if ranged else d.text
-        name = f"desc:{_digest(d.text, str(d.range_end))}"
+        name = f"desc:{_digest(d.text, str(d.range_end), str(d.start_height))}"
         scans.append(Scan(name, (scanobject,), start_height=d.start_height))
     buckets: dict[tuple[int, int], list[str]] = {}
     for a in accounts.addresses(conn):

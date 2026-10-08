@@ -9,6 +9,7 @@ import pytest
 
 from coinacct.chain import descriptors
 from coinacct.chain.descriptors import DescriptorError, DescriptorInfo
+from coinacct.domain.keys import PrivateKeyError
 from coinacct.rpc import RpcCallError
 
 GOOD: dict[str, Any] = {
@@ -22,8 +23,10 @@ GOOD: dict[str, Any] = {
 class Node:
     def __init__(self, reply: Any = None, derived: Any = None) -> None:
         self.reply, self.derived = reply, derived
+        self.calls: list[str] = []
 
     def call(self, method: str, params: Any = ()) -> Any:
+        self.calls.append(method)
         if method == "getdescriptorinfo":
             return self.reply
         if method == "deriveaddresses":
@@ -105,3 +108,11 @@ def test_a_node_error_while_deriving_never_reaches_the_message_t403() -> None:
 
 def test_an_unranged_descriptor_derives_its_one_address() -> None:
     assert descriptors.derive(Node(derived=["bcrt1qa"]), SINGLE, 0, 0) == ["bcrt1qa"]
+
+
+def test_describe_refuses_a_private_key_before_anything_is_sent_t703() -> None:
+    node = Node(GOOD)
+    tprv_shaped = "tprv" + ("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" * 2)[:100]
+    with pytest.raises(PrivateKeyError):
+        descriptors.describe(node, f"wpkh({tprv_shaped}/0/*)")
+    assert node.calls == []

@@ -487,3 +487,28 @@ def test_a_sync_can_be_requested_without_a_tip_change(conn: sqlite3.Connection) 
     jobs_.request_sync()  # an import arrived
     assert poller.poll() is not None
     w.stop()
+
+
+def test_a_sync_requested_while_one_runs_is_queued_after_it(conn: sqlite3.Connection) -> None:
+    node = Node(500)
+    w = JobWorker()
+    w.start()
+    reading, release = threading.Event(), threading.Event()
+
+    def subjects() -> list[Scan]:
+        reading.set()
+        release.wait(5)  # the running sync has read its subjects: the import comes after
+        return []
+
+    poller = TipPoller(node, conn, w, subjects, interval=3600)
+    first = poller.poll()
+    assert first is not None and reading.wait(5)
+    poller.request_sync()  # an import, while the sync runs
+    assert poller.poll() is None  # one is running: the request waits for it
+    release.set()
+    wait_for(lambda: w.job(first).state is State.DONE)  # type: ignore[union-attr]
+    second = poller.poll()
+    assert second is not None  # same tip, but the request is still there
+    wait_for(lambda: w.job(second).state is State.DONE)  # type: ignore[union-attr]
+    assert poller.poll() is None  # served: no further sync until the tip moves or another request
+    w.stop()

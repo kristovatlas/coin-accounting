@@ -226,8 +226,9 @@ def add_addresses(  # noqa: PLR0913 - one batch of addresses and the owner, acco
     client_ids: Sequence[int] = (),
 ) -> Added:
     """Add `(script_hex, text)` pairs in one transaction. A script already known under the same owner
-    and account gets the new client links (PLAN §2: an address can live in several wallets); one known
-    under another owner or account is left as it is and reported."""
+    and account gets the new client links (PLAN §2: an address can live in several wallets) and the
+    earlier of the two start heights; one known under another owner or account is left as it is and
+    reported."""
     rows = list(addresses)
     _no_keys(label, *(t for _, t in rows if t))
     added: list[str] = []
@@ -246,6 +247,12 @@ def add_addresses(  # noqa: PLR0913 - one batch of addresses and the owner, acco
                 elif not _owned_by(conn, script_hex, entity_id, tax_account_id):
                     conflicts.append(script_hex)
                     continue
+                else:
+                    # Imported again with an earlier start: its earlier history is scanned too.
+                    conn.execute(
+                        "UPDATE address SET start_height = MIN(start_height, ?) WHERE script_hex = ?",
+                        (start_height, script_hex),
+                    )
                 conn.executemany(
                     "INSERT INTO address_client (script_hex, client_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
                     [(script_hex, c) for c in client_ids],
@@ -309,9 +316,14 @@ def add_descriptor(  # noqa: PLR0913 - the descriptor, its owner and account, an
                 "SELECT id, entity_id, tax_account_id FROM descriptor WHERE text = ?", (text,)
             ).fetchone()
             if known is not None:
-                # Imported again, from another wallet client (PLAN §2): link it, change nothing else.
+                # Imported again, from another wallet client (PLAN §2): link it, and keep the earlier
+                # start height so that history is scanned too; nothing else changes.
                 if (known[1], known[2]) != (entity_id, tax_account_id):
                     raise AccountsError("the descriptor is already imported under another owner or account")
+                conn.execute(
+                    "UPDATE descriptor SET start_height = MIN(start_height, ?) WHERE id = ?",
+                    (start_height, known[0]),
+                )
                 conn.executemany(
                     "INSERT INTO descriptor_client (descriptor_id, client_id) VALUES (?, ?)"
                     " ON CONFLICT DO NOTHING",
