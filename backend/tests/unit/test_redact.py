@@ -1,5 +1,6 @@
 """Log redaction rules (THREAT_MODEL T-403). Fixtures are public or synthetic: Core's regtest
-OP_TRUE address, the genesis block's address and hash, and a BIP32 test-vector key."""
+OP_TRUE address, the genesis block's address and hash, BIP32 test vector 1's keys, a public testnet
+private key, and the WIF of private key 1."""
 
 from __future__ import annotations
 
@@ -13,6 +14,16 @@ REGTEST_OP_TRUE = "bcrt1qft5p2uhsdcdc3l2ua4ap5qqfg4pjaqlp250x7us7a8qqhrxrxfsqsea
 TPUB = "tpubD6NzVbkrYhZ4XgiXtGrdW5XDAPFCL9h7we1vwNCpn8tGbBcgfVYjXyhWo4E1xkh56hjod1RhGjxbaTLV3X4FyWuejifB9jusQ46QzG87VKp"  # noqa: E501 - BIP32 test vector 1
 # The WIF of private key 1 (a well-known test value, not anyone's funds).
 WIF = "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
+# BIP32 test vector 1's master private key, and a public testnet test key (both also in
+# test_domain_keys.py): public test data, not anyone's funds.
+XPRV = (
+    "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiC"
+    "hkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi"
+)
+TPRV = (
+    "tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQ"
+    "AfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK"
+)
 
 
 @pytest.mark.parametrize(
@@ -24,6 +35,8 @@ WIF = "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
         ("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4 upper", "<address> upper"),
         (f"descriptor wpkh({TPUB}/0/*)", "descriptor wpkh(<key>/0/*)"),
         (f"key {WIF}", "key <key>"),
+        (f"descriptor wpkh({XPRV}/84h/0h/0h/0/*)", "descriptor wpkh(<key>/84h/0h/0h/0/*)"),  # T-703
+        (f"key {TPRV} refused", "key <key> refused"),  # T-703
         ("sold 0.12345678 BTC for $4,321.00", "sold <amount> BTC for <amount>"),
         (
             "fee 1500 sat, 21000000 sats total, at height 840000",

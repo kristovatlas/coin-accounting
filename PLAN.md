@@ -344,10 +344,31 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
 
      M0.3 is done (2026-10-07; the first E2E test is PRs #153 and #154). On macOS the storage check doesn't detect VeraCrypt itself: it asks the user to confirm the volume (THREAT_MODEL T-401). The macOS storage-check follow-ups are #111 and #112. What it left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues.
 2. **M1 chain access:** node checks (including index sync and the canary), the tx fetch layer, spender lookups, the scan protocol (bounded ranges, gap guards, tip handling), the scan job queue (status/abort, leftover-scan cleanup), busy-script budgets, the chain-data cache with coverage and snapshots, fork-point reorg handling, the mempool pass, and the mainnet perf check.
+
+   M1's code is complete (2026-10-08). M1 closes when the human has run the mainnet perf check and recorded its results here. That check sets the range size, the window size and the activity budget; until then the range size and the activity budget are the planned defaults in `chain/scans` (50,000 blocks, and 1,000 candidate blocks per subject). The merged PRs: the tx fetch layer (#159), the user DB with its migrations and recorded chain (#161), spender lookups (#162), the chain-data cache with coverage and snapshots (#165), fork-point reorg handling (#168), the scan protocol (#171), the user DB wired into the launcher (#172), the mempool pass (#174), start-up recovery and the tip-change job with the reorg review queue (#177), and the job worker, the tip poller and the shutdown abort (#179). Until descriptors and addresses are imported (M2), the chain jobs have nothing to scan. The chain-sync follow-ups from PR #177's review are #178, which PR #179 works through. Where M1 as built differed from the architecture text (among them §8.2's retry rule: a subject waits for the next sync instead of failing the job), architecture 0.2.6 follows the code, as ADR 0035 records; the owner accepts that ADR before this lands. What M1 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues.
 3. **M2 user DB + import + discovery:**
    - entities, tax accounts, clients
    - address and **descriptor/xpub** import
    - address/UTXO/tx history views
+
+   M2 is done (2026-10-08). The merged PRs:
+   - private-key detection and strict address parsing (#183)
+   - entities, tax accounts, clients, addresses and descriptors in the user DB (#185)
+   - import, with previews and scan subjects (#187)
+   - descriptor window growth (#189)
+   - the writer lock and per-request readers (#191)
+   - the account and import API (#193)
+   - the import view (#195)
+   - address, UTXO and event history as of the last finished sync (#197)
+   - the holdings and history views (#199)
+
+   As built, it differs from this plan in these ways:
+   - **Import format:** an import is pasted text, one address per line, or one full descriptor. CSV upload and a bare xpub tried against the candidate script types are deferred (#188), and so are `pk()`, `raw()` and bare `multi()` descriptors.
+   - **History detail:** the history views show activity events, balances and the user's own UTXOs, not decoded transactions. Those come with M3's graph.
+   - **Window cap:** windows grow on confirmed use through a provisional index 10,000 (10,001 indexes), until the perf check sizes them.
+   - **Architecture:** where M2 differed from the architecture text, architecture 0.2.7 follows the code, as ADR 0036 records. The owner accepts that ADR before this lands.
+
+   What M2 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues #184, #186, #188, #190, #192, #194, #196, #198 and #200.
 4. **M3 graph UI:** backward/forward expansion, the tagging side panel, the mixing flag.
 5. **M4 clustering suggestions + doxx propagation:** certain and inferred links, plus the sell planner view.
 6. **M5 prices:** bulk USD VWAP, display FX for all pairs, proxy support.
