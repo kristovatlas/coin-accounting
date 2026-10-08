@@ -87,6 +87,11 @@ class StaleScanError(RuntimeError):
     """The chain or the filter index moved under the scan: discard the range's results and retry."""
 
 
+class ChainMovedError(StaleScanError):
+    """The chain moved below the subject's coverage, or the scan target left it: retrying the range
+    can't help; catch up first (`chain.reorg.catch_up`)."""
+
+
 class FilterIndexBehindError(StaleScanError):
     """The filter index is more than `TIP_WINDOW` blocks behind the scan target: wait for it, rather
     than read the blocks it hasn't reached one by one (T-205, T-210)."""
@@ -238,7 +243,7 @@ def extend(rpc: ChainRpc, conn: Connection, scan: Scan) -> Coverage:
         # The tip window: every block by hash, straight to getdescriptoractivity.
         hashes = [_block_hash(rpc, h) for h in range(start, target.height + 1)]
         if hashes[-1] != target.blockhash:
-            raise StaleScanError("the scan target left the active chain")
+            raise ChainMovedError("the scan target left the active chain")
         _check_anchor(rpc, anchor)
         window = Coverage(scan.subject, start, target.height, target.blockhash)
         _commit(conn, activity(rpc, hashes, scan.scanobjects), window, target, 0)
@@ -293,7 +298,7 @@ def _scanblocks(rpc: ChainRpc, params: list[Any], marker: tuple[Connection, str]
 
 def _check_anchor(rpc: ChainRpc, anchor: Tip | None) -> None:
     if anchor is not None and _block_hash(rpc, anchor.height) != anchor.blockhash:
-        raise StaleScanError("the chain moved below the subject's coverage; catch up first (T-207)")
+        raise ChainMovedError("the chain moved below the subject's coverage; catch up first (T-207)")
 
 
 def _clear(conn: Connection | None) -> None:

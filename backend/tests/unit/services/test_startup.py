@@ -23,6 +23,7 @@ from coinacct.storage.datadir import open_data_dir
 from coinacct.storage.db import open_db
 from coinacct.storage.volume import Encryption, VolumeStatus
 
+TIP_HASH = "cd" * 32
 ENCRYPTED = VolumeStatus(Encryption.VERACRYPT, "device-mapper veracrypt1")
 PLAIN = VolumeStatus(Encryption.NONE, "device 8:1 is not a device-mapper device")
 
@@ -43,9 +44,18 @@ class Node:
     def call(self, method: str, params: Any = ()) -> Any:
         if self.error is not None:
             raise self.error
+        if method == "getblockheader":  # the fork-point check after the checks pass (§8.1)
+            return {"hash": TIP_HASH, "height": 200, "confirmations": 1, "previousblockhash": "ab" * 32}
         return {
             "getnetworkinfo": {"version": 310100, "subversion": "/Satoshi:31.1.0/"},
-            "getblockchaininfo": {"chain": self.chain, "pruned": self.pruned},
+            "getblockchaininfo": {
+                "chain": self.chain,
+                "pruned": self.pruned,
+                "initialblockdownload": False,
+                "blocks": 200,
+                "headers": 200,
+            },
+            "getbestblockhash": TIP_HASH,
             "getblockcount": 200,
             "getindexinfo": {name: {"synced": True, "best_block_height": 200} for name in REQUIRED_INDEXES},
         }[method]
@@ -197,3 +207,28 @@ def test_the_recorded_chain_decides_the_storage_policy_t401(db: sqlite3.Connecti
 
 def test_the_node_checks_and_the_db_know_the_same_chains_t206() -> None:
     assert KNOWN_CHAINS == CHAINS  # a chain the checks accept can always be recorded
+
+
+def test_a_catch_up_that_fails_after_the_checks_means_offline_mode_not_a_failed_start(
+    db: sqlite3.Connection,
+) -> None:
+    class Syncing(Node):  # passes the node checks, but the catch-up finds it still syncing
+        def call(self, method: str, params: Any = ()) -> Any:
+            reply = super().call(method, params)
+            return {**reply, "initialblockdownload": True} if method == "getblockchaininfo" else reply
+
+    status = recorded(Syncing(), db)
+    assert not status.online and "still syncing" in status.reasons[0]
+    assert recorded_chain(db) == "regtest"  # the checks passed: the chain is recorded
+
+    class Unreachable(Node):
+        def call(self, method: str, params: Any = ()) -> Any:
+            if method == "getblockheader":
+                raise RpcTransportError("down")
+            return super().call(method, params)
+
+    status = recorded(Unreachable(), db)
+    assert not status.online and status.reasons == (
+        "the chain catch-up at start-up failed (RpcTransportError)",
+    )
+    assert recorded_chain(db) == "regtest"

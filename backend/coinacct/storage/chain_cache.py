@@ -369,6 +369,10 @@ def invalidate_above(conn: sqlite3.Connection, fork: Tip) -> Invalidated:
         subjects = frozenset(
             str(s) for (s,) in conn.execute("SELECT subject FROM coverage WHERE stop_height > ?", (f,))
         )
+        # Kept until reviewed: losing this list would hide events built on orphaned txs (T-506).
+        conn.executemany(
+            "INSERT INTO review_queue (txid) VALUES (?) ON CONFLICT DO NOTHING", [(t,) for t in txids]
+        )
         for table in ("tx_cache", "activity", "spender"):
             conn.execute(f"DELETE FROM {table} WHERE height > ?", (f,))  # noqa: S608 (fixed names)
         conn.execute("DELETE FROM snapshot WHERE tip_height > ?", (f,))
@@ -460,3 +464,14 @@ def _decode_out(o: object) -> TxOut:
     if address is not None and not isinstance(address, str):
         raise TypeError
     return TxOut(sats, script_hex, script_type, address)
+
+
+def pending_review(conn: sqlite3.Connection) -> frozenset[str]:
+    """The txids a reorg removed whose events haven't been flagged for review yet (T-207, T-506)."""
+    return frozenset(str(t) for (t,) in conn.execute("SELECT txid FROM review_queue"))
+
+
+def clear_review(conn: sqlite3.Connection, txids: Iterable[str]) -> None:
+    """The events built on these txids have been flagged for review."""
+    with transaction(conn):
+        conn.executemany("DELETE FROM review_queue WHERE txid = ?", [(t,) for t in txids])

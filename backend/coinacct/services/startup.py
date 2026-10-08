@@ -10,7 +10,8 @@ can't be shown to be a test chain, `StorageRefused` is raised and the app must n
 
 `check_configured_node` checks the node's chain against the one recorded in the user DB (T-206): a
 mismatch means offline mode. A new data directory records the node's chain on its first start that
-passes every check, and from then on it never changes.
+passes every check, and from then on it never changes. Once online, the rest of §8.1 runs
+(`chain_sync.at_startup`): a scan the app left running is aborted, then the fork-point check.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Any
 
 from coinacct.chain import node_checks
 from coinacct.domain.secret import Secret
+from coinacct.services import chain_sync
 from coinacct.storage import chain_state, datadir
 from coinacct.storage.db import Connection
 from coinacct.storage.volume import VolumeStatus
@@ -106,4 +108,9 @@ def check_recorded(
     if expected is None and status.online and status.chain is not None:
         chain_state.record_chain(db, status.chain)
         log.info("recorded the data directory's chain: %s", status.chain)
+    if status.online:
+        reason = chain_sync.at_startup(client, db)
+        if reason is not None:
+            log.warning("offline mode: %s", reason)
+            return NodeStatus(online=False, chain=status.chain, reasons=(reason,))
     return status
