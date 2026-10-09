@@ -25,7 +25,7 @@ DAY_SECONDS: Final = 86_400
 _SCALE: Final = 10**12  # a candle's values have at most 12 decimals
 _NUMBER: Final = re.compile(r"([0-9]{1,15})(?:\.([0-9]{1,12}))?")
 _TIME: Final = re.compile(r"[0-9]{1,12}")
-# 2009-01-03 (the genesis block) to 9999-12-31: a timestamp outside this is not a trade's.
+# 2009-01-03 (the genesis block) to 9999-12-31: a timestamp outside this is not a candle's.
 _FIRST: Final = 1_230_940_800
 _LAST: Final = 253_402_300_799
 

@@ -1,4 +1,4 @@
-"""A price refresh: every source downloaded, parsed, combined and checked (PLAN §6, ADR 0039; THREAT_MODEL
+"""A price refresh: every source downloaded, parsed and checked (PLAN §6, ADR 0039; THREAT_MODEL
 T-301, T-303, T-304). The downloads are fakes in memory: no test reaches the network."""
 
 from __future__ import annotations

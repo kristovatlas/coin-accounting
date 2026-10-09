@@ -1,4 +1,4 @@
-"""A price refresh: every source downloaded, parsed, combined and checked (PLAN §6, ADR 0039; THREAT_MODEL
+"""A price refresh: every source downloaded, parsed and checked (PLAN §6, ADR 0039; THREAT_MODEL
 T-301, T-303, T-304).
 
 The user starts it (manual trigger); it runs as a job on the job worker (architecture §3). Every

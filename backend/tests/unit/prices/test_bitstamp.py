@@ -72,6 +72,12 @@ def test_a_candle_without_volume_and_partial_days_get_no_price() -> None:
         (page(candle(low="0", open="0", close="0")), "USD", "needs 0 < low"),
         (page(candle(open="4.2e4")), "USD", "not a plain decimal"),
         (page(candle(volume="-1")), "USD", "not a plain decimal"),
+        (page(candle(volume="0.0000000000001")), "USD", "not a plain decimal"),  # 13 decimals
+        (page(candle(volume="1000000000000000")), "USD", "not a plain decimal"),  # 16 integer digits
+        (page(candle(volume="\u0661\u0660")), "USD", "not a plain decimal"),  # Arabic-Indic digits
+        (page(candle(volume=".5")), "USD", "not a plain decimal"),
+        (page(candle(volume="1.")), "USD", "not a plain decimal"),
+        (page(candle(volume=" 1")), "USD", "not a plain decimal"),
         (page(candle(), candle()), "USD", "candle 2: out of day order"),
         (page(candle(JAN1 + DAY), candle()), "USD", "candle 2: out of day order"),
         (
@@ -122,3 +128,14 @@ def test_deeply_nested_json_is_refused_as_invalid() -> None:
 def test_a_candle_whose_time_isnt_a_unix_time_from_2009_on_is_refused(t: str) -> None:
     with pytest.raises(PriceError, match=r"candle 1: '.*' is not a unix time from 2009 on"):
         typical_by_day(page({**candle(), "timestamp": t}), "USD", LATER)
+
+
+@pytest.mark.parametrize(
+    ("value", "cents"),
+    [("1.005", "1.00"), ("1.015", "1.02"), ("1.0049", "1.00"), ("1.0051", "1.01"), ("1.5", "1.50")],
+)
+def test_the_typical_price_is_rounded_once_half_to_even(value: str, cents: str) -> None:
+    # high = low = close, so the typical price is the value itself: ties go to the even cent, and a
+    # short fraction ("1.5") is padded, not read as 1.000000000005
+    (p,) = typical_by_day(page(candle(open=value, high=value, low=value, close=value)), "USD", LATER)
+    assert p.price == Decimal(cents)
