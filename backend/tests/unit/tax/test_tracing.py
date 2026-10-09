@@ -31,6 +31,11 @@ CHANGE = b"\x00\x14chg"
 DEST = b"\x00\x14dst"
 
 
+def bad(value: Any) -> Any:
+    """A value of the wrong type, passed on purpose."""
+    return value
+
+
 def frag(lot: str, sats: int, days: int = 0, event: str | None = None) -> Fragment:
     return Fragment(lot, sats, T0 + timedelta(days=days), event or f"e-{lot}")
 
@@ -64,7 +69,7 @@ ADR_COIN = coin(frag("L1", 40_000_000, 0), frag("L2", 60_000_000, 10))
 @pytest.mark.parametrize("change_first", [False, True])
 def test_adr_worked_example_spend(change_first: bool) -> None:
     pay = Output(0, 50_000_000, PAY, event="s1")
-    change = Output(1, 49_990_000, CHANGE, account="w")
+    change = Output(1, 49_990_000, CHANGE, account="w", kind="self_custody")
     outputs = [change, pay] if change_first else [pay, change]
     result = traced(tx([ADR_COIN], outputs, Leaving("s1", "spend", 50_000_000)))
     assert by_vout(result) == {0: [("L1", 40_000_000), ("L2", 10_000_000)], 1: [("L2", 49_990_000)]}
@@ -74,8 +79,8 @@ def test_adr_worked_example_spend(change_first: bool) -> None:
 
 @pytest.mark.parametrize("change_first", [False, True])
 def test_adr_worked_example_transfer(change_first: bool) -> None:
-    dest = Output(0, 50_000_000, DEST, account="w2", event="x1")
-    change = Output(1, 49_990_000, CHANGE, account="w")
+    dest = Output(0, 50_000_000, DEST, account="w2", kind="self_custody", event="x1")
+    change = Output(1, 49_990_000, CHANGE, account="w", kind="self_custody")
     outputs = [change, dest] if change_first else [dest, change]
     result = traced(tx([ADR_COIN], outputs, Leaving("x1", "transfer", 50_000_000)))
     assert by_vout(result) == {0: [("L1", 40_000_000), ("L2", 10_000_000)], 1: [("L2", 49_990_000)]}
@@ -85,8 +90,8 @@ def test_adr_worked_example_transfer(change_first: bool) -> None:
 
 def test_fee_lot_not_on_the_destination_carries_onto_its_oldest_fragment() -> None:
     c = coin(frag("L1", 50_000_000, 0), frag("L2", 50_000_000, 10))
-    dest = Output(3, 50_000_000, DEST, account="x", event="d1")
-    change = Output(4, 49_990_000, CHANGE, account="w")
+    dest = Output(3, 50_000_000, DEST, account="x", kind="custodial", event="d1")
+    change = Output(4, 49_990_000, CHANGE, account="w", kind="self_custody")
     result = traced(tx([c], [dest, change], Leaving("d1", "deposit", 50_000_000)))
     assert by_vout(result) == {3: [("L1", 50_000_000)], 4: [("L2", 49_990_000)]}
     assert result.carries == (FeeCarry("L2", 10_000, 3, "L1"),)
@@ -94,8 +99,8 @@ def test_fee_lot_not_on_the_destination_carries_onto_its_oldest_fragment() -> No
 
 def test_fallback_carry_goes_to_the_destinations_oldest_fragment() -> None:
     c = coin(frag("L1", 300, 0), frag("L2", 300, 1), frag("L3", 1_000, 2))
-    dest = Output(0, 600, DEST, account="w2", event="x1")
-    change = Output(1, 900, CHANGE, account="w")
+    dest = Output(0, 600, DEST, account="w2", kind="self_custody", event="x1")
+    change = Output(1, 900, CHANGE, account="w", kind="self_custody")
     result = traced(tx([c], [dest, change], Leaving("x1", "transfer", 600)))
     assert by_vout(result) == {0: [("L1", 300), ("L2", 300)], 1: [("L3", 900)]}
     # The fee's L3 isn't on the destination: its basis goes to the destination's oldest fragment, L1.
@@ -104,8 +109,17 @@ def test_fallback_carry_goes_to_the_destinations_oldest_fragment() -> None:
 
 def test_identical_destinations_block_when_one_would_take_the_fee_basis() -> None:
     c = coin(frag("L1", 3_000))
-    outs = [Output(0, 1_000, DEST, account="x", event="d"), Output(1, 1_000, DEST, account="x", event="d")]
-    blocked = trace(tx([c], [*outs, Output(2, 900, CHANGE, account="w")], Leaving("d", "deposit", 2_000)))
+    outs = [
+        Output(0, 1_000, DEST, account="x", kind="custodial", event="d"),
+        Output(1, 1_000, DEST, account="x", kind="custodial", event="d"),
+    ]
+    blocked = trace(
+        tx(
+            [c],
+            [*outs, Output(2, 900, CHANGE, account="w", kind="self_custody")],
+            Leaving("d", "deposit", 2_000),
+        )
+    )
     assert blocked == Blocked(
         "t1", "identical_outputs", "outputs 0, 1 would get different basis from the fee"
     )
@@ -115,7 +129,10 @@ def test_identical_destinations_block_when_one_would_take_the_fee_basis() -> Non
 
 def test_identical_outputs_across_roles_count_as_identical() -> None:
     c = coin(frag("L1", 1_000), frag("L2", 1_000, 1))
-    outs = [Output(0, 1_000, CHANGE, account="w2", event="x"), Output(1, 1_000, CHANGE, account="w")]
+    outs = [
+        Output(0, 1_000, CHANGE, account="w2", kind="self_custody", event="x"),
+        Output(1, 1_000, CHANGE, account="w", kind="self_custody"),
+    ]
     blocked = trace(tx([c, coin(frag("L3", 100, 2))], outs, Leaving("x", "transfer", 1_000)))
     assert blocked == Blocked("t1", "identical_outputs", "outputs 0, 1 would get different lots")
 
@@ -124,7 +141,7 @@ def test_the_dispose_setting_carries_nothing() -> None:
     result = traced(
         tx(
             [ADR_COIN],
-            [Output(0, 99_990_000, DEST, account="w2", event="x")],
+            [Output(0, 99_990_000, DEST, account="w2", kind="self_custody", event="x")],
             Leaving("x", "transfer", 99_990_000),
         ),
         "dispose",
@@ -135,8 +152,8 @@ def test_the_dispose_setting_carries_nothing() -> None:
 
 def test_fee_spanning_two_lots_carries_each() -> None:
     c = coin(frag("L1", 1_000, 0), frag("L2", 5_000, 1), frag("L3", 10_000, 2))
-    dest = Output(0, 900, DEST, account="x", event="d1")
-    change = Output(1, 10_000, CHANGE, account="w")
+    dest = Output(0, 900, DEST, account="x", kind="custodial", event="d1")
+    change = Output(1, 10_000, CHANGE, account="w", kind="self_custody")
     result = traced(tx([c], [dest, change], Leaving("d1", "deposit", 900)))
     # The destination takes L1 900; the fee 5,100: L1 100 then L2 5,000; the change L3.
     assert lots(result.fee) == [("L1", 100), ("L2", 5_000)]
@@ -146,7 +163,7 @@ def test_fee_spanning_two_lots_carries_each() -> None:
 def test_consolidation_fee_goes_first_and_carries_to_the_change() -> None:
     a = coin(frag("L1", 3_000, 0))
     b = coin(frag("L2", 7_000, 1))
-    result = traced(tx([b, a], [Output(0, 9_000, CHANGE, account="w")]))
+    result = traced(tx([b, a], [Output(0, 9_000, CHANGE, account="w", kind="self_custody")]))
     assert lots(result.fee) == [("L1", 1_000)]
     assert by_vout(result) == {0: [("L1", 2_000), ("L2", 7_000)]}
     assert result.carries == (FeeCarry("L1", 1_000, 0, "L1"),)
@@ -178,7 +195,7 @@ def test_parts_of_one_lot_on_two_coins_merge() -> None:
     result = traced(
         tx(
             [coin(frag("L1", 2_000)), coin(frag("L1", 3_000))],
-            [Output(0, 4_000, PAY, event="s"), Output(1, 1_000, CHANGE, account="w")],
+            [Output(0, 4_000, PAY, event="s"), Output(1, 1_000, CHANGE, account="w", kind="self_custody")],
             Leaving("s", "sell", 4_000),
         )
     )
@@ -219,30 +236,96 @@ def test_identical_outputs_block_only_when_their_lots_differ() -> None:
     assert isinstance(trace(tx([single], outs, Leaving("s", "sell", 8_000))), Traced)
 
 
+def test_a_deposit_must_reach_an_exchange_and_a_transfer_a_wallet() -> None:
+    c = [coin(frag("L1", 10_000))]
+    to_wallet = Output(0, 9_000, DEST, account="w2", event="d", kind="self_custody")
+    to_exchange = Output(0, 9_000, DEST, account="x", event="d", kind="custodial")
+    for out, kind in ((to_wallet, "deposit"), (to_exchange, "transfer")):
+        result = trace(tx(c, [out], Leaving("d", bad(kind), 9_000)))
+        assert result == Blocked("t1", "mismatched_owner", f"outputs 0 aren't owned as a {kind} needs")
+    assert isinstance(trace(tx(c, [to_exchange], Leaving("d", "deposit", 9_000))), Traced)
+    assert isinstance(trace(tx(c, [to_wallet], Leaving("d", "transfer", 9_000))), Traced)
+
+
+def test_every_group_of_identical_outputs_is_named() -> None:
+    c = coin(
+        frag("L1", 1_000),
+        frag("L2", 1_000, 1),
+        frag("L3", 2_000, 2),
+        frag("L4", 1_500, 3),
+        frag("L5", 600, 4),
+    )
+    outs = [
+        Output(0, 2_000, PAY, event="s"),
+        Output(3, 2_000, PAY, event="s"),
+        Output(1, 1_000, b"\x01", event="s"),
+        Output(2, 1_000, b"\x01", event="s"),
+    ]
+    result = trace(tx([c], outs, Leaving("s", "sell", 6_000)))
+    assert result == Blocked("t1", "identical_outputs", "outputs 0, 1, 2, 3 would get different lots")
+
+
+def test_block_details_name_the_inputs_and_outputs() -> None:
+    shared = trace(
+        tx(
+            [coin(frag("L1", 5_000)), Input(None, 5_000, ())],
+            [Output(0, 9_000, CHANGE, account="w", kind="self_custody")],
+        )
+    )
+    assert shared == Blocked("t1", "shared", "inputs 1 aren't the user's")
+    outs = [
+        Output(4, 3_000, PAY, event="a"),
+        Output(1, 3_000, DEST, account="x", event="b", kind="custodial"),
+    ]
+    several = trace(tx([coin(frag("L1", 10_000))], outs, Leaving("a", "spend", 3_000)))
+    assert several == Blocked("t1", "several_leaving_events", "events a, b on outputs 1, 4")
+
+
+def test_a_zero_value_coin_can_be_spent() -> None:
+    empty = Input("w", 0, ())
+    result = traced(
+        tx([empty, coin(frag("L1", 1_000))], [Output(0, 900, PAY, event="s")], Leaving("s", "sell", 900))
+    )
+    assert by_vout(result) == {0: [("L1", 900)]}
+
+
 @pytest.mark.parametrize(
     ("inputs", "outputs", "leaving", "reason"),
     [
-        ([Input(None, 10_000, ())], [Output(0, 9_000, CHANGE, account="w")], None, "shared"),
+        (
+            [Input(None, 10_000, ())],
+            [Output(0, 9_000, CHANGE, account="w", kind="self_custody")],
+            None,
+            "shared",
+        ),
         (
             [coin(frag("L1", 10_000)), Input(None, 5_000, ())],
-            [Output(0, 14_000, CHANGE, account="w")],
+            [Output(0, 14_000, CHANGE, account="w", kind="self_custody")],
             None,
             "shared",
         ),
         (
             [coin(frag("L1", 10_000), account="w2")],
-            [Output(0, 9_000, CHANGE, account="w")],
+            [Output(0, 9_000, CHANGE, account="w", kind="self_custody")],
             None,
             "several_accounts",
         ),
         (
             [coin(frag("L1", 10_000))],
-            [Output(0, 4_000, PAY, event="a"), Output(1, 4_000, DEST, account="x", event="b")],
+            [
+                Output(0, 4_000, PAY, event="a"),
+                Output(1, 4_000, DEST, account="x", kind="custodial", event="b"),
+            ],
             Leaving("a", "spend", 4_000),
             "several_leaving_events",
         ),
         ([coin(frag("L1", 10_000))], [Output(0, 9_000, PAY)], None, "unclassified_output"),
-        ([coin(frag("L1", 10_000))], [Output(0, 9_000, DEST, account="w2")], None, "unclassified_output"),
+        (
+            [coin(frag("L1", 10_000))],
+            [Output(0, 9_000, DEST, account="w2", kind="self_custody")],
+            None,
+            "unclassified_output",
+        ),
         (
             [coin(frag("L1", 10_000))],
             [Output(0, 6_000, PAY, event="s"), Output(1, 3_000, PAY)],
@@ -264,13 +347,13 @@ def test_identical_outputs_block_only_when_their_lots_differ() -> None:
         ),
         (
             [coin(frag("L1", 10_000))],
-            [Output(0, 9_000, DEST, account="w", event="x")],
+            [Output(0, 9_000, DEST, account="w", kind="self_custody", event="x")],
             Leaving("x", "deposit", 9_000),
             "mismatched_owner",
         ),
         (
             [coin(frag("L1", 10_000))],
-            [Output(0, 9_000, DEST, account="x", event="s")],
+            [Output(0, 9_000, DEST, account="x", kind="custodial", event="s")],
             Leaving("s", "sell", 9_000),
             "mismatched_owner",
         ),
@@ -287,7 +370,11 @@ def test_unsupported_cases_block(
 
 
 def test_a_block_names_every_output_involved_in_order() -> None:
-    outs = [Output(5, 3_000, PAY), Output(2, 3_000, DEST), Output(7, 3_000, CHANGE, account="w")]
+    outs = [
+        Output(5, 3_000, PAY),
+        Output(2, 3_000, DEST),
+        Output(7, 3_000, CHANGE, account="w", kind="self_custody"),
+    ]
     expected = Blocked("t1", "unclassified_output", "outputs 2, 5 have no recorded event")
     assert trace(tx([coin(frag("L1", 10_000))], outs)) == expected
     assert trace(tx([coin(frag("L1", 10_000))], outs[::-1])) == expected
@@ -297,32 +384,79 @@ def test_a_block_names_every_output_involved_in_order() -> None:
     ("inputs", "outputs", "leaving"),
     [
         ([], [Output(0, 1, PAY)], None),
-        ([Input("w", 10_000, (frag("L1", 9_000),))], [Output(0, 9_000, CHANGE, account="w")], None),
-        ([coin(frag("L1", 10_000))], [Output(0, 11_000, CHANGE, account="w")], None),
+        (
+            [Input("w", 10_000, (frag("L1", 9_000),))],
+            [Output(0, 9_000, CHANGE, account="w", kind="self_custody")],
+            None,
+        ),
+        ([coin(frag("L1", 10_000))], [Output(0, 11_000, CHANGE, account="w", kind="self_custody")], None),
         (
             [coin(frag("L1", 10_000))],
-            [Output(0, 5_000, CHANGE, account="w"), Output(0, 1_000, CHANGE, account="w")],
+            [
+                Output(0, 5_000, CHANGE, account="w", kind="self_custody"),
+                Output(0, 1_000, CHANGE, account="w", kind="self_custody"),
+            ],
             None,
         ),
         ([coin(frag("L1", 10_000))], [Output(0, 9_000, PAY, event="s")], None),
-        ([coin(frag("L1", 10_000))], [Output(0, 9_000, CHANGE, account="w")], Leaving("s", "sell", 9_000)),
-        ([coin(frag("L1", 10_000))], [Output(0, -1, CHANGE, account="w")], None),
-        ([coin(frag("L1", 1), frag("L1", 2, 3))], [Output(0, 2, CHANGE, account="w")], None),
-        ([Input(None, 10_000, (frag("L1", 10_000),))], [Output(0, 9_000, CHANGE, account="w")], None),
-        (
-            [coin(Fragment("L1", 10_000, datetime(2024, 1, 1), "e"))],
-            [Output(0, 9_000, CHANGE, account="w")],
-            None,
-        ),
-        ([coin(frag("L1", 10_000))], [Output(0, 0.0, b"\x6a"), Output(1, 9_000, CHANGE, account="w")], None),  # type: ignore[arg-type]
         (
             [coin(frag("L1", 10_000))],
-            [Output(0, False, b"\x6a"), Output(1, 9_000, CHANGE, account="w")],
+            [Output(0, 9_000, CHANGE, account="w", kind="self_custody")],
+            Leaving("s", "sell", 9_000),
+        ),
+        ([coin(frag("L1", 10_000))], [Output(0, -1, CHANGE, account="w", kind="self_custody")], None),
+        (
+            [coin(frag("L1", 1), frag("L1", 2, 3))],
+            [Output(0, 2, CHANGE, account="w", kind="self_custody")],
             None,
         ),
-        ([coin(frag("L1", 10_000))], [Output(-1, 9_000, CHANGE, account="w")], None),
-        ([coin(frag("L1", 10_000))], [Output(0, 9_000, "chg", account="w")], None),  # type: ignore[arg-type]
-        ([coin(frag("L1", 10_000))], [Output(0, 9_000, PAY, event="s")], Leaving("s", "Sell", 9_000)),  # type: ignore[arg-type]
+        (
+            [Input(None, 10_000, (frag("L1", 10_000),))],
+            [Output(0, 9_000, CHANGE, account="w", kind="self_custody")],
+            None,
+        ),
+        (
+            [coin(Fragment("L1", 10_000, datetime(2024, 1, 1), "e"))],
+            [Output(0, 9_000, CHANGE, account="w", kind="self_custody")],
+            None,
+        ),
+        (
+            [coin(frag("L1", 10_000))],
+            [Output(0, bad(0.0), b"\x6a"), Output(1, 9_000, CHANGE, account="w", kind="self_custody")],
+            None,
+        ),
+        (
+            [coin(frag("L1", 10_000))],
+            [Output(0, bad(False), b"\x6a"), Output(1, 9_000, CHANGE, account="w", kind="self_custody")],
+            None,
+        ),
+        ([coin(frag("L1", 10_000))], [Output(-1, 9_000, CHANGE, account="w", kind="self_custody")], None),
+        ([coin(frag("L1", 10_000))], [Output(0, 9_000, bad("chg"), account="w", kind="self_custody")], None),
+        ([coin(frag("L1", 10_000))], [Output(0, 9_000, PAY, event="s")], Leaving("s", bad("Sell"), 9_000)),
+        ([bad(object())], [Output(0, 1, PAY)], None),
+        ([Input(bad(1), 10_000, ())], [Output(0, 9_000, PAY)], None),
+        (
+            [coin(Fragment("", 10_000, T0, "e"))],
+            [Output(0, 9_000, CHANGE, account="w", kind="self_custody")],
+            None,
+        ),
+        (
+            [coin(Fragment("L1", 10_000, T0, bad(None)))],
+            [Output(0, 9_000, CHANGE, account="w", kind="self_custody")],
+            None,
+        ),
+        ([coin(frag("L1", 10_000))], [Output(0, 9_000, CHANGE, account="w")], None),
+        ([coin(frag("L1", 10_000))], [Output(0, 9_000, PAY, kind="custodial")], None),
+        ([coin(frag("L1", 10_000))], [Output(0, 9_000, PAY, event=bad(7))], None),
+        ([coin(frag("L1", 10_000))], [Output(0, 9_000, PAY, account=bad(5), kind="custodial")], None),
+        ([coin(frag("L1", 10_000))], [bad(object())], None),
+        ([coin(frag("L1", 10_000))], [Output(0, 9_000, PAY, event="s")], bad(("s", "sell", 9_000))),
+        (
+            [coin(frag("L1", 10_000))],
+            [Output(0, 0, b"\x6a", event="s"), Output(1, 9_000, PAY, event="s")],
+            Leaving("s", "sell", 9_000),
+        ),
+        ([coin(frag("L1", 10_000))], [Output(0, 9_000, PAY, event="s")], Leaving(bad(3), "sell", 9_000)),
     ],
 )
 def test_inconsistent_input_raises(
@@ -332,9 +466,19 @@ def test_inconsistent_input_raises(
         trace(tx(inputs, outputs, leaving))
 
 
+def test_a_transaction_that_isnt_a_wallet_tx_raises() -> None:
+    with pytest.raises(EngineError):
+        trace(bad("t1"))
+    with pytest.raises(EngineError):
+        trace(WalletTx("t1", "", (coin(frag("L1", 1)),), ()))
+
+
 def test_an_unknown_fee_treatment_raises() -> None:
     with pytest.raises(EngineError):
-        trace(tx([coin(frag("L1", 10_000))], [Output(0, 9_000, CHANGE, account="w")]), "keep")  # type: ignore[arg-type]
+        trace(
+            tx([coin(frag("L1", 10_000))], [Output(0, 9_000, CHANGE, account="w", kind="self_custody")]),
+            bad("keep"),
+        )
 
 
 KINDS: list[LeavingKind] = ["sell", "spend", "gift_out", "deposit", "transfer"]
@@ -356,12 +500,14 @@ def wallet_txs(draw: st.DrawFn) -> WalletTx:
     if sum(values) > total:
         values = [total]
     kind = draw(st.sampled_from(KINDS))
-    owner = "x" if kind in ("deposit", "transfer") else None
+    owner, owner_kind = {"deposit": ("x", "custodial"), "transfer": ("w2", "self_custody")}.get(
+        kind, (None, None)
+    )
     leaves = draw(st.lists(st.booleans(), min_size=len(values), max_size=len(values)))
     outputs = [
-        Output(v, value, draw(st.sampled_from([PAY, DEST])), account=owner, event="e")
+        Output(v, value, draw(st.sampled_from([PAY, DEST])), account=owner, event="e", kind=bad(owner_kind))
         if leave
-        else Output(v, value, CHANGE, account="w")
+        else Output(v, value, CHANGE, account="w", kind="self_custody")
         for v, (value, leave) in enumerate(zip(values, leaves, strict=True))
     ]
     if draw(st.booleans()):
@@ -371,21 +517,59 @@ def wallet_txs(draw: st.DrawFn) -> WalletTx:
     return tx(inputs, draw(st.permutations(outputs)), leaving)
 
 
-@settings(max_examples=300)
-@given(wallet_txs(), st.randoms())
-def test_output_order_never_changes_the_result(t: WalletTx, rnd: Any) -> None:
-    shuffled = list(t.outputs)
-    rnd.shuffle(shuffled)
-    assert trace(t) == trace(WalletTx(t.txid, t.account, t.inputs, tuple(shuffled), t.leaving))
+def _shuffled(t: WalletTx, rnd: Any) -> WalletTx:
+    outputs = list(t.outputs)
+    rnd.shuffle(outputs)
+    inputs = []
+    for i in t.inputs:
+        parts = list(i.fragments)
+        rnd.shuffle(parts)
+        inputs.append(Input(i.account, i.value, tuple(parts)))
+    rnd.shuffle(inputs)
+    return WalletTx(t.txid, t.account, tuple(inputs), tuple(outputs), t.leaving)
 
 
 @settings(max_examples=300)
-@given(wallet_txs())
-def test_every_output_holds_its_value_and_nothing_is_lost(t: WalletTx) -> None:
-    result = trace(t)
+@given(wallet_txs(), st.randoms(), st.sampled_from(["carry", "dispose"]))
+def test_the_order_of_outputs_inputs_and_lots_never_changes_the_result(
+    t: WalletTx, rnd: Any, fee_treatment: FeeTreatment
+) -> None:
+    assert trace(t, fee_treatment) == trace(_shuffled(t, rnd), fee_treatment)
+
+
+@settings(max_examples=300)
+@given(wallet_txs(), st.randoms(), st.sampled_from([None, "w2"]))
+def test_a_foreign_input_blocks_whatever_the_order(t: WalletTx, rnd: Any, owner: str | None) -> None:
+    foreign = Input(owner, 1_000, () if owner is None else (frag("F1", 1_000),))
+    with_foreign = WalletTx(t.txid, t.account, (*t.inputs, foreign), t.outputs, t.leaving)
+    result = trace(with_foreign)
+    assert isinstance(result, Blocked)
+    assert result.reason == ("shared" if owner is None else "several_accounts")
+    if owner is not None:
+        assert trace(_shuffled(with_foreign, rnd)) == result
+
+
+@settings(max_examples=300)
+@given(wallet_txs(), st.sampled_from(["carry", "dispose"]))
+def test_every_output_holds_its_value_and_nothing_is_lost(t: WalletTx, fee_treatment: FeeTreatment) -> None:
+    result = trace(t, fee_treatment)
+    paid = [o for o in t.outputs if o.value > 0]
     if isinstance(result, Blocked):
         assert result.reason in {"identical_outputs", "fee_only"}
+        if result.reason == "identical_outputs":
+            keys = [(o.value, o.script) for o in paid]
+            assert len(set(keys)) < len(keys)
         return
+    # Lots leave oldest first: the leaving outputs (canonical order), then the fee, then the change.
+    order = sorted((o for o in paid if o.event), key=lambda o: (-o.value, o.script))
+    order_change = sorted((o for o in paid if not o.event), key=lambda o: (-o.value, o.script))
+    held = dict(result.outputs)
+    taken = (
+        [f for o in order for f in held[o.vout]]
+        + list(result.fee)
+        + [f for o in order_change for f in held[o.vout]]
+    )
+    assert [f.lot for f in taken] == sorted((f.lot for f in taken), key=lambda lot: (_entered(t, lot), lot))
     values = {o.vout: o.value for o in t.outputs}
     for vout, parts in result.outputs:
         assert sum(f.sats for f in parts) == values[vout]
@@ -400,10 +584,14 @@ def test_every_output_holds_its_value_and_nothing_is_lost(t: WalletTx) -> None:
     for f in result.fee:
         out[f.lot] = out.get(f.lot, 0) + f.sats
     assert out == spent
-    carried = t.leaving is None or t.leaving.kind in ("deposit", "transfer")
+    carried = (t.leaving is None or t.leaving.kind in ("deposit", "transfer")) and fee_treatment == "carry"
     assert bool(result.carries) == (bool(result.fee) and carried)
     if result.carries:
         assert [(c.lot, c.sats) for c in result.carries] == lots(result.fee)
-        held = dict(result.outputs)
         for c in result.carries:
             assert any(f.lot == c.onto for f in held[c.vout])
+
+
+def _entered(t: WalletTx, lot: str) -> tuple[datetime, str]:
+    f = next(f for i in t.inputs for f in i.fragments if f.lot == lot)
+    return (f.entered, f.event)
