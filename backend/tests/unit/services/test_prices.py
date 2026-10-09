@@ -133,6 +133,28 @@ def test_gaps_and_outliers_are_reported_per_series(sources: dict[str, Any]) -> N
     assert [o.day.day for o in got.outliers["EUR"]] == [19]
 
 
+def test_a_current_dump_is_not_stale(sources: dict[str, Any]) -> None:
+    got = run()  # the dump's last priced day is Aug 19; the refresh's first incomplete day is Aug 22
+    assert (got.dump_through, got.dump_stale) == (date(2011, 8, 19), False)
+
+
+@pytest.mark.parametrize(
+    ("last", "stale"),
+    [(TODAY - timedelta(days=7), False), (TODAY - timedelta(days=8), True), (None, True)],
+)
+def test_a_dump_that_ends_more_than_a_week_back_is_flagged_stale(
+    sources: dict[str, Any], monkeypatch: pytest.MonkeyPatch, last: date | None, stale: bool
+) -> None:
+    vwap = (
+        []
+        if last is None
+        else [DailyPrice(last, "USD", Decimal("1.00"), "vwap", "bitcoincharts:bitstampUSD")]
+    )
+    monkeypatch.setattr(fetch, "download_dump", lambda *args: (vwap, "hash"))
+    got = run()
+    assert (got.dump_through, got.dump_stale) == (last, stale)
+
+
 def test_days_where_the_two_usd_sources_disagree_are_flagged(sources: dict[str, Any]) -> None:
     # the VWAPs are 11 and 20; Bitstamp's typical price is 99 on both days. Aug 20 and 21 have no VWAP.
     got = run().mismatches
