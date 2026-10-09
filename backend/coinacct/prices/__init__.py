@@ -15,9 +15,10 @@ from decimal import Context, Decimal, Inexact, InvalidOperation, Overflow, local
 from itertools import pairwise
 from typing import Final, Literal
 
-# ADR 0007: the trade VWAP; (H+L+C)/3 where there are no trades; or, for display, USD at the ECB rate
-Method = Literal["vwap", "typical", "fx"]
-METHODS: Final = ("vwap", "typical", "fx")
+# ADR 0007: the trade VWAP; (H+L+C)/3 where there are no trades; for display, USD at the ECB rate; or
+# a value the user imported from a CSV (the fallback when a source disappears, T-304)
+Method = Literal["vwap", "typical", "fx", "import"]
+METHODS: Final = ("vwap", "typical", "fx", "import")
 CURRENCIES: Final = ("USD", "EUR", "GBP")  # USD for tax figures; the others for display (ADR 0007)
 CENT: Final = Decimal("0.01")
 # Our own context for the little arithmetic here, whatever the caller's: exact, or an error.
