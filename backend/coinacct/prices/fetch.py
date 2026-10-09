@@ -18,11 +18,15 @@ T-302, T-303, T-305).
   declared length is an error, not an end, and so is a TLS close without close_notify; the parsers
   still validate what they read (T-304).
 
-Fetching happens only when the user asks for a refresh (services). Nothing here runs on import.
+The three sources' downloads (`download_dump`, `download_ohlc`, `download_ecb`) are at the end. Their
+requests are fixed by the calendar alone: the same for every user (T-301). Fetching happens only when
+the user asks for a refresh (services). Nothing here runs on import.
 """
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import http.client
 import io
 import ipaddress
@@ -30,11 +34,18 @@ import secrets
 import socket
 import ssl
 import time
+import zipfile
+import zlib
 from collections.abc import Buffer, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from typing import Any, Final, NoReturn, cast
 from urllib.parse import urlsplit
+
+from coinacct.prices import CURRENCIES, DailyPrice
+from coinacct.prices.bitstamp import typical_by_day, vwap_by_day
+from coinacct.prices.fx import Rates, ecb_rates
 
 HOSTS: Final = frozenset({"api.bitcoincharts.com", "www.bitstamp.net", "www.ecb.europa.eu"})  # ADR 0007
 # Tor Browser's User-Agent (Firefox 140 ESR): a common browser's, not a library's or this app's. Review
@@ -347,3 +358,125 @@ def _recv(sock: socket.socket, timeout: Callable[[], float] | None, n: int) -> b
 
 def _fail(message: str) -> NoReturn:
     raise FetchError(message)
+
+
+# --- the three sources (ADR 0007). Every URL is a constant or built from the calendar alone.
+
+DUMP_URL: Final = "https://api.bitcoincharts.com/v1/csv/bitstampUSD.csv.gz"
+OHLC_URL: Final = "https://www.bitstamp.net/api/v2/ohlc/btc{currency}/?step=86400&limit=1000&start={start}"
+ECB_URL: Final = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.zip"
+ECB_MEMBER: Final = "eurofxref-hist.csv"
+OHLC_FIRST: Final = date(2011, 8, 18)  # Bitstamp's first trading day: every page starts on this grid
+OHLC_PAGE_DAYS: Final = 1000  # Bitstamp's largest `limit`
+DUMP_MAX: Final = 4 << 30  # the whole trade history, compressed: a few hundred MB today
+DUMP_DEADLINE: Final = 6 * 3600.0  # seconds: a slow Tor circuit can need hours for it
+OHLC_MAX: Final = 1 << 20  # one page of 1000 candles is about 150 kB
+ECB_MAX: Final = 16 << 20  # the zip is well under 1 MB
+ECB_CSV_MAX: Final = 64 << 20  # and its one file a few MB, unzipped
+
+
+class _Hashed(io.RawIOBase):
+    """A raw stream that hashes what passes through it (the content hash, T-303)."""
+
+    def __init__(self, raw: Body) -> None:
+        super().__init__()
+        self._raw, self.sha256 = raw, hashlib.sha256()
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Buffer) -> int:
+        n = self._raw.readinto(buffer)
+        self.sha256.update(memoryview(buffer)[:n])
+        return n
+
+
+def download_dump(
+    complete_before: date, proxy: Proxy | None, cancelled: Callable[[], bool]
+) -> tuple[list[DailyPrice], str]:
+    """The trade dump's daily VWAPs, streamed (it is large), and the SHA-256 of the file as fetched."""
+    with open_url(DUMP_URL, proxy, max_bytes=DUMP_MAX, deadline=DUMP_DEADLINE) as body:
+        hashed = _Hashed(body)
+        with gzip.GzipFile(fileobj=io.BufferedReader(hashed)) as unzipped:
+            text = io.TextIOWrapper(unzipped, encoding="ascii", newline="")
+            try:
+                prices = vwap_by_day(_watch(text, cancelled), complete_before)
+            except (OSError, EOFError, UnicodeDecodeError, zlib.error) as e:
+                _fail(
+                    f"api.bitcoincharts.com: the dump isn't a valid gzip of ASCII text ({type(e).__name__})"
+                )
+        return prices, hashed.sha256.hexdigest()
+
+
+def ohlc_pages(complete_before: date) -> list[str]:
+    """Every OHLC page's start for one pair, from Bitstamp's first day to before `complete_before`: a
+    fixed grid, so the request set depends on nothing but the date (T-301)."""
+    starts = []
+    day = OHLC_FIRST
+    while day < complete_before:
+        starts.append(str(int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp())))
+        day = date.fromordinal(day.toordinal() + OHLC_PAGE_DAYS)
+    return starts
+
+
+def download_ohlc(
+    currency: str, complete_before: date, proxy: Proxy | None, cancelled: Callable[[], bool]
+) -> tuple[list[DailyPrice], str]:
+    """Every complete day's typical price for BTC in `currency`, page by page, and the SHA-256 of the
+    pages as fetched, in order. A page holds only its own days, in order, and no day twice."""
+    if currency not in CURRENCIES:
+        _fail(f"unsupported currency {currency!r}")
+    out: list[DailyPrice] = []
+    sha = hashlib.sha256()
+    starts = ohlc_pages(complete_before)
+    for i, start in enumerate(starts):
+        if cancelled():
+            _fail("www.bitstamp.net: the refresh was cancelled")
+        url = OHLC_URL.format(currency=currency.lower(), start=start)
+        with open_url(url, proxy, max_bytes=OHLC_MAX) as body:
+            data = body.read()
+        sha.update(data)
+        first = datetime.fromtimestamp(int(start), UTC).date()
+        until = (
+            datetime.fromtimestamp(int(starts[i + 1]), UTC).date() if i + 1 < len(starts) else complete_before
+        )
+        try:
+            page = typical_by_day(data.decode("ascii"), currency, until)
+        except UnicodeDecodeError:
+            _fail("www.bitstamp.net: an OHLC page isn't ASCII")
+        if any(p.day < first for p in page):
+            _fail(f"www.bitstamp.net: an OHLC page from {first} holds an earlier day")
+        out.extend(page)
+    return out, sha.hexdigest()
+
+
+def download_ecb(proxy: Proxy | None, cancelled: Callable[[], bool]) -> tuple[Rates, str]:
+    """The ECB's reference rates for USD and the display currencies, from its zipped history, and the
+    SHA-256 of the zip as fetched."""
+    if cancelled():
+        _fail("www.ecb.europa.eu: the refresh was cancelled")
+    with open_url(ECB_URL, proxy, max_bytes=ECB_MAX) as body:
+        data = body.read()
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            info = archive.getinfo(ECB_MEMBER)
+            if len(archive.infolist()) != 1:
+                _fail("www.ecb.europa.eu: the zip isn't the one expected file")
+            with archive.open(info) as member:  # bounded by what is read, not the header's claim
+                text = member.read(ECB_CSV_MAX + 1)
+    except (zipfile.BadZipFile, KeyError, OSError, EOFError) as e:
+        _fail(f"www.ecb.europa.eu: the rates aren't a valid zip ({type(e).__name__})")
+    if len(text) > ECB_CSV_MAX:
+        _fail("www.ecb.europa.eu: the rates file is larger than allowed")
+    try:
+        lines = text.decode("ascii").splitlines()
+    except UnicodeDecodeError:
+        _fail("www.ecb.europa.eu: the rates file isn't ASCII")
+    return ecb_rates(lines), hashlib.sha256(data).hexdigest()
+
+
+def _watch(lines: Iterator[str], cancelled: Callable[[], bool], every: int = 100_000) -> Iterator[str]:
+    for n, line in enumerate(lines):
+        if n % every == 0 and cancelled():
+            _fail("the refresh was cancelled")
+        yield line
