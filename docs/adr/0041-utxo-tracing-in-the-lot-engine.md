@@ -7,7 +7,7 @@ amends: 0008, 0009, 0021
 
 # 0041: How the lot engine traces lots through self-custody coins
 
-_This ADR amends ADR 0008 §2 and §6, ADR 0009 where it describes self-custody movements, and ADR 0021 §1 and §3 for self-custody wallets. It adds to PLAN §2's data model. It decides how the already-decided rule, "lots follow the spent coin" (ADR 0008 §2, PLAN §7), is applied in v1. ADR 0040 is taken by open PR #278._
+_This ADR amends ADR 0008 §2 and §6, ADR 0009 where it describes self-custody movements and fees (a self-custody network fee is never split by role or subtracted from proceeds), and ADR 0021 §1 and §3 for self-custody wallets. It adds to PLAN §2's data model. It decides how the already-decided rule, "lots follow the spent coin" (ADR 0008 §2, PLAN §7), is applied in v1. ADR 0040 is taken by open PR #278._
 
 ## Context and Problem Statement
 
@@ -53,7 +53,8 @@ This covers a transaction that spends coins from one coin-traced self-custody ac
 
 The rules:
 1. **The spent coins' lots are taken oldest first,** across all the coins the transaction spends. Lots acquired at the same moment are ordered by their event id; this tie-break applies everywhere this ADR says "oldest first".
-2. **The leaving outputs take lots first. Then the fee. The change takes what is left.**
+2. **The leaving outputs take lots first. Then the fee. The change takes what is left.** The fee is the sum of all inputs minus the sum of all outputs. The change never bears any of it.
+   - **The leaving event's sats must equal its outputs' sats** (what the recipient gets, not counting the fee). A mismatch blocks the report.
 3. **The canonical order:** where several outputs share a role (two change outputs, say), they are filled one after another, largest first, then by the output script. Output position never decides.
 4. **The fee (ADR 0009):**
    - **A spend or sale:** the fee's sats are part of the disposal (their basis is in it).
@@ -93,7 +94,7 @@ Each of these blocks the report with a message naming the transaction or account
 - **Switching back:** switching a wallet from whole-wallet FIFO back to coin tracing while it holds coins.
 - **Mixed transfers:** a transfer between a whole-wallet FIFO wallet and a coin-traced wallet, in either direction.
 - **No tracking start date:** a self-custody account without one (§4).
-- **Unrecorded receipts:** the part of a coin sent from someone else, arriving after the wallet's tracking start date (§4), that its links don't cover. This applies to coin-traced wallets.
+- **Unrecorded receipts:** the part of a coin sent from someone else, arriving after the wallet's tracking start date (§4), that its links don't cover. For a whole-wallet FIFO wallet: such a coin whose sats no recorded arrival event covers.
 
 ### 4. Lots on no coin: the pool
 - **The pool** is wallet lots that aren't linked to any coin, such as a balance from before the wallet was tracked.
@@ -112,21 +113,21 @@ Each of these blocks the report with a message naming the transaction or account
   - **After-the-fact edits:** the audit trail and the report mark a link edit made after its coin was spent, and a tracking start date set or changed after a coin it reclassifies arrived.
 - **A link is a fact,** not a choice of lots, so it is never flagged "late".
 - **Figures use the current result.** If a later edit changes an earlier transaction's lots, the report shows it.
-- **A report's input hash** covers the engine's whole input as `services/` builds it (T-503): events, prices, the change-log records of links, tracking start dates and the whole-wallet FIFO setting (with edits, removals and times), and the chain data each wallet transaction carries (txid, block hash and height, position in block, block time, owned inputs and outputs with value, script and role).
+- **A report's input hash** covers the engine's whole input as `services/` builds it (T-503): events, prices, the change-log records of links, tracking start dates and the whole-wallet FIFO setting (with edits, removals and times), and the chain data each wallet transaction carries (txid, block hash and height, position in block, block time, and every input and output as §6 lists them).
 - **Whole-wallet FIFO** (ADR 0008 §2; ADR 0021 §3's strict-FIFO switch) is an account setting with an effective-from time.
   - **What it does:** from that time, the wallet ignores coins and takes lots by FIFO, as the engine does today.
   - **A late change:** changing it after a transaction it affects is flagged late (T-508). This narrows ADR 0021 §1's "never late" for this setting.
 - **Unconfirmed transactions:** any transaction below the confirmation threshold that touches a wallet coin blocks the report, as ADR 0009 and PLAN §7 say (T-207). That includes coins created by traced transactions. A reorged-out transaction's links and draws go to the review queue (T-506).
 - **The 2025 opening allocation** (ADR 0008 §6) covers basis not tied to linked coins.
   - **On 2025-01-01, it replaces** the undrawn pool and every fragment on the coins then held that traces back to a pool draw or a placeholder, through traced transactions (change included). Fragments that trace back to a link are kept.
-  - **It fills those coins** oldest coin first (chain order, then the canonical order), allocated lots oldest first, each coin to its value. A shortfall is a placeholder; a surplus shows the leftover warning.
-  - **Lateness:** it is late if recorded after the account's first sale, disposition or transfer of BTC on or after 2025-01-01, or after the 2025 return's due date if that is earlier (Rev. Proc. 2024-28 §5.02).
+  - **It fills those coins** oldest coin first (chain order, then the canonical order), allocated lots oldest first, each coin up to its value less the fragments it keeps. A shortfall is a placeholder; a surplus shows the leftover warning.
+  - **Lateness:** it is late if recorded after the user's first sale, disposition or transfer of BTC, from any account, on or after 2025-01-01, or after the 2025 return's due date if that is earlier (Rev. Proc. 2024-28 §5.02). Taking the user's first such event, not each account's, warns in every case a narrower reading would.
 
 ### 6. Records in other documents
 - **This is a stated tax position** (ADR 0008 §2), printed with the reports.
 - **PLAN §2, §7 and §8, and THREAT_MODEL T-408, T-503, T-506, T-508 and T-509** record these rules in this PR. The implementing PR adds tests.
 - **#271's refusal is lifted.**
-- **The engine's input:** each wallet event carries its owned inputs and outputs with their roles and the transaction's chain position, from the chain cache. `services/` builds them; the engine stays pure. Each account carries its kind (`self_custody | custodial`) and its tracking start date.
+- **The engine's input:** each wallet event carries every input (value, and whether the account owns it) and every output (value, script, owning account if any, and role), and the transaction's chain position, from the chain cache. `services/` builds them; the engine stays pure. Each account carries its kind (`self_custody | custodial`) and its tracking start date.
 
 ### Consequences
 
