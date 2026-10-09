@@ -538,6 +538,8 @@ def download_reference(
     fetched, each prefixed with its number and length. Each next page is the fixed URL plus only the
     response's checked `next_page_token`; the server's `next_page_url` is never followed. The pages are
     capped by what the history can fill, and one deadline and one byte limit cover them all (T-304)."""
+    if complete_before <= FIRST_DAY:
+        _fail(f"{REFERENCE_HOST}: the clock's date is before Coin Metrics' first day")
     first = REFERENCE_URL.format(end=(complete_before - timedelta(days=1)).isoformat())
     # One circuit for the whole download, retries included: a 429 is waited out from the same exit, not
     # dodged from another (ADR 0039). Still apart from the user's other Tor traffic.

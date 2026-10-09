@@ -110,8 +110,43 @@ def test_the_reference_rates_own_gaps_are_reported_though_bitstamp_fills_them(
     sources: dict[str, Any],
 ) -> None:
     got = run()  # Aug 19 has no reference value: Bitstamp prices it, and the gap is still reported
-    assert [(g.first.day, g.last.day) for g in got.reference_gaps] == [(19, 19)]
+    # the fixture's rate starts in August 2011, not on 2010-07-18: that late start is a gap too
+    assert [(g.first, g.last) for g in got.reference_gaps] == [
+        (date(2010, 7, 18), date(2011, 8, 17)),
+        (date(2011, 8, 19), date(2011, 8, 19)),
+    ]
     assert got.gaps["USD"] == []
+
+
+START, LATE = date(2010, 7, 18), date(2011, 8, 17)  # the rate's first day; the fixture's day before
+
+
+@pytest.mark.parametrize(
+    ("prices", "expected"),
+    [
+        # priced on the 18th and 20th: the late start, the 19th between, and the 21st at the end
+        (("100", None, "40", None), [(START, LATE), (date(2011, 8, 19),) * 2, (date(2011, 8, 21),) * 2]),
+        ((None, None, None, None), [(START, date(2011, 8, 21))]),  # nothing at all: every requested day
+        (("100", "99", "40", "33"), [(START, LATE)]),  # complete in August: only the late start
+    ],
+)
+def test_reference_gaps_cover_every_requested_day_to_the_last_complete_one(
+    sources: dict[str, Any], prices: tuple[str | None, ...], expected: list[tuple[date, date]]
+) -> None:
+    sources[REFERENCE] = cm(*prices)
+    assert [(g.first, g.last) for g in run().reference_gaps] == expected
+
+
+def test_the_reference_rates_own_jumps_are_reported_though_a_fill_sits_between(
+    sources: dict[str, Any],
+) -> None:
+    # 100 on the 18th, Bitstamp's 99 fills the 19th, 160 on the 20th: in the combined series the jump
+    # is split by the fill (99 -> 160 is +62 %), but the rate's own 100 -> 160 must show as well
+    sources[REFERENCE] = cm("100", None, "160", "161")
+    got = run()
+    assert [(o.day.day, o.previous, o.price) for o in got.reference_outliers] == [
+        (20, Decimal("100.00"), Decimal("160.00"))
+    ]
 
 
 def test_a_current_reference_rate_is_not_stale(sources: dict[str, Any]) -> None:
@@ -269,6 +304,8 @@ def test_a_refresh_cancelled_during_a_download_ends_cancelled_not_failed(
         (fetch.ECB_URL, b"PK\x05\x06" + b"\x00" * 18, FetchError, "valid zip"),  # empty: no member
         (fetch.OHLC_URL.format(currency="usd", start=AUG18), b"\xff", FetchError, "isn't ASCII"),
         (fetch.OHLC_URL.format(currency="usd", start=AUG18), b"{}", PriceError, "expected data"),
+        (REFERENCE, b"\xff", FetchError, "isn't ASCII"),  # downloaded last: still all or nothing
+        (REFERENCE, b"{}", PriceError, "expected data"),
     ],
 )
 def test_any_bad_source_fails_the_whole_refresh(
@@ -382,6 +419,10 @@ def test_the_downloads_stop_once_cancelled_and_refuse_an_unknown_pair() -> None:
         fetch.download_ohlc("USD", TODAY, None, lambda: True)
     with pytest.raises(fetch.Cancelled, match=r"www\.ecb\.europa\.eu: the refresh was cancelled"):
         fetch.download_ecb(None, lambda: True)
+    with pytest.raises(fetch.Cancelled, match=r"community-api\.coinmetrics\.io: the refresh was cancelled"):
+        fetch.download_reference(TODAY, None, lambda: True)  # the real open_url: before it connects
+    with pytest.raises(FetchError, match="before Coin Metrics' first day"):
+        fetch.download_reference(date(2010, 7, 18), None, lambda: False)
     with pytest.raises(FetchError, match="unsupported currency"):
         fetch.download_ohlc("JPY", TODAY, None, lambda: False)
 
