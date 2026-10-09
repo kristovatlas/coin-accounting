@@ -3,7 +3,7 @@ T-701, TB6)."""
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Context, Decimal, Inexact, Rounded, localcontext
 
 import pytest
@@ -15,8 +15,8 @@ from coinacct.prices.fx import to_display
 TODAY = date(2026, 10, 8)  # the caller's UTC date
 
 
-def parse(data: bytes, today: date = TODAY) -> dict[str, list[DailyPrice]]:
-    return csv_import.parse(data, today)
+def parse(data: bytes, complete_before: date = TODAY) -> dict[str, list[DailyPrice]]:
+    return csv_import.parse(data, complete_before)
 
 
 def row(day: str, currency: str, price: str) -> DailyPrice:
@@ -123,6 +123,11 @@ def test_the_first_and_last_allowed_days_and_the_largest_price_are_accepted() ->
             row("2026-10-07", "USD", "999999999999999.99"),
         ]
     }
+
+
+def test_the_callers_date_must_be_a_plain_date_not_a_datetime() -> None:
+    with pytest.raises(TypeError, match="complete_before must be a date"):
+        parse(f"{HEADER}\n".encode(), datetime(2026, 10, 8, tzinfo=UTC))
 
 
 def test_the_currencies_come_back_in_alphabetical_order() -> None:

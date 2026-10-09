@@ -10,7 +10,7 @@ The format is strict and documented, so nothing is guessed:
   or `\\r\\n`, the last one too, so a file cut off mid-row is refused; blank lines may only end the
   file.
 - **`date`** is a UTC day (`YYYY-MM-DD`), from FIRST_DAY (Bitcoin's first block) up to the day
-  before the caller's `today`: a typo in the year, or a day not yet over, is refused.
+  before the caller's `complete_before`: a typo in the year, or a day not yet over, is refused.
 - **`currency`** is one of `CURRENCIES`, and **`price`** an amount above zero with at most two
   decimals and 15 integer digits: the user's own value, never rounded.
 - **No day twice for a currency.** Rows may come in any order; each currency's series is returned
@@ -20,7 +20,7 @@ A file over MAX_BYTES or MAX_ROWS, a byte outside printable ASCII, or any bad ro
 file, naming the line, before any value is returned (T-304, T-701). Imported prices carry the method
 "import", so reports can flag them as user-supplied (T-303); a display price converted from one
 keeps `SOURCE` in its own source (`fx.to_display`). The module can't read the clock (architecture
-§2), so the caller passes `today`.
+§2), so the caller passes `complete_before`: its UTC date, `datetime.now(UTC).date()`.
 """
 
 from __future__ import annotations
@@ -42,12 +42,15 @@ _NOT_ALLOWED: Final = re.compile(rb"[^\x20-\x7e\n\r]")  # one C-speed scan, not 
 _PRICE: Final = re.compile(r"[0-9]{1,15}(\.[0-9]{1,2})?")
 
 
-def parse(data: bytes, today: date) -> dict[str, list[DailyPrice]]:
-    """Each currency's imported series, sorted by day, from an uploaded CSV file. `today` is the
-    caller's UTC date: only days before it are complete, so only those can be priced."""
+def parse(data: bytes, complete_before: date) -> dict[str, list[DailyPrice]]:
+    """Each currency's imported series, sorted by day, from an uploaded CSV file. `complete_before` is
+    the caller's UTC date: only days before it are complete, so only those can be priced. It must be a
+    plain date, as for the downloaded sources: a datetime is a date too, but not a day."""
+    if type(complete_before) is not date:
+        raise TypeError("complete_before must be a date (the UTC day), not a datetime")
     out: dict[str, dict[date, DailyPrice]] = {}
     for n, line in enumerate(_lines(data)[1:], 2):
-        p = _row(line, n, today)
+        p = _row(line, n, complete_before)
         series = out.setdefault(p.currency, {})
         if p.day in series:
             _fail(f"line {n}: {p.currency} on {p.day} is priced twice")
@@ -76,13 +79,13 @@ def _lines(data: bytes) -> list[str]:
     return lines
 
 
-def _row(line: str, n: int, today: date) -> DailyPrice:
+def _row(line: str, n: int, complete_before: date) -> DailyPrice:
     fields = line.split(",", 3)  # bounded: a row of a million commas is never split up
     if len(fields) != 3:
         _fail(f"line {n}: expected date,currency,price")
     text_day, currency, text_price = fields
     day = _day(text_day, n)
-    if not FIRST_DAY <= day < today:
+    if not FIRST_DAY <= day < complete_before:
         _fail(f"line {n}: {day} is not a past day from {FIRST_DAY} on")
     if currency not in CURRENCIES:
         _fail(f"line {n}: the currency must be one of {', '.join(CURRENCIES)}")

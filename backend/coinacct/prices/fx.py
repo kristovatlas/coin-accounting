@@ -29,6 +29,7 @@ DISPLAY: Final = ("EUR", "GBP")  # every display currency, always converted toge
 MAX_RATE_AGE: Final = timedelta(days=7)  # the ECB skips weekends and TARGET holidays, never a week
 _SCALE: Final = 10**6
 MAX_RATE: Final = 999_999_999_999  # 999999.999999 per euro, the most the CSV's rate pattern can hold
+_MAX_RATE_TEXT: Final = f"{MAX_RATE // _SCALE}.{MAX_RATE % _SCALE:06d}"  # as the CSV writes a rate
 _COLUMNS: Final = ("USD", *(c for c in DISPLAY if c != "EUR"))  # EUR is the base: no column
 _RATE: Final = re.compile(r"([0-9]{1,6})\.([0-9]{1,6})")
 _DAY: Final = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
@@ -104,7 +105,9 @@ def to_display(usd: Sequence[DailyPrice], rates: Rates) -> list[DailyPrice]:
         if type(day) is not date or not isinstance(row, Mapping):  # a datetime is a date too
             _fail("the rates must map each day (a date) to its currencies' rates")
         if not all(type(c) is str and type(v) is int and 0 < v <= MAX_RATE for c, v in row.items()):
-            _fail(f"{day}: a rate must be a positive integer scaled by 10^6, at most 999999.999999 per euro")
+            _fail(
+                f"{day}: a rate must be a positive integer scaled by 10^6, at most {_MAX_RATE_TEXT} per euro"
+            )
     for before, p in zip((None, *usd), usd, strict=False):
         if p.currency != "USD":  # DailyPrice already refuses a USD price made by "fx"
             _fail(f"{p.day}: expected a USD price, got {p.currency}")
