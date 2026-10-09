@@ -38,15 +38,19 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
     what the standing method would have had left after the earlier late choices were disregarded, not
     after they were applied. In the replay, an on-time choice naming lots the replay doesn't hold in
     full there falls back, whole, to the standing method. The warning's lot ids are the replay's (a lot
-    moved in the replay has its own `lot@transfer` id), and each figure carries its own basis and dates.
-    The replay holds the same sats in every account as the real run, so the standing method is never
-    short there; it **stops** wherever the two would part: when the runs disagree on whether a
+    moved in the replay has its own `lot@transfer` id, which can equal a real-run id with other sats and
+    basis), and each figure carries its own basis and dates: they are never keys into the `Result`.
+    The replay holds the same sats in every account as the real run (checked after every event, for
+    the accounts it touched), so the standing method is never short there; it **stops** wherever the
+    two would part: when the runs disagree on whether a
     withdrawal creates a lot for unrecorded sats (one may count an account's lots as recorded and the
     other not), or when the replay can't apply an event at all (a fee that would use up the last sats
     of a gift's part). `Result.replay_stopped` then names the event, and every later late choice is
     judged and figured on the lots as the user's choices left them, its warning marked
     `replayed=False`: a late choice that matches the user's lots but not what the replay would have
-    held is then not warned about. Reports must show a stopped replay (ADR 0040).
+    held is then not warned about. Reports must show a stopped replay (ADR 0040). A late choice at the
+    very event the replay stops at is still figured in the replay (its state before the event), so
+    `replayed=True`; dust the replay couldn't carry shows as parts with nothing arriving.
 - **Splits are exact.** Bases and proceeds are split by sats with `domain.money.share`, always as a share
   of what remains, and the last part takes the remainder. So every split adds up to the whole, to the
   cent. All money arithmetic runs in the fixed `domain.money` context (T-502).
@@ -425,8 +429,9 @@ class _Engine:
 
     def _follow(self, event: Event) -> None:
         """Apply `event` to the replay too, after the real run accepted it. An event the replay can't
-        apply, or one where only one of the runs creates a lot for unrecorded sats, stops the replay
-        there: so while it runs, it holds the same sats in every account as the real run."""
+        apply, or one after which the two runs hold different sats in an account it touched (only one
+        created a lot for unrecorded sats, say), stops the replay there. Every event is checked, so
+        while the replay runs it holds the same sats in every account as the real run."""
         shadow = self._shadow
         if shadow is None:
             return
@@ -440,8 +445,12 @@ class _Engine:
         except EngineError:
             self._shadow, self._replay_stopped = None, event.id
             return
-        if len(shadow._created) != len(self._created):  # one run made a lot the other didn't
+        accounts = {event.account, event.to} if isinstance(event, Transfer) else {event.account}
+        if any(shadow._held(a) != self._held(a) for a in accounts):
             self._shadow, self._replay_stopped = None, event.id
+
+    def _held(self, account: str) -> int:
+        return sum(o.sats for o in self._open.get(account, []))
 
     def _acquire(self, a: Acquisition) -> None:
         if a.kind not in ACQUISITION_KINDS:
@@ -522,8 +531,8 @@ class _Engine:
         _check_moment(e.identified_at, f"event {e.id!r}: its identification time")
         picks = self._checked_picks(e, e.picks)
         if e.identified_at > e.at:
-            judge = self._shadow or self  # the replay, or these lots once it has stopped
-            # the same sats as the real run (see _follow), so never short: valid picks cover the sats
+            judge = self._shadow if self._shadow is not None else self  # these lots once it has stopped
+            # the same sats as the real run (_follow checks it), so never short: valid picks cover them
             standing, _ = judge._standing(e.account, e.sats)
             if _merged(picks) != _merged(standing):
                 return picks, 0, _Late(judge, tuple(standing), judge is not self)

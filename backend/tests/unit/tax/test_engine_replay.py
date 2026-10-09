@@ -210,3 +210,27 @@ def test_without_late_choices_the_replay_changes_nothing() -> None:
     result = run(events)
     assert result.late == () and result.replay_stopped is None
     assert [a.lot for a in result.allocations] == ["b3", "b1"]
+
+
+def test_a_late_choice_at_the_event_the_replay_stops_at_is_still_figured_in_the_replay() -> None:
+    # w holds b1 (2 sats), a gift g1 (1 sat) and b2. A late carry deposit of 3 sats with a 2-sat fee
+    # chooses b2: fine for the user. In the replay FIFO takes b1 and g1, and the fee would use up g1's
+    # only sat: the replay can't carry a gift's basis, so it stops at d. The warning is figured on the
+    # replay's lots just before d (replayed): g1 shows as its own part with nothing arriving
+    gift = Acquisition(
+        "g1", "w", date(2024, 1, 2), "gift_in", 1, D("1.00"), fmv=D("1.00"), donor_acquired=date(2023, 1, 1)
+    )
+    on = date(2025, 3, 2)
+    deposit = Transfer(
+        "d", "w", "x", on, noon(on), "deposit", 3, fee_sats=2, picks=(Pick("b2", 3),), identified_at=LATE
+    )
+    events: list[Event] = [lot("b1", 1, "1.00"), gift, lot("b2", 3, "3.00"), deposit]
+    events[0] = Acquisition("b1", "w", date(2024, 1, 1), "buy", 2, D("1.00"))
+    result = run(events)
+    assert result.replay_stopped == "d"
+    assert len(result.late) == 1 and result.late[0].replayed
+    assert [(m.lot, m.sats) for m in result.late[0].standing if isinstance(m, Moved)] == [
+        ("b1", 1),
+        ("g1", 0),
+    ]
+    assert [m.lot for m in result.moves] == ["b2"]  # the user's choice moved b2

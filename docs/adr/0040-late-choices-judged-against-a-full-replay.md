@@ -31,23 +31,24 @@ Chosen option: 2, the owner's decision on #238 (2026-10-09).
 - **The figures shown:** the replay's.
 - **What still stands:** the user's choice is still used, and the warning is still warn-only (ADR 0008 §4).
 - **An on-time choice the replay can't follow:** it names lots the replay doesn't hold in full, so the replay uses the standing method for all of it.
-- **The replay always holds the same sats as the real run.** It stops wherever the two would part, and the result names that event:
+- **The replay always holds the same sats as the real run.** After every event the engine compares the sats in each account the event touched. It stops wherever the two would part, and the result names that event:
   - **When the runs disagree on creating a lot:** one counts an account's lots as recorded and the other doesn't, so a withdrawal would create a lot for unrecorded sats in only one of them.
   - **When the replay can't apply an event:** for example, a fee that would use up the last sats of a gift's part.
   - **Every later late choice:** judged and figured on the user's lots, and marked as such. A late choice that matches the user's lots, but not what the replay would have held, is then not warned about.
   - **Reports must show a stopped replay,** with the event it stopped at (M7).
+  - **A late choice at that very event** is still figured in the replay, on its state just before the event.
 - **Lot ids:** the warning's lot ids are the replay's. Each figure carries its own basis and dates.
-- **This is a stated tax position** (ADR 0009). It is printed with the reports.
+- **This is a stated tax position** (like ADR 0008's for self-custody). It is printed with the reports.
 
 ### Consequences
 
 - **Good:** a warning shows what the IRS would most likely compute if it disregarded every late choice, not one that depends on which earlier late choices the user made.
 - **Bad:** the engine processes the events twice. It is a pure in-memory computation, so the cost is CPU only.
-- **Bad:** a warning may name a lot id (`lot@transfer`) that exists only in the replay. A report shows each figure's basis and dates, not a lookup of the id.
+- **Bad:** a warning may name a lot id (`lot@transfer`) that exists only in the replay. The id can even equal a real-run id with other sats and basis. A report shows each figure's own basis and dates, never a lookup of the id.
 
 ## References
 
-- ADR 0008 §4; ADR 0021 §2; ADR 0009 (stated tax positions)
+- ADR 0008 §4; ADR 0021 §2; ADR 0008 (stated tax positions)
 - THREAT_MODEL T-508
 - Treas. Reg. §1.1012-1(j)
 - #238 (the owner's decision); PR #273

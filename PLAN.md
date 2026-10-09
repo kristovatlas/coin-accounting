@@ -210,7 +210,7 @@ A pure, deterministic function of events, recomputed on every change. It can com
 - **Disposals** (`sell`, `spend`) and **gifts out** (`gift_out`) draw only from lots in the **same tax account** (per-account basis; this also applies to self-custody wallets, Treas. Reg. §1.1012-1(j)(1)–(2)). A `gift_out` is **not** a sale. It removes lots with no gain or loss, and keeps the donor's basis and date for the recipient.
 - **Identification timing:**
   - Specific ID counts only if recorded **no later than the sale**. For exchanges, it goes to the broker; through 12/31/2026, the taxpayer's own books and records are also accepted (Notice 2025-7, extended by Notice 2026-20).
-  - `identified_at` is stored for every lot choice: exchange sales **and exchange withdrawals**. **Warn only** (user decision, 2026-09-27): a choice made after the sale or withdrawal is flagged `late`. The app shows a warning that the IRS may apply the account's standing order, or FIFO if there is none, together with the result under that method. It notes the flag in the audit trail and on reports, but it **uses the user's choice** and does not block reports.
+  - `identified_at` is stored for every lot choice: exchange sales **and exchange withdrawals**. **Warn only** (user decision, 2026-09-27): a choice made after the sale or withdrawal is flagged `late`. The app shows a warning that the IRS may apply the account's standing order, or FIFO if there is none, together with the result under that method, computed on a replay of the history with every late choice disregarded (an on-time choice the replay can't follow uses the standing method there too). Where the replay would part from the real run it stops, and reports show it (ADR 0040). It notes the flag in the audit trail and on reports, but it **uses the user's choice** and does not block reports.
   - **Automatic mode** (ADR 0021): an account can use its standing method (FIFO by default) automatically. The lot picker is then skipped, the lots used are shown, and nothing is ever `late`. In manual mode, the late warning appears only when the chosen lots **differ** from what the standing method (or FIFO) would give.
   - For 2027+ sales the UI warns that the identification must be communicated to the broker.
   - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet.
@@ -380,7 +380,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
    - gifts and inheritance
    - blocking conditions
    - **self-custody UTXO tracing** (ADR 0008 §2, #243): self-transfers, deposits and spends from a wallet take the lots of the outputs they spend. Until then the engine refuses self-transfers, and deposits and spends from a wallet use the account's order. Blocks release (the owner, 2026-10-09: self-custody transfers are extremely common)
-8. **M7 reports:** 8949 CSV (box selection per tax year), income summary, year summary/holdings, audit trail.
+8. **M7 reports:** 8949 CSV (box selection per tax year), income summary, year summary/holdings, audit trail. Every report shows a stopped late-choice replay (`Result.replay_stopped`, the event, and that later warnings used the user's lots: ADR 0040).
 9. Later:
    - exchange CSV import
    - in-app lock (see threat model open questions)
@@ -405,7 +405,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
     - pro-rata moves
     - withdrawals moving lots
     - all three gift outcomes
-    - late identification (flagged and warned, choice kept)
+    - late identification (flagged and warned, choice kept; judged against a full replay, its stop reported)
     - the 2025 opening allocation
     - fee roles
     - the 1-year boundary
