@@ -594,6 +594,19 @@ def test_an_unexpected_error_in_the_socks_handshake_still_closes_the_socket(
     server.close()
 
 
+def test_a_cancel_takes_effect_during_the_body(direct: list[FakeServer]) -> None:
+    direct.append(FakeServer(ok(b"a" * 100), drip=0.01))
+    stop = threading.Event()
+    got = b""
+    with pytest.raises(fetch.Cancelled, match=r"www\.bitstamp\.net: the refresh was cancelled"):
+        with open_url(URL, max_bytes=100, cancelled=stop.is_set) as body:
+            got += body.read(1)
+            stop.set()  # the user cancels mid-body
+            while body.read(1):
+                pass
+    assert got == b"a"  # the body had started: the cancel came during it, not before
+
+
 def test_a_body_closed_twice_closes_the_response_once(direct: list[FakeServer]) -> None:
     direct.append(FakeServer(ok(b"abc")))
     with open_url(URL, max_bytes=10) as body:
