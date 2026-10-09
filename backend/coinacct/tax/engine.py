@@ -50,8 +50,9 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   Lots are chosen as for a disposal, with the same late check (ADR 0008 §3 and §4); a late choice's
   warning shows the standing method's whole result, its fee disposal included (dust the standing
   method could not carry is shown as its own parts, none arriving: the user's choice still stands).
-  UTXO tracing for self-custody comes in a later slice: until then a self-transfer uses the account's
-  lots like any other transfer (#243).
+  **A self-transfer is refused** (`EngineError`) until UTXO tracing exists (the owner's decision on
+  #243): between the user's own wallets the spent outputs identify the lots (ADR 0008 §2, ADR 0009), and
+  the account's FIFO order would silently give other figures. UTXO tracing is the next M6 slice.
   - **A network fee** on a deposit or self-transfer (`fee_sats` of the sats that leave) is, by default,
     no disposal: its basis stays with the coins that arrive. With `fee_treatment="dispose"` it is a
     small taxable disposal at `fee_value`, its FMV (ADR 0009's stated tax position, printed on reports).
@@ -482,6 +483,11 @@ class _Engine:
 
     def _transfer(self, t: Transfer) -> None:
         fee_value = _checked_transfer(t, self._fee_treatment)
+        if t.kind == "self_transfer":
+            raise EngineError(
+                f"transfer {t.id!r}: a self-transfer's lots follow the outputs it spends, which needs UTXO"
+                " tracing (not built yet, #243)"
+            )
         self._unrecorded_if_needed(t)
         picks, missing, standing = self._choose(t)
         if standing is not None and t.identified_at is not None:
