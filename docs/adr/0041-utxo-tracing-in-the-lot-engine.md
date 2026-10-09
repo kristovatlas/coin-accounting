@@ -17,14 +17,19 @@ _This ADR amends ADR 0008 §2, ADR 0009 where they describe self-custody movemen
 - **What the engine does today:** it takes lots by the wallet account's FIFO order, as for an exchange.
   - **#271** refuses self-transfers until tracing exists.
   - **The owner:** self-custody transfers are extremely common, so tracing blocks release.
-- **What isn't decided:** how lots get onto coins; which lots leave, and to which outputs; fees; wallet lots on no coin; coins whose lots don't match them; transactions shared with others or spanning accounts; mode switches; the 2025 opening allocation. Each changes tax figures, so it needs an ADR (ENGINEERING §4.1).
+- **What isn't decided:** how lots get onto coins; which lots leave, and to which outputs; fees and proceeds; wallet lots on no coin; coins whose lots don't match them; transactions shared with others or spanning accounts; mode switches; the 2025 opening allocation. Each changes tax figures, so it needs an ADR (ENGINEERING §4.1).
 
 ## Decision Drivers
 
 - **The stated method decides, never wallet software.** An output's position in the transaction changes no figure.
 - **Every output holds exactly its value,** and every lot's sats are where the replay says, at every point in time: nothing doubled, nothing lost. Anything impossible blocks until it's corrected.
-- **Facts versus choices.** A link says where a purchase arrived (a fact). A method says which lots leave (a choice, which must be timely: Treas. Reg. §1.1012-1(j), T-508).
-- **Recomputable, auditable, per account.** Fragments are recomputed from events, links and the chain cache. Every user edit is in the append-only change log (T-408). A coin's lots belong to the account holding it (ADR 0008 §1).
+- **Facts versus choices.**
+  - **Facts:** a link says where a purchase arrived.
+  - **Choices:** a method, or an assignment of allocated lots to coins, says which lots leave. A choice must be timely (Treas. Reg. §1.1012-1(j), T-508).
+- **Recomputable, auditable, per account.**
+  - **Recomputed:** fragments come from events, links and the chain cache.
+  - **Change-logged:** every user edit is in the append-only change log (T-408).
+  - **Per account:** a coin's lots belong to the account holding it (ADR 0008 §1).
 
 ## Considered Options
 
@@ -44,8 +49,16 @@ _This ADR amends ADR 0008 §2, ADR 0009 where they describe self-custody movemen
 
 Proposed: **A1, B1, C1**, with the rules below. The ones marked **(owner)** are the owner's choice; the text gives the recommended default.
 
+### Records are append-only, with app-set times
+- **Each record carries a recorded-at time:** links, wallet method records, assignments of allocated lots to coins, placeholder resolutions and identification rows.
+  - **Set by `services/`** from the system clock when the record is inserted. Never taken from the user, never edited.
+  - **An edit is a new, superseding record** with its own time. A removal is a superseding "none" record. Each is change-logged, old to new (T-408).
+- **The implementing migration** gives these tables T-408's append-only triggers, with tests. ADR 0038 protects them like the change log's.
+- **The system clock is trusted.** This is an accepted limit, noted in T-508.
+
 ### Links (facts)
-- **A link belongs to one arrival event.** It says that some of the sats that event delivered (its lot, or the exchange fragments a withdrawal moved, chosen as ADR 0008 §3 says) arrived in an output of the same account.
+- **A link belongs to one arrival event.** It says that some of the sats that event delivered arrived in an output of the same account. Those sats are the event's lot, or the exchange fragments a withdrawal moved (chosen as ADR 0008 §3 says).
+  - **Which fragment reaches which output:** the event's fragments, in the identification order, fill its linked outputs in the canonical output order (below).
   - **A withdrawal creates no lot:** its fragments keep their basis and dates. ADR 0009's one exception stays: a withdrawal from an exchange account with no lots creates one.
   - **The same lot can arrive in a wallet again later,** after a deposit and a second withdrawal. Each withdrawal is its own arrival event with its own links.
 - **Refused:** a link to an output of another account, or one the account doesn't own.
@@ -53,12 +66,11 @@ Proposed: **A1, B1, C1**, with the rules below. The ones marked **(owner)** are 
   - an arrival event whose links add up to more than it delivered
   - an output whose fragments, from every source (traced, linked, pooled, placeholder), would exceed its value
   - a lot linked to an output that arrived before the event that delivered it. The tolerance is the block-timestamp drift of two hours (PLAN §7); an event tied to the output's txid is in time by definition.
-- **Records:**
-  - **Each link records** when it was made, and whether it came from a record (proposed) or from the user.
-  - **Every link create, edit and removal** is in the change log, old to new (T-408).
-  - **The audit trail lists** every link with its source, and marks any create, edit or removal made after its coin was spent.
+- **The audit trail** lists every link with its source, and marks any link record made after its coin was spent.
 - **Unconfirmed coins:** links, pool draws, placeholders and identifications are computed and stored only for outputs at or above the confirmation threshold (T-207). Mempool coins are shown as provisional and never written (T-506).
-- **Reorgs (T-506):** links, placeholder lots and their resolutions, and pool draws on outputs of a reorged-out or replaced transaction go to the review queue. Nothing is carried over to a replacement silently.
+- **Reorgs (T-506):** these go to the review queue, and nothing is carried over to a replacement silently:
+  - links, placeholder lots and their resolutions, and pool draws on outputs of a reorged-out or replaced transaction
+  - a reorged-out spend's identification rows, which are superseded (invalidated), not kept as its first result
 
 ### A wallet transaction
 This applies to every event that draws from a self-custody account: self-transfer, deposit, spend, sell and gift given.
@@ -69,17 +81,28 @@ This applies to every event that draws from a self-custody account: self-transfe
    - **Sats received from others** (a PayJoin receiver's payment) are an arrival: an acquisition linked to that output, or a pool draw, or a placeholder.
    - **Third-party inputs and outputs** carry none of the user's lots (BIP 78).
 3. **The identification order:** the spent coins' fragments form one merged set, ordered by the account's method in force at the transaction (oldest first by default).
-4. **Roles take fragments in a fixed order (owner):** disposals (spend, sell) first, then gifts, then deposits and transfers to another own account, then the change. Recommended, because it keeps a disposal oldest first whatever else the transaction does.
-   - **Each role's fee share** is taken right after that role's outputs.
-   - **Within a role,** outputs are filled one after another, each to exactly its value, in a canonical order: largest value first, then by the output script's bytes. Two identical outputs (the same value and script) fall back to vout; they are the same coin twice, so only which of them holds which lot differs.
-5. **The fee, by role (ADR 0009):**
-   - **The split:** the transaction's fee (the user's share, in a shared one) is split across roles in proportion to each role's sats. Rounding is in integer sats, with the remainder to the earlier role in step 4's order.
-   - **A spend or sale:** the role's fee sats are part of the disposal. Its proceeds are the fair market value of the sats paid to the recipient, which is the gross sats leaving the user less the fee, net of any other costs. The fee is not subtracted again.
-   - **A self-transfer or deposit, by default:** no disposal. The fee sats' basis goes to the role's first destination output (in the canonical order) that receives a fragment of the same lot, keeping that lot's date. If none does, it goes to the same lot's fragment in the change. If none is there either, it goes to the role's first arriving fragment.
-   - **The "fee is a disposal" setting:** the role's fee sats are a small disposal.
-   - **A gift given (owner):** the role's fee is a small disposal at its fair market value. Recommended, because BTC paid as a fee is property disposed of, and the gift itself keeps no gain or loss (ADR 0011).
+4. **Leaving roles take fragments first, in a fixed order (owner):** disposals (spend, sell), then gifts, then deposits and transfers to another own account. The change takes what is left. Recommended, because it keeps a disposal oldest first whatever else the transaction does.
+   - **Each leaving role's fee share** is taken right after that role's outputs.
+   - **The canonical output order:** within a role, outputs are filled one after another, each to exactly its value: largest value first, then by the output script's bytes.
+   - **Identical outputs** (the same value and script) form a group that holds its fragments together. Whichever is spent first takes the group's fragments in the identification order. No position decides.
+5. **The fee (ADR 0009):** the transaction's fee (the user's share, in a shared one) is split across the leaving roles only, in proportion to each one's sats. **The change never takes a fee share.**
+   - **Rounding:** in integer sats, with the remainder to the earlier role in step 4's order.
+   - **Within a role,** a share covering several events (two sales, say) is split across them by sats, the remainder to the earlier output in the canonical order.
+   - **Fee treatment by role:**
+     - **A spend or sale:** the role's fee sats are part of the disposal: their basis is in the disposal's basis, and they add nothing to its proceeds.
+     - **A self-transfer or deposit, by default:** no disposal. For each lot in the fee share, its basis goes to the first destination output (in the canonical order) that receives a fragment of that lot, keeping the lot's date. Else it goes to that lot's fragment in the change. Else it goes to the role's first arriving fragment.
+     - **The "fee is a disposal" setting:** the role's fee sats are a small disposal.
+     - **A gift given (owner):** the role's fee is a small disposal at its fair market value. Recommended, because BTC paid as a fee is property disposed of, and the gift itself keeps no gain or loss (ADR 0011).
+   - **A transaction with no leaving role** (a consolidation, or a send within the same account): its fee is handled as a self-transfer fee. By default, each lot's fee basis goes to that lot's fragment in the outputs (else the first output's first fragment); with the setting, it is a small disposal.
+6. **Proceeds (26 U.S.C. §1001(b), ADR 0009):** the amount realized, net of costs other than the network fee. The network fee is not subtracted again: its sats are in the disposal at no proceeds.
+   - **A sell:** the money and the FMV of any property received, as recorded on the event, less costs.
+   - **A spend:** the FMV of the goods or services received, as recorded on the event, less costs. If none is recorded, the FMV of the BTC paid to the recipient is used, and the report says so.
 
-**A worked example** (a test in the implementing PR): a 1 BTC coin holds L1 (0.4, oldest, basis $10,000) and L2 (0.6, basis $30,000). It pays 0.5 BTC to a merchant at $100,000/BTC, with 0.4999 change and a 0.0001 fee. Whether the change is vout 0 or vout 1:
+**A worked example** (a test in the implementing PR):
+- **The coin:** 1 BTC, holding L1 (0.4, oldest, basis $10,000) and L2 (0.6, basis $30,000).
+- **The spend:** 0.5 BTC for goods recorded at $50,000, with 0.4999 change and a 0.0001 fee.
+
+Whether the change is vout 0 or vout 1:
 - the payment gets L1 0.4 and L2 0.1
 - the fee gets L2 0.0001
 - the change keeps L2 0.4999
@@ -88,7 +111,9 @@ This applies to every event that draws from a self-custody account: self-transfe
 **Further tests:**
 - permuting all outputs leaves every figure unchanged
 - many small fragments over unequal outputs leave every output exactly at its value
+- a consolidation's fee, under both settings
 - a PayJoin receive balances
+- identical outputs hold their lots as a group
 
 ### The pool
 - **The pool** is the wallet's lots on no coin.
@@ -100,47 +125,54 @@ This applies to every event that draws from a self-custody account: self-transfe
   A holding-period date is not an entry time.
 - **Short coins draw at their arrival, in chain order** (block height, position in the block, then vout). This includes unspent coins, so holdings are right.
   - **Which lots count:** lots in the pool by then, within the two-hour tolerance, by the account's standing method.
-  - **Arrival time:** a coin's arrival is its block time, or the user's override of it (PLAN §7).
-- **The first result is kept.** When a confirmed coin's draw, or a confirmed spend's lots, is first computed, `services/` records it as an append-only identification row (PLAN §2). It is never overwritten.
-  - **A later recompute that differs** (after a link, an unlink, or a back-dated acquisition) adds a superseding row, change-logged with the edit that caused it.
+  - **Arrival time:** a coin's arrival is its block time. For pool purposes, a user override (PLAN §7) can't move it by more than that tolerance.
+  - **The report shows each pool draw** with a note naming the coin.
+- **Leftover pool lots:** pool sats that remain while every coin of the wallet is fully covered show as a warning on the report: a duplicate or wrong acquisition, or an unrecorded disposal.
+- **The first result is kept.** When a confirmed coin's draw, or a confirmed spend's lots, is first computed, `services/` records an identification row (PLAN §2).
+  - **A later recompute that differs** adds a superseding row, change-logged with the edit that caused it. The edit could be a link, an unlink, a back-dated acquisition or an arrival override.
   - **The report shows the first and current results.**
   - **Lateness:** a draw by the standing method is never late. A changed draw is a correction of facts, shown as such.
 - **If the pool is short,** the rest becomes a **placeholder lot of unknown basis** on that coin:
   - **Its provisional date:** the coin's arrival.
   - **It blocks reports** (ADR 0009, T-509), as for a withdrawal from an account without lots (PLAN §7).
-  - **The user resolves it** by entering its date and basis, or by linking an arrival event. The change log records it.
+  - **The user resolves it** by entering its date and basis, or by linking an arrival event.
 
 ### Methods over time (choices)
-- **Each method record stores two times:** its effective-from time and when it was recorded. The method is oldest first, a recorded method, or whole-wallet FIFO. Records are kept in the change log.
+- **Each method record has an effective-from time and a recorded-at time.** The method is oldest first, a recorded method, or whole-wallet FIFO.
 - **It applies from its effective-from time** to transactions and pool draws.
-- **Late flag:** one it reaches whose lots would differ is flagged late if the record was made after it. The report shows both results.
+- **Late flag:** one it reaches whose lots differ from those under the record in force before it (oldest first if none) is flagged late if the record was made after it. The report shows both results.
 - **This narrows ADR 0021 §2's "never late":** an automatic choice is never late, except under a wallet method record made after the transaction it changes.
 - **Under whole-wallet FIFO** the wallet's fragments are held by the account, not by coins (PLAN §2 allows either holder). Every event takes from them by FIFO, and coins arriving meanwhile make no pool draws.
-  - **Switching to it:** every coin's fragments move to the account at the effective-from time.
-  - **Switching back:** at the effective-from time, the coins then held receive the account's fragments, coins in chain order of arrival and fragments in the new method's order, each coin filled to its value. Holdings equal the account's sats, so every coin is filled exactly.
+  - **The account's fragments are reconciled with its sats after every event.** An arrival that brings no fragments (no linked event) creates a placeholder lot of unknown basis held by the account, dated at the arrival. It blocks reports.
+  - **Switching to it:** every coin's fragments, and the pool, move to the account at the effective-from time.
+  - **Switching back:** at the effective-from time, the coins then held receive the account's fragments, coins in chain order of arrival and fragments in the new method's order, each coin filled to its value. Fragments left over form the pool (with the leftover warning). A coin left short gets a placeholder.
 
 ### The 2025 opening allocation (ADR 0008 §6)
 - **It must equal the account's sats held on 2025-01-01.** Otherwise it blocks.
 - **It replaces the account's fragment state as of that date.** Earlier links stay, and figures before 2025 still use them.
-- **Which lot goes onto which coin:** the user may assign allocated lots to coins held then. Otherwise they fill the coins held on 2025-01-01 in chain order of arrival, lots in the allocation's stated method order (oldest first), each coin to its value.
+- **Which lot goes onto which coin:** the user may assign allocated lots to coins held then. Otherwise they fill the coins held on 2025-01-01 in chain order of arrival, lots in the allocation's stated method order (oldest first), each coin to its value. Under whole-wallet FIFO the allocation goes to the account.
+- **An assignment is a choice, not a fact.** It is a record like a method record. It is flagged late when it differs from the default fill and was recorded after a coin it covers was spent. The report shows both results.
 - **The report lists the links the allocation overrides.**
 
 ### Late links: facts, not choices (owner)
 - **Recommended:** a link is a fact about where coins arrived, not a choice of lots, so it is never flagged late. The chain is the identification (ADR 0008 §2).
-  - **What stays visible:** the audit trail marks every link edit made after its coin was spent, and the report shows the first and current results.
+  - **What stays visible:** the audit trail marks every link record made after its coin was spent, and the report shows the first and current results.
   - **Why:** the app is used to rebuild history after the fact, so a "late" flag on every honest link would hide the ones that matter.
-- **The alternative:** flag a link edit made after its coin was spent, when its result differs from the result without it, and show both.
+- **The alternative:** flag a link record made after its coin was spent, when its result differs from the result without it, and show both.
 
 ### Records
-- **This is a stated tax position** (ADR 0008 §2), printed with the reports. That includes the role order, the canonical output order, the fee rules, pool draws and placeholders.
+- **This is a stated tax position** (ADR 0008 §2), printed with the reports. That includes the role order, the canonical output order, the fee and proceeds rules, pool draws and placeholders.
 - **PLAN §2, PLAN §7, and THREAT_MODEL T-408, T-506, T-508 and T-509** record these rules in this PR. The implementing PR adds tests for every case above.
 - **#271's refusal is lifted.**
-- **The engine's input:** each wallet event carries its owned inputs and outputs, with each output's role and the user's sats in it, from the chain cache and the event. `services/` builds them and stores the first-result rows; the engine stays pure. Each account carries its kind (`self_custody | custodial`).
+- **The engine's input:** each wallet event carries its owned inputs and outputs, with each output's role and the user's sats in it, from the chain cache and the event.
+  - **`services/`** builds them and stores the append-only rows.
+  - **The engine** stays pure.
+  - **Each account** carries its kind (`self_custody | custodial`).
 
 ### Consequences
 
 - **Good:** self-custody figures follow the chain and the stated method, never wallet software. The release blocker on self-transfers goes.
-- **Good:** impossible states block, and gaps, corrections and late method records are visible.
+- **Good:** impossible states block, and gaps, corrections, leftovers and late choices are visible.
 - **Bad:**
   - arrival events need their outputs linked
   - shared and multi-account transactions need the user's part stated
@@ -152,5 +184,5 @@ This applies to every event that draws from a self-custody account: self-transfe
 - ADR 0008 §1, §2, §3 and §6; ADR 0009; ADR 0011; ADR 0021; ADR 0038; ADR 0040 (PR #273)
 - PLAN §2, §3 (mixing), §7
 - THREAT_MODEL T-207, T-408, T-501, T-506, T-508, T-509
-- Treas. Reg. §1.1012-1(j); BIP 78 (PayJoin)
+- 26 U.S.C. §1001(b); Treas. Reg. §1.1012-1(j); BIP 78 (PayJoin)
 - #243 and #271 (the refusal); #238 and #273 (the late-choice replay)
