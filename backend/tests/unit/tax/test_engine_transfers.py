@@ -609,3 +609,22 @@ def test_a_moved_inherited_lot_stays_long_term_irc1223() -> None:
     ]
     (a,) = run(events).allocations
     assert a.long_term
+
+
+def test_a_late_choice_stands_when_fifos_alternative_would_hit_refused_dust_adr0008() -> None:
+    # FIFO would take a 1-sat gift and a 1-sat buy for a 2-sat deposit with a 1-sat fee: the gift's sat
+    # would be all-fee dust, which can't carry its basis. The user picked a later 2-sat buy, late: the
+    # choice is used, and the warning shows the gift's dust as its own part, none of it arriving.
+    events: list[Event] = [
+        Acquisition("g", "w", date(2024, 1, 1), "gift_in", 1, D("10.00"), D("5.00"), date(2020, 1, 1)),
+        Acquisition("b", "w", date(2024, 1, 2), "buy", 1, D("1.00")),
+        Acquisition("later", "w", date(2024, 2, 1), "buy", 2, D("2.00")),
+    ]
+    choice = move("d", "w", "x", 2, fee_sats=1, picks=(Pick("later", 2),), identified_at=at(DAY, 18))
+    result = run([*events, choice])
+    assert [m.lot for m in result.moves] == ["later"]
+    (late,) = result.late
+    assert late.standing == (
+        Moved("d", "b", "b@d", "x", 1, D("1.00"), date(2024, 1, 2), 0),
+        Moved("d", "g", "g@d", "x", 0, D("10.00"), date(2020, 1, 1), 1),
+    )

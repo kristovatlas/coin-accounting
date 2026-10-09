@@ -48,9 +48,10 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   to another: each moved part keeps its lot's basis, dates and status, under a new id (`lot@transfer`),
   and keeps its FIFO place: the date it reached the user (a gift by the day it was received, #241).
   Lots are chosen as for a disposal, with the same late check (ADR 0008 §3 and §4); a late choice's
-  warning shows the standing method's whole result, its fee disposal included. UTXO tracing for
-  self-custody comes in a later slice: until then a self-transfer uses the account's lots like any
-  other transfer (#243).
+  warning shows the standing method's whole result, its fee disposal included (dust the standing
+  method could not carry is shown as its own parts, none arriving: the user's choice still stands).
+  UTXO tracing for self-custody comes in a later slice: until then a self-transfer uses the account's
+  lots like any other transfer (#243).
   - **A network fee** on a deposit or self-transfer (`fee_sats` of the sats that leave) is, by default,
     no disposal: its basis stays with the coins that arrive. With `fee_treatment="dispose"` it is a
     small taxable disposal at `fee_value`, its FMV (ADR 0009's stated tax position, printed on reports).
@@ -62,11 +63,12 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   - The fee is taken from the chosen lots in proportion to their sats, every moved part keeping at
     least one sat where it can, the smallest parts paying any rest first; a part that is all fee (dust
     only) carries its basis to the transfer's last moved part, which records it (`carried_from`).
-  - **A withdrawal from an account with no lots at all** (its buys were never entered) creates a lot
-    for its sats in that account first (ADR 0009, PLAN §7): with the basis and original date the user
-    supplies (`missing_basis` and `missing_acquired`, both or neither), or with **unknown basis**, a
-    blocking condition (T-509). The lot is listed in `Result.created`. A shortfall in an account that
-    holds lots the user recorded is missing basis, as for a disposal, never a new lot.
+  - **A withdrawal from an account with no lots the user recorded and no sats held** (its buys were
+    never entered) creates a lot for its sats in that account first (ADR 0009, PLAN §7): with the
+    basis and original date the user supplies (`missing_basis` and `missing_acquired`, both or
+    neither), or with **unknown basis**, a blocking condition (T-509). The lot is listed in
+    `Result.created`. A shortfall in an account that holds sats, or lots the user recorded, is missing
+    basis, as for a disposal, never a new lot.
 - **Not enough lots** for an automatic disposal is a **blocking condition** (ADR 0009): the lots that
   exist are used, and the rest of the disposal is reported as missing basis. Invalid input (a choice
   naming lots the account doesn't hold, a wrong type) raises `EngineError`.
@@ -602,21 +604,27 @@ class _Engine:
                 )
         if orphans and not dispose:
             moved = [m for m in out if isinstance(m, Moved)]
-            target = _dust_target(
-                moved, [o for o, _, _ in orphans], {m.into: self._lots[m.lot] for m in moved}, t.id
-            )
-            i = out.index(target)
-            out[i] = Moved(
-                target.transfer,
-                target.lot,
-                target.into,
-                target.to,
-                target.sats,
-                add(target.basis, sum((b for _, b, _ in orphans), ZERO)),
-                target.acquired,
-                target.carried_fee + sum(n for _, _, n in orphans),
-                tuple(o.lot.id for o, _, _ in orphans),
-            )
+            sources = [o for o, _, _ in orphans]
+            lots = {m.into: self._lots[m.lot] for m in moved}
+            if all(_plain(o) for o in sources) and any(_plain(lots[m.into]) for m in moved):
+                target = _dust_target(moved, sources, lots, t.id)
+                i = out.index(target)
+                out[i] = Moved(
+                    target.transfer,
+                    target.lot,
+                    target.into,
+                    target.to,
+                    target.sats,
+                    add(target.basis, sum((b for _, b, _ in orphans), ZERO)),
+                    target.acquired,
+                    target.carried_fee + sum(n for _, _, n in orphans),
+                    tuple(o.lot.id for o, _, _ in orphans),
+                )
+            else:  # dust the real run would refuse: shown as its own parts, none arriving (warn-only)
+                out.extend(
+                    Moved(t.id, o.lot.id, f"{o.lot.id}@{t.id}", t.to, 0, b, o.lot.acquired, n)
+                    for o, b, n in orphans
+                )
         return tuple(out)
 
     def _move(self, t: Transfer, lot_id: str, sats: int, *, arrive: int | None = None) -> Moved:
