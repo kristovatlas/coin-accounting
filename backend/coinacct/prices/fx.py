@@ -28,6 +28,7 @@ ECB_SOURCE: Final = "ecb:eurofxref-hist"
 DISPLAY: Final = ("EUR", "GBP")  # every display currency, always converted together (T-301)
 MAX_RATE_AGE: Final = timedelta(days=7)  # the ECB skips weekends and TARGET holidays, never a week
 _SCALE: Final = 10**6
+MAX_RATE: Final = 999_999_999_999  # 999999.999999 per euro, the most the CSV's rate pattern can hold
 _COLUMNS: Final = ("USD", *(c for c in DISPLAY if c != "EUR"))  # EUR is the base: no column
 _RATE: Final = re.compile(r"([0-9]{1,6})\.([0-9]{1,6})")
 _DAY: Final = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
@@ -94,12 +95,14 @@ def to_display(usd: Sequence[DailyPrice], rates: Rates) -> list[DailyPrice]:
     """Every USD price in every display currency, by the latest ECB rate on or before its day and at
     most MAX_RATE_AGE older. EUR is USD divided by the USD rate; another currency is that times its
     own rate. The result keeps the USD price's day and gets method "fx", with the USD price's source
-    after the `*` in its own, so a price converted from an import stays identifiable (T-303). Every
-    rate in `rates` is
-    checked, used or not, since they may come from anywhere (a cache, an upload)."""
+    after the `*` in its own, so a price converted from an import stays identifiable (T-303).
+    Every rate in `rates` is checked, used or not, and so is the mapping's shape, since the rates may
+    come from anywhere (a cache, an upload)."""
     for day, row in rates.items():
-        if not all(type(v) is int and v > 0 for v in row.values()):
-            _fail(f"{day}: a rate must be a positive integer scaled by 10^6")
+        if type(day) is not date or not isinstance(row, Mapping):  # a datetime is a date too
+            _fail("the rates must map each day (a date) to its currencies' rates")
+        if not all(type(c) is str and type(v) is int and 0 < v <= MAX_RATE for c, v in row.items()):
+            _fail(f"{day}: a rate must be a positive integer scaled by 10^6, at most {MAX_RATE}")
     for before, p in zip((None, *usd), usd, strict=False):
         if p.currency != "USD":  # DailyPrice already refuses a USD price made by "fx"
             _fail(f"{p.day}: expected a USD price, got {p.currency}")

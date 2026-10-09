@@ -133,6 +133,15 @@ def test_gaps_and_outliers_are_reported_per_series(sources: dict[str, Any]) -> N
     assert [o.day.day for o in got.outliers["EUR"]] == [19]
 
 
+def test_days_where_the_two_usd_sources_disagree_are_flagged(sources: dict[str, Any]) -> None:
+    # the VWAPs are 11 and 20; Bitstamp's typical price is 99 on both days. Aug 20 and 21 have no VWAP.
+    got = run().mismatches
+    assert [(m.day.day, m.vwap, m.typical) for m in got] == [
+        (18, Decimal("11.00"), Decimal("99.00")),
+        (19, Decimal("20.00"), Decimal("99.00")),
+    ]
+
+
 def test_a_cancelled_refresh_returns_nothing_so_the_job_is_cancelled_not_failed(
     sources: dict[str, Any],
 ) -> None:
