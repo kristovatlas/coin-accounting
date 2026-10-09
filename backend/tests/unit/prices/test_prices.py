@@ -8,7 +8,19 @@ from typing import Any
 
 import pytest
 
-from coinacct.prices import CENT, DailyPrice, Gap, Method, Outlier, PriceError, check, combine, content_hash
+from coinacct.prices import (
+    CENT,
+    MAX_CENTS,
+    MAX_PRICE,
+    DailyPrice,
+    Gap,
+    Method,
+    Outlier,
+    PriceError,
+    check,
+    combine,
+    content_hash,
+)
 
 
 def p(day: int, price: str, method: Method = "vwap", currency: str = "USD") -> DailyPrice:
@@ -51,9 +63,18 @@ def test_only_a_positive_whole_number_of_cents_is_a_price(fields: dict[str, Any]
 
 
 def test_the_largest_price_is_accepted_and_checked_without_a_decimal_error() -> None:
-    top = DailyPrice(date(2024, 1, 2), "USD", Decimal("999999999999999.99"), "vwap", "test")
+    top = DailyPrice(date(2024, 1, 2), "USD", MAX_PRICE, "vwap", "test")
     assert check([p(1, "1.00"), top])[1] == [Outlier(date(2024, 1, 2), Decimal("1.00"), top.price)]
-    DailyPrice(date(2024, 1, 2), "EUR", Decimal("1.00"), "fx", "test")
+
+
+def test_the_largest_price_in_cents_is_an_exact_integer_literal() -> None:
+    assert type(MAX_CENTS) is int
+    assert Decimal(MAX_CENTS).scaleb(-2) == MAX_PRICE == Decimal("999999999999999.99")
+
+
+def test_fx_is_a_method_for_display_currencies() -> None:
+    for currency in ("EUR", "GBP"):
+        assert DailyPrice(date(2024, 1, 2), currency, Decimal("1.00"), "fx", "test").method == "fx"
 
 
 def test_the_trade_average_wins_and_the_typical_price_fills_the_other_days() -> None:

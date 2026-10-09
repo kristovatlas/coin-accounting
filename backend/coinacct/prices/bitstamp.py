@@ -22,7 +22,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final, NoReturn
 
-from coinacct.prices import CURRENCIES, DailyPrice, PriceError
+from coinacct.prices import CURRENCIES, MAX_CENTS, DailyPrice, PriceError
 
 DUMP_SOURCE: Final = "bitcoincharts:bitstampUSD"
 OHLC_SOURCE: Final = "bitstamp:ohlc"
@@ -56,7 +56,8 @@ def vwap_by_day(lines: Iterable[str], complete_before: date) -> list[DailyPrice]
         on = datetime.fromtimestamp(when, UTC).date()
         if on != day:
             if day is not None and volume:
-                out.append(DailyPrice(day, "USD", _cents(value, volume * _SCALE), "vwap", DUMP_SOURCE))
+                vwap = _cents(value, volume * _SCALE, f"the day ending at line {n - 1}")
+                out.append(DailyPrice(day, "USD", vwap, "vwap", DUMP_SOURCE))
             day, value, volume = on, 0, 0
         value += price * amount
         volume += amount
@@ -109,7 +110,7 @@ def typical_by_day(text: str, currency: str, complete_before: date) -> list[Dail
                 DailyPrice(
                     on,
                     currency,
-                    _cents(h + lo + cl, 3 * _SCALE),
+                    _cents(h + lo + cl, 3 * _SCALE, where),
                     "typical",
                     f"{OHLC_SOURCE}:btc{currency.lower()}",
                 )
@@ -117,12 +118,14 @@ def typical_by_day(text: str, currency: str, complete_before: date) -> list[Dail
     return [p for p in out if p.day < complete_before]
 
 
-def _cents(numerator: int, denominator: int) -> Decimal:
+def _cents(numerator: int, denominator: int, where: str) -> Decimal:
     """numerator / denominator, rounded half to even to whole cents, exactly. Built from text, which
     `Decimal` takes exactly whatever the caller's context (no context arithmetic at all)."""
     q, r = divmod(numerator * 100, denominator)
     if 2 * r > denominator or (2 * r == denominator and q % 2):
         q += 1
+    if q > MAX_CENTS:  # 15 integer digits can round up past MAX_PRICE
+        _fail(f"{where}: the price is out of range")
     return Decimal(f"{q // 100}.{q % 100:02d}")
 
 

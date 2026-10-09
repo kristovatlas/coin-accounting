@@ -97,6 +97,20 @@ def test_a_rate_from_elsewhere_must_be_a_positive_scaled_integer(bad: object) ->
             to_display([usd(date(2024, 1, 2), "1.00")], {date(2024, 1, 2): row})  # type: ignore[dict-item]
 
 
+def test_every_rate_is_checked_even_one_no_conversion_uses() -> None:
+    rates = {date(2020, 1, 2): {"USD": 0}, date(2024, 1, 2): {"USD": 1_000_000}}
+    with pytest.raises(PriceError, match="2020-01-02: a rate must be a positive integer"):
+        to_display([usd(date(2024, 1, 2), "1.00")], rates)
+
+
+def test_an_out_of_range_conversion_names_the_rate_day_it_used() -> None:
+    rates = {date(2024, 1, 5): {"USD": 1, "GBP": 1}}  # a fallback rate, the day before
+    with pytest.raises(
+        PriceError, match="2024-01-06: the EUR price at the rate of 2024-01-05 is out of range"
+    ):
+        to_display([usd(date(2024, 1, 6), "1000000000.00")], rates)
+
+
 def test_the_callers_decimal_context_changes_nothing() -> None:
     rates = {date(2024, 1, 2): {"USD": 3_000_000, "GBP": 1_000_000}}
     with localcontext(Context(prec=2, traps=[Inexact, Rounded])):
@@ -140,6 +154,11 @@ def test_a_byte_order_mark_and_blank_lines_at_the_end_are_ignored() -> None:
     lines = ["\ufeff" + HEADER, "2024-01-02,1.0956,155.69,0.86,N/A,\n", "\n", ""]
     assert ecb_rates(lines) == {date(2024, 1, 2): {"USD": 1_095_600, "GBP": 860_000}}
     assert ecb_rates("".join(lines).split("\n")) == ecb_rates(lines)
+
+
+def test_a_byte_order_mark_alone_on_the_first_line_is_a_blank_line_and_refused() -> None:
+    with pytest.raises(PriceError, match="line 1: a blank line before the end"):
+        ecb_rates(["\ufeff\n", HEADER, "2024-01-02,1.0956,155.69,0.86,N/A,\n"])
 
 
 def test_a_blank_line_before_the_end_is_refused() -> None:
