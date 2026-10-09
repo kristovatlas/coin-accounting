@@ -285,6 +285,9 @@ class _Open:
     loss_basis: Decimal | None
     gift: bool
     fifo: date  # the date the lot reached the user: its FIFO place in every account
+    created: bool = (
+        False  # made by the engine for a withdrawal from an account without lots, or moved from one
+    )
 
 
 def long_term(acquired: date, disposed: date) -> bool:
@@ -526,7 +529,8 @@ class _Engine:
     def _unrecorded_if_needed(self, t: Transfer) -> None:
         """For a withdrawal from an account without lots (its buys were never entered), a lot for its sats
         (ADR 0009). In an account with lots a shortfall is missing basis, never a new lot."""
-        if t.kind == "withdrawal" and t.account not in self._recorded:
+        held = any(o.sats for o in self._open.get(t.account, []))
+        if t.kind == "withdrawal" and t.account not in self._recorded and not held:
             if t.picks is not None:
                 raise EngineError(f"transfer {t.id!r}: an account without lots has none to choose")
             self._unrecorded(t, t.sats)
@@ -545,7 +549,7 @@ class _Engine:
             basis, unknown = _usd(t.missing_basis, t.id), False
         acquired = t.missing_acquired if t.missing_acquired is not None else t.on
         lot = Lot(lot_id, t.account, acquired, sats, basis, False, None, None, unknown)
-        self._insert(t.account, _Open(lot, sats, basis, None, False, acquired))
+        self._insert(t.account, _Open(lot, sats, basis, None, False, acquired, created=True))
         self._created.append(lot)
 
     def _take(self, lot_id: str, sats: int) -> tuple[Decimal, Decimal | None]:
@@ -574,7 +578,7 @@ class _Engine:
         fees = _fee_shares(min(t.fee_sats, sum(p.sats for p in picks) - 1), picks)
         dispose = t.kind == "withdrawal" or self._fee_treatment == "dispose"
         out: list[Allocation | Moved] = []
-        orphans: list[_Open] = []
+        orphans: list[tuple[_Open, Decimal, int]] = []
         charged = sum(fees)
         if dispose and charged > 0:
             disposal = Disposal(t.id, t.account, t.on, t.at, "spend", charged, fee_value)
@@ -584,7 +588,8 @@ class _Engine:
             o = self._lots[pick.lot]
             moving = pick.sats - fee
             if not moving:
-                orphans.append(o)  # all fee: under carry its basis goes to a moved part, as in the real run
+                # all fee: under carry its share of the lot's basis goes to a moved part, as in the real run
+                orphans.append((o, share(o.basis, pick.sats, o.sats), pick.sats))
                 continue
             if dispose:  # the fee's basis leaves with the fee: the rest is a share of what remains
                 fee_basis = share(o.basis, fee, o.sats)
@@ -597,7 +602,9 @@ class _Engine:
                 )
         if orphans and not dispose:
             moved = [m for m in out if isinstance(m, Moved)]
-            target = _dust_target(moved, orphans, {m.into: self._lots[m.lot] for m in moved}, t.id)
+            target = _dust_target(
+                moved, [o for o, _, _ in orphans], {m.into: self._lots[m.lot] for m in moved}, t.id
+            )
             i = out.index(target)
             out[i] = Moved(
                 target.transfer,
@@ -605,10 +612,10 @@ class _Engine:
                 target.into,
                 target.to,
                 target.sats,
-                add(target.basis, sum((o.basis for o in orphans), ZERO)),
+                add(target.basis, sum((b for _, b, _ in orphans), ZERO)),
                 target.acquired,
-                target.carried_fee + sum(o.sats for o in orphans),
-                tuple(o.lot.id for o in orphans),
+                target.carried_fee + sum(n for _, _, n in orphans),
+                tuple(o.lot.id for o, _, _ in orphans),
             )
         return tuple(out)
 
@@ -629,8 +636,8 @@ class _Engine:
             o.lot.loss_from if loss is not None else None,
             o.lot.unknown_basis,
         )
-        self._insert(t.to, _Open(lot, arriving, basis, loss, o.gift, o.fifo))
-        if not o.lot.id.endswith(UNRECORDED):  # a created lot moved on is still not a recorded one
+        self._insert(t.to, _Open(lot, arriving, basis, loss, o.gift, o.fifo, created=o.created))
+        if not o.created:  # a created lot, however far it moves, is still not one the user recorded
             self._recorded.add(t.to)
         moved = Moved(t.id, lot_id, into, t.to, arriving, basis, o.lot.acquired, sats - arriving)
         self._moves.append(moved)
@@ -810,15 +817,17 @@ def _plain(o: _Open) -> bool:
 def _dust_target(
     moved: Sequence[Moved], orphans: Sequence[_Open], lots: Mapping[str, _Open], tid: str
 ) -> Moved:
-    """The moved part that takes all-fee dust parts' basis: the last one in FIFO order. Basis is only
-    carried between plain lots (one known cost basis each): a gift's dual basis or an unknown basis
-    can't be merged into another lot, so such dust is refused rather than mis-stated."""
-    if not all(_plain(o) for o in orphans) or not _plain(lots[moved[-1].into]):
+    """The moved part that takes all-fee dust parts' basis: the last plain one in FIFO order. Basis is
+    only carried between plain lots (one known cost basis each): a gift's dual basis or an unknown
+    basis can't be merged into another lot, so dust that is such a lot, or that has no plain moved part
+    to go to, is refused rather than mis-stated."""
+    plain = [m for m in moved if _plain(lots[m.into])]
+    if not all(_plain(o) for o in orphans) or not plain:
         raise EngineError(
-            f"transfer {tid!r}: a fee that uses up a gift or unknown-basis lot's whole part can't carry its "
-            "basis to another lot; use fee_treatment='dispose' or a smaller fee"
+            f"transfer {tid!r}: a fee that uses up a part of a gift or unknown-basis lot, or with no plain "
+            "lot moving to take its basis, can't carry the basis to another lot; use fee_treatment='dispose'"
         )
-    return moved[-1]
+    return plain[-1]
 
 
 def _merged(picks: Sequence[Pick]) -> dict[str, int]:

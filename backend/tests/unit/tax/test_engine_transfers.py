@@ -298,7 +298,7 @@ def test_any_mix_of_transfers_conserves_sats_and_basis(data: st.DataObject) -> N
     try:
         result = run(events, fee_treatment=treatment)
     except EngineError as e:  # the one documented refusal: dust of an unknown-basis lot under carry
-        assume("can't carry its basis" not in str(e))
+        assume("can't carry the basis" not in str(e))
         raise
     bought = [e for e in events if isinstance(e, Acquisition)]
     created = sum(lot.sats for lot in result.created)  # lots created for withdrawals, ADR 0009
@@ -311,6 +311,13 @@ def test_any_mix_of_transfers_conserves_sats_and_basis(data: st.DataObject) -> N
     if treatment == "dispose":
         assert carried == 0
     assert all(m.sats > 0 for m in result.moves)
+    # A created lot is used up whole by its own withdrawal: none stays behind as sats nobody had (T-509).
+    assert not [h for h in result.holdings if h.id.endswith("@@unrecorded")]
+    for lot in result.created:
+        tid = lot.id.removesuffix("@@unrecorded")
+        taken = sum(m.sats + m.carried_fee for m in result.moves if m.lot == lot.id and m.transfer == tid)
+        taken += sum(a.sats for a in result.allocations if a.lot == lot.id and a.disposal == tid)
+        assert taken == lot.sats
     assert run(events, fee_treatment=treatment) == result  # deterministic
 
 
@@ -508,9 +515,97 @@ def test_a_carried_fees_value_plays_no_part() -> None:
 def test_dust_of_a_gift_lot_cant_carry_its_basis_into_another_lot() -> None:
     gift = Acquisition("g", "w", date(2024, 1, 1), "gift_in", 1, D("10.00"), D("5.00"), date(2020, 1, 1))
     events: list[Event] = [gift, Acquisition("b", "w", date(2024, 1, 2), "buy", 1, D("1.00"))]
-    with pytest.raises(EngineError, match="can't carry its basis"):
+    with pytest.raises(EngineError, match="can't carry the basis"):
         run([*events, move("d", "w", "x", 2, fee_sats=1)])
     # Under the disposal treatment the gift's sat is simply the fee disposal, with its dual basis.
     result = run([*events, move("d", "w", "x", 2, fee_sats=1, fee_value=D("0.50"))], fee_treatment="dispose")
     (fee,) = result.allocations
     assert (fee.lot, fee.rule, fee.basis) == ("g", "fmv_at_gift", D("5.00"))
+
+
+def test_a_withdrawal_never_creates_sats_beside_lots_the_account_holds_t509() -> None:
+    # Exchange A has no lots: a withdrawal to exchange B creates a lot. B now holds those sats (not
+    # recorded by the user, but held): a withdrawal from B uses them, and never creates more beside them.
+    first = move(
+        "wd1", "a", "b", 10, kind="withdrawal", missing_basis=D("1.00"), missing_acquired=date(2023, 1, 1)
+    )
+    second = move("wd2", "b", "w", 10, kind="withdrawal", on=date(2025, 2, 1))
+    result = run([first, second])
+    assert [lot.id for lot in result.created] == ["wd1@@unrecorded"]
+    assert [(h.id, h.account, h.sats) for h in result.holdings] == [("wd1@@unrecorded@wd1@wd2", "w", 10)]
+    papered = move(
+        "wd2",
+        "b",
+        "w",
+        10,
+        kind="withdrawal",
+        on=date(2025, 2, 1),
+        missing_basis=D("3.00"),
+        missing_acquired=date(2023, 6, 1),
+    )
+    with pytest.raises(EngineError, match="missing basis"):
+        run([first, papered])
+
+
+def test_a_created_lot_stays_unrecorded_however_far_it_moves() -> None:
+    first = move(
+        "wd1", "a", "b", 10, kind="withdrawal", missing_basis=D("1.00"), missing_acquired=date(2023, 1, 1)
+    )
+    hop = move("t1", "b", "c", 10, kind="self_transfer", on=date(2025, 1, 2))
+    away = move("t2", "c", "d", 10, kind="self_transfer", on=date(2025, 1, 3))
+    # c and d only ever held the created lot, now gone on: a withdrawal from c can take a basis again.
+    again = move(
+        "wd2",
+        "c",
+        "w",
+        5,
+        kind="withdrawal",
+        on=date(2025, 2, 1),
+        missing_basis=D("2.00"),
+        missing_acquired=date(2023, 6, 1),
+    )
+    assert [lot.id for lot in run([first, hop, away, again]).created] == [
+        "wd1@@unrecorded",
+        "wd2@@unrecorded",
+    ]
+
+
+def test_a_late_alternative_carries_only_a_partial_dust_parts_share() -> None:
+    # b1 and b2 hold 10 sats each (1.00 each). FIFO moving 11 sats with a 10-sat fee picks b1 10, b2 1;
+    # the shares are [9, 1], so b2's 1-sat part is all fee and carries 1/10 of b2's basis (0.10).
+    events: list[Event] = [
+        Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("1.00")),
+        Acquisition("b2", "w", date(2024, 1, 2), "buy", 10, D("1.00")),
+        Acquisition("b9", "w", date(2024, 2, 1), "buy", 11, D("9.00")),
+    ]
+    late_choice = move("d", "w", "x", 11, fee_sats=10, picks=(Pick("b9", 11),), identified_at=at(DAY, 18))
+    (late,) = run([*events, late_choice]).late
+    real = run([*events, move("d", "w", "x", 11, fee_sats=10)])
+    assert late.standing == real.moves
+    assert real.moves == (Moved("d", "b1", "b1@d", "x", 1, D("1.10"), date(2024, 1, 1), 10, ("b2",)),)
+
+
+def test_dust_goes_to_the_last_plain_moved_part() -> None:
+    # Lots of 1, 2 and 3 sats, a 4-sat fee (of 6): the floor shares are 0, 1 and 2, the one sat left
+    # can't be taken by the 2- or 3-sat parts without emptying them, so it falls on the 1-sat dust.
+    # The dust's basis goes to the buy, the last plain part that moves, not to the gift.
+    events: list[Event] = [
+        Acquisition("dust", "w", date(2024, 1, 1), "buy", 1, D("0.50")),
+        Acquisition("buy", "w", date(2024, 1, 2), "buy", 2, D("2.00")),
+        Acquisition("g", "w", date(2024, 1, 3), "gift_in", 3, D("3.00"), D("1.00"), date(2020, 1, 1)),
+    ]
+    result = run([*events, move("d", "w", "x", 6, fee_sats=4)])
+    assert [(m.lot, m.sats, m.basis, m.carried_fee, m.carried_from) for m in result.moves] == [
+        ("buy", 1, D("2.50"), 2, ("dust",)),
+        ("g", 1, D("3.00"), 2, ()),
+    ]
+
+
+def test_a_moved_inherited_lot_stays_long_term_irc1223() -> None:
+    events: list[Event] = [
+        Acquisition("i", "w", date(2025, 5, 1), "inherit", 10, D("10.00")),
+        move("d", "w", "x", 10, on=date(2025, 5, 2)),
+        Disposal("s", "x", date(2025, 5, 3), at(date(2025, 5, 3)), "sell", 10, D("12.00")),
+    ]
+    (a,) = run(events).allocations
+    assert a.long_term
