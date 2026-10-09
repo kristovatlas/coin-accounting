@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Context, Decimal, Inexact, Rounded, localcontext
 from fractions import Fraction
+from typing import Any
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from coinacct.prices import DailyPrice, PriceError
-from coinacct.prices.fx import DISPLAY, ecb_rates, to_display
+from coinacct.prices.fx import DISPLAY, MAX_RATE, ecb_rates, to_display
 
 HEADER = "Date,USD,JPY,GBP,CYP,\n"  # the real file's shape: a trailing comma, retired currencies
 
@@ -90,11 +91,31 @@ def test_a_usd_series_out_of_order_or_with_a_day_twice_is_refused(days: tuple[in
         to_display([usd(date(2024, 1, d), "1.00") for d in days], {})
 
 
-@pytest.mark.parametrize("bad", [0, -1, 1.1, True, Decimal(1)])
+@pytest.mark.parametrize("bad", [0, -1, 1.1, True, Decimal(1), 1_000_000_000_000])
 def test_a_rate_from_elsewhere_must_be_a_positive_scaled_integer(bad: object) -> None:
     for row in ({"USD": bad, "GBP": 1}, {"USD": 1, "GBP": bad}):
         with pytest.raises(PriceError, match="a rate must be a positive integer"):
             to_display([usd(date(2024, 1, 2), "1.00")], {date(2024, 1, 2): row})  # type: ignore[dict-item]
+
+
+def test_the_largest_rate_the_csv_can_hold_is_accepted() -> None:
+    rates = {date(2024, 1, 2): {"USD": 1_000_000, "GBP": 999_999_999_999}}
+    shown = to_display([usd(date(2024, 1, 2), "0.01")], rates)
+    assert [(p.currency, p.price) for p in shown] == [("EUR", Decimal("0.01")), ("GBP", Decimal("10000.00"))]
+
+
+@pytest.mark.parametrize(
+    "rates",
+    [
+        {datetime(2024, 1, 2): {"USD": 1}},  # a datetime is a date too, but not a day
+        {"2024-01-02": {"USD": 1}},
+        {date(2024, 1, 2): [("USD", 1)]},
+        {date(2024, 1, 2): {1: 1}},
+    ],
+)
+def test_a_rate_mapping_of_the_wrong_shape_is_refused_not_crashed_on(rates: Any) -> None:
+    with pytest.raises(PriceError, match=r"must map each day \(a date\)|a rate must be a positive integer"):
+        to_display([usd(date(2024, 1, 2), "1.00")], rates)
 
 
 def test_every_rate_is_checked_even_one_no_conversion_uses() -> None:
@@ -173,7 +194,7 @@ def test_rates_of_currencies_never_shown_are_not_checked() -> None:
 
 
 _cents = st.integers(1, 10**15).map(lambda c: Decimal(c).scaleb(-2))
-_rate = st.integers(1, 10**12)
+_rate = st.integers(1, MAX_RATE)  # every rate the check lets through
 
 
 @given(_cents, _rate, _rate)

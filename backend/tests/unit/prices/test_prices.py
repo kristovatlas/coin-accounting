@@ -15,11 +15,13 @@ from coinacct.prices import (
     DailyPrice,
     Gap,
     Method,
+    Mismatch,
     Outlier,
     PriceError,
     check,
     combine,
     content_hash,
+    mismatches,
 )
 
 
@@ -144,3 +146,29 @@ def test_an_unsorted_series_is_refused(series: list[DailyPrice]) -> None:
 
 def test_the_content_hash_is_the_files_sha256() -> None:
     assert content_hash(b"abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+
+def test_days_where_the_vwap_and_typical_price_part_by_more_than_a_quarter_are_flagged() -> None:
+    vwap = [p(1, "100"), p(2, "100"), p(3, "100"), p(4, "100.01"), p(6, "100")]
+    typical = [p(n, x, "typical") for n, x in ((1, "125"), (2, "125.01"), (3, "79.99"), (4, "80"), (5, "1"))]
+    # 125 is exactly a quarter above 100: not flagged; 125.01 and 79.99 are past it; 100.01 vs 80 is
+    # 1.250125 apart. Day 5 has no VWAP and day 6 no typical price: nothing to compare.
+    assert mismatches(vwap, typical) == [
+        Mismatch(date(2024, 1, 2), Decimal("100.00"), Decimal("125.01")),
+        Mismatch(date(2024, 1, 3), Decimal("100.00"), Decimal("79.99")),
+        Mismatch(date(2024, 1, 4), Decimal("100.01"), Decimal("80.00")),
+    ]
+
+
+def test_the_mismatch_check_is_exact_whatever_the_callers_decimal_context() -> None:
+    vwap, typical = [p(1, "100.00")], [p(1, "125.01", "typical")]
+    with localcontext(Context(prec=2, traps=[Inexact, Rounded])):
+        got = mismatches(vwap, typical)
+    assert [m.day for m in got] == [date(2024, 1, 1)]
+
+
+def test_the_mismatch_check_refuses_mixed_currencies_and_the_wrong_methods() -> None:
+    with pytest.raises(PriceError, match="the series mix currencies"):
+        mismatches([p(1, "1")], [p(1, "1", "typical", "EUR")])
+    with pytest.raises(PriceError, match="expected a vwap price, got typical"):
+        mismatches([p(1, "1", "typical")], [p(1, "1", "typical")])

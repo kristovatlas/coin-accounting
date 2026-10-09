@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
-from coinacct.prices import DailyPrice, Gap, Outlier, check, combine, fetch
+from coinacct.prices import DailyPrice, Gap, Mismatch, Outlier, check, combine, fetch, mismatches
 from coinacct.prices.bitstamp import DUMP_SOURCE, OHLC_SOURCE
 from coinacct.prices.fetch import Cancelled, Proxy
 from coinacct.prices.fx import DISPLAY, ECB_SOURCE, to_display
@@ -24,12 +24,14 @@ from coinacct.prices.fx import DISPLAY, ECB_SOURCE, to_display
 class Refreshed:
     """One refresh's result. `usd` is the tax series; `display` holds each display currency's series,
     Bitstamp's own pair where it traded and the ECB conversion of USD elsewhere. `hashes` maps each
-    source to the SHA-256 of what was fetched (T-303)."""
+    source to the SHA-256 of what was fetched (T-303). `mismatches` are the USD days on which the
+    trade VWAP and Bitstamp's typical price disagree: review flags, like gaps and outliers."""
 
     usd: list[DailyPrice]
     display: dict[str, list[DailyPrice]]
     gaps: dict[str, list[Gap]]
     outliers: dict[str, list[Outlier]]
+    mismatches: list[Mismatch]
     hashes: dict[str, str]
 
 
@@ -64,7 +66,7 @@ def _refresh(proxy: Proxy | None, stop: Callable[[], bool], complete_before: dat
     outliers: dict[str, list[Outlier]] = {}
     for currency, series in (("USD", usd), *display.items()):
         gaps[currency], outliers[currency] = check(series)
-    return Refreshed(usd, display, gaps, outliers, hashes)
+    return Refreshed(usd, display, gaps, outliers, mismatches(vwap, typical["USD"]), hashes)
 
 
 def _prefer(market: Sequence[DailyPrice], converted: Sequence[DailyPrice]) -> list[DailyPrice]:

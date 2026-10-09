@@ -225,6 +225,9 @@ def test_a_price_that_rounds_past_the_largest_is_refused_naming_its_line() -> No
     assert vwap_by_day([f"{JAN1},999999999999999.994,1", END], LATER)[0].price == Decimal(
         "999999999999999.99"
     )
+    near = "999999999999999.994"  # rounds down to MAX_PRICE: accepted
+    (p,) = typical_by_day(page(candle(open=near, high=near, low=near, close=near)), "USD", LATER)
+    assert p.price == Decimal("999999999999999.99")
 
 
 def test_deeply_nested_json_is_refused_as_invalid() -> None:
