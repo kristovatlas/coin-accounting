@@ -6,8 +6,9 @@ The format is strict and documented, so nothing is guessed:
     date,currency,price
     2024-01-02,USD,44950.12
 
-- **One header line, exactly as above,** then one row per day and currency. Lines end in `\\n`, or
-  `\\r\\n`; blank lines may only end the file.
+- **One header line, exactly as above,** then one row per day and currency. Every line ends in `\\n`,
+  or `\\r\\n`, the last one too, so a file cut off mid-row is refused; blank lines may only end the
+  file.
 - **`date`** is an ISO day (`YYYY-MM-DD`), `currency` one of `CURRENCIES`, and `price` a positive
   amount with at most two decimals and 15 integer digits: the user's own value, never rounded.
 - **No day twice for a currency.** Rows may come in any order; each currency's series is returned
@@ -44,13 +45,15 @@ def parse(data: bytes) -> dict[str, list[DailyPrice]]:
     text = data.decode("ascii")
     if "\r" in text.replace("\r\n", ""):
         _fail("the file holds a carriage return that doesn't end a line")
-    lines = text.replace("\r\n", "\n").split("\n")
-    while lines and lines[-1] == "":
-        lines.pop()
-    if not lines or lines[0] != HEADER:
-        _fail(f"line 1: expected the header {HEADER}")
-    if len(lines) - 1 > MAX_ROWS:
+    text = text.replace("\r\n", "\n")
+    if text and not text.endswith("\n"):  # a last row cut short could still read as a price
+        _fail("the last line has no line break: the file may be cut off")
+    text = text.rstrip("\n")
+    if text.count("\n") > MAX_ROWS:  # counted before splitting, so a long file is never held as lines
         _fail(f"the file has more than {MAX_ROWS} rows")
+    lines = text.split("\n")
+    if lines[0] != HEADER:
+        _fail(f"line 1: expected the header {HEADER}")
     out: dict[str, dict[date, DailyPrice]] = {}
     for n, line in enumerate(lines[1:], 2):
         fields = line.split(",")

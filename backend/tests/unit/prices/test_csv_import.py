@@ -62,6 +62,9 @@ def test_the_prices_are_exact_whatever_the_callers_decimal_context() -> None:
         (f"{HEADER}\n2024-01-02,USD,1\x0c\n", "isn't printable ASCII"),
         (f"{HEADER}\n2024-01-02,USD,{chr(0x661)}\n", "isn't printable ASCII"),
         (f"{chr(0xFEFF)}{HEADER}\n", "isn't printable ASCII"),  # a byte-order mark: say it, don't guess
+        (HEADER, "the last line has no line break"),
+        (f"{HEADER}\n2024-01-02,USD,449", "the last line has no line break: the file may be cut off"),
+        (f"{HEADER}\r\n2024-01-02,USD,449", "the last line has no line break"),
     ],
 )
 def test_a_malformed_file_is_refused_whole_naming_its_line(body: str, message: str) -> None:
@@ -76,6 +79,17 @@ def test_a_file_too_large_or_too_long_is_refused(monkeypatch: pytest.MonkeyPatch
     body = f"{HEADER}\n2024-01-01,USD,1\n2024-01-02,USD,1\n2024-01-03,USD,1\n"
     with pytest.raises(PriceError, match="more than 2 rows"):
         parse(body.encode())
+    with pytest.raises(PriceError, match="more than 2 rows"):  # blank lines inside count as rows too
+        parse(f"{HEADER}\n\n\nx\n".encode())
+
+
+def test_a_file_exactly_at_the_limits_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(csv_import, "MAX_ROWS", 2)
+    body = f"{HEADER}\n2024-01-01,USD,1\n2024-01-02,USD,1\n".encode()
+    assert len(parse(body)["USD"]) == 2
+    padded = body + b"\n" * (csv_import.MAX_BYTES - len(body))  # blank lines may end the file
+    assert len(padded) == csv_import.MAX_BYTES
+    assert len(parse(padded)["USD"]) == 2
 
 
 def test_a_bad_row_after_good_ones_still_refuses_the_whole_file() -> None:
