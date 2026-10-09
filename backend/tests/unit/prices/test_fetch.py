@@ -8,17 +8,21 @@ check the context it is given and where the TLS layer is applied.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
+import json
 import socket
 import ssl
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import date
 from typing import Any
 
 import pytest
 
-from coinacct.prices import fetch
+from coinacct.prices import PriceError, fetch
 from coinacct.prices.fetch import HEADERS, USER_AGENT, FetchError, Proxy, open_url, socks5_connect
 
 URL = "https://www.bitstamp.net/api/v2/ohlc/btcusd/?step=86400&limit=1000"
@@ -649,3 +653,174 @@ def test_the_tls_layer_refuses_a_close_without_close_notify(monkeypatch: pytest.
     (kwargs,) = calls
     assert kwargs["suppress_ragged_eofs"] is False and kwargs["do_handshake_on_connect"] is False
     assert kwargs["server_hostname"] == "www.ecb.europa.eu"
+
+
+@pytest.mark.parametrize(
+    ("header", "wait"),
+    [
+        (b"Retry-After: 5\r\n", 5),
+        (b"Retry-After:  7\t\r\n", 7),
+        (b"Retry-After: 0\r\n", 0),
+        (b"Retry-After: Wed, 21 Oct 2015 07:28:00 GMT\r\n", None),  # a date isn't read: back off
+        (b"Retry-After: -1\r\n", None),
+        (b"Retry-After: 1234567\r\n", None),  # more than six digits
+        (b"", None),
+    ],
+)
+def test_a_429_is_reported_with_the_wait_it_asks_for(
+    direct: list[FakeServer], header: bytes, wait: int | None
+) -> None:
+    direct.append(FakeServer(b"HTTP/1.1 429 Too Many Requests\r\n" + header + b"Content-Length: 0\r\n\r\n"))
+    with pytest.raises(fetch.RateLimited, match=r"www\.bitstamp\.net: HTTP 429") as e:
+        with open_url(URL, max_bytes=1000):
+            pass
+    assert e.value.retry_after == wait
+
+
+# --- Coin Metrics' reference rate (ADR 0039): the paging, limits and retries, over a fake open_url
+
+CM_BEFORE = date(2024, 1, 10)
+CM_FIRST = fetch.REFERENCE_URL.format(end="2024-01-09")
+
+
+def cm_page(*days: int, token: str | None = None, url: str | None = None) -> bytes:
+    rows = [{"asset": "btc", "time": f"2024-01-0{d}T00:00:00.000000000Z", "PriceUSD": f"{d}"} for d in days]
+    doc: dict[str, Any] = {"data": rows}
+    if token is not None:
+        doc["next_page_token"] = token
+    if url is not None:
+        doc["next_page_url"] = url
+    return json.dumps(doc).encode()
+
+
+@pytest.fixture
+def cm(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Answers in order: bytes are a page, an exception is raised. Records each call's URL and limits."""
+    state: dict[str, Any] = {"answers": [], "asked": [], "limits": [], "slept": []}
+
+    @contextmanager
+    def fake(url: str, proxy: Any = None, **limits: Any) -> Iterator[io.BytesIO]:
+        state["asked"].append(url)
+        state["limits"].append(limits)
+        answer = state["answers"].pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        yield io.BytesIO(answer)
+
+    monkeypatch.setattr(fetch, "open_url", fake)
+    return state
+
+
+def download(cm: dict[str, Any], cancelled: Any = lambda: False, before: Any = CM_BEFORE) -> Any:
+    return fetch.download_reference(before, None, cancelled, sleep=cm["slept"].append)
+
+
+def test_the_reference_rate_is_one_fixed_request_ending_the_day_before(cm: dict[str, Any]) -> None:
+    cm["answers"] = [cm_page(1, 2)]
+    got, digest = download(cm)
+    assert [(p.day.day, str(p.price)) for p in got] == [(1, "1.00"), (2, "2.00")]
+    assert cm["asked"] == [
+        "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics?assets=btc&metrics=PriceUSD"
+        "&frequency=1d&paging_from=start&page_size=10000&start_time=2010-07-18&end_time=2024-01-09"
+    ]
+    page = cm_page(1, 2)
+    assert digest == hashlib.sha256(b"0:%d\n" % len(page) + page).hexdigest()
+    assert cm["limits"][0]["max_bytes"] == fetch.REFERENCE_MAX
+    assert 0 < cm["limits"][0]["deadline"] <= fetch.DEADLINE
+
+
+def test_each_next_page_is_the_fixed_url_plus_the_checked_token(cm: dict[str, Any]) -> None:
+    first = cm_page(1, 2, token="0.MjAyNA", url="https://elsewhere.example/steal")
+    second = cm_page(3)
+    cm["answers"] = [first, second]
+    got, digest = download(cm)
+    assert [p.day.day for p in got] == [1, 2, 3]
+    assert cm["asked"] == [CM_FIRST, CM_FIRST + "&next_page_token=0.MjAyNA"]  # never the server's URL
+    framed = b"0:%d\n" % len(first) + first + b"1:%d\n" % len(second) + second
+    assert digest == hashlib.sha256(framed).hexdigest()
+    # one byte limit for the whole download: the second page gets what the first left
+    assert cm["limits"][1]["max_bytes"] == fetch.REFERENCE_MAX - len(first)
+    assert cm["limits"][1]["deadline"] <= cm["limits"][0]["deadline"]  # and one deadline
+
+
+def test_a_next_page_must_carry_on_after_the_last(cm: dict[str, Any]) -> None:
+    cm["answers"] = [cm_page(1, 2, token="0.a"), cm_page(2)]
+    with pytest.raises(PriceError, match="2024-01-02 is out of day order"):
+        download(cm)
+
+
+def test_an_empty_page_pointing_to_another_is_refused(cm: dict[str, Any]) -> None:
+    cm["answers"] = [cm_page(token="0.a")]
+    with pytest.raises(FetchError, match="a page with no rows points to another"):
+        download(cm)
+
+
+def test_the_pages_are_capped_by_what_the_history_can_fill(cm: dict[str, Any]) -> None:
+    # refreshing on 2024-01-10, 4924 days after 2010-07-18: one page of 10,000 holds them, plus a
+    # margin of one, so a third page is never asked for
+    cm["answers"] = [cm_page(1, token="0.a"), cm_page(2, token="0.b"), cm_page(3)]
+    with pytest.raises(FetchError, match="more pages than the history can fill"):
+        download(cm)
+    assert len(cm["asked"]) == 2
+
+
+def test_a_page_that_isnt_ascii_is_refused(cm: dict[str, Any]) -> None:
+    cm["answers"] = [b'{"data": []}\xff']
+    with pytest.raises(FetchError, match=r"community-api\.coinmetrics\.io: a page isn't ASCII"):
+        download(cm)
+
+
+def test_a_download_out_of_time_asks_for_nothing(cm: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fetch, "DEADLINE", 0.0)
+    with pytest.raises(FetchError, match="took too long"):
+        download(cm)
+    assert cm["asked"] == []
+
+
+def limited(after: int | None = None) -> fetch.RateLimited:
+    return fetch.RateLimited(fetch.REFERENCE_HOST, after)
+
+
+def test_a_429_is_honoured_by_backing_off_or_waiting_as_asked(cm: dict[str, Any]) -> None:
+    cm["answers"] = [limited(), limited(), limited(5), cm_page(1)]
+    got, _ = download(cm)
+    assert [p.day.day for p in got] == [1]
+    assert len(cm["slept"]) == 10 + 20 + 5 and set(cm["slept"]) == {1.0}  # a second at a time
+    assert cm["asked"] == [CM_FIRST] * 4  # the same request each time: nothing dodges the limit
+
+
+def test_a_429_that_persists_fails_the_refresh(cm: dict[str, Any]) -> None:
+    cm["answers"] = [limited(), limited(), limited(), limited()]
+    with pytest.raises(FetchError, match="still rate-limited after 3 retries"):
+        download(cm)
+    assert len(cm["slept"]) == 10 + 20 + 40
+
+
+def test_a_429_asking_for_too_long_a_wait_fails_at_once(cm: dict[str, Any]) -> None:
+    cm["answers"] = [limited(61)]
+    with pytest.raises(FetchError, match="rate-limited for longer than 60 s"):
+        download(cm)
+    assert cm["slept"] == []
+    cm["answers"], cm["asked"] = [limited(60), cm_page(1)], []
+    assert [p.day.day for p in download(cm)[0]] == [1]  # 60 s itself is honoured
+
+
+def test_a_wait_past_the_deadline_fails_at_once(cm: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fetch, "DEADLINE", 30.0)
+    cm["answers"] = [limited(40)]
+    with pytest.raises(FetchError, match="took too long"):
+        download(cm)
+    assert cm["slept"] == []
+
+
+def test_a_cancel_during_a_wait_stops_within_a_second(cm: dict[str, Any]) -> None:
+    calls = []
+
+    def cancelled() -> bool:
+        calls.append(1)
+        return len(calls) > 3
+
+    cm["answers"] = [limited(30)]
+    with pytest.raises(fetch.Cancelled, match=r"community-api\.coinmetrics\.io: the refresh was cancelled"):
+        download(cm, cancelled)
+    assert len(cm["slept"]) == 3

@@ -18,9 +18,9 @@ T-302, T-303, T-305).
   declared length is an error, not an end, and so is a TLS close without close_notify; the parsers
   still validate what they read (T-304).
 
-The sources' downloads (`download_ohlc`, `download_ecb`) are at the end. Their requests are fixed by
-the calendar alone: the same for every user (T-301). Fetching happens only when the user asks for a
-refresh (services). Nothing here runs on import.
+The sources' downloads (`download_reference`, `download_ohlc`, `download_ecb`) are at the end. Their
+requests are fixed by the calendar alone: the same for every user (T-301). Fetching happens only when
+the user asks for a refresh (services). Nothing here runs on import.
 """
 
 from __future__ import annotations
@@ -38,17 +38,17 @@ import zlib
 from collections.abc import Buffer, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final, NoReturn, cast
 from urllib.parse import urlsplit
 
 from coinacct.prices import CURRENCIES, DailyPrice
 from coinacct.prices.bitstamp import typical_by_day
+from coinacct.prices.coinmetrics import FIRST_DAY, reference_page
 from coinacct.prices.fx import Rates, ecb_rates
 
-# ADR 0039: the bitcoincharts archive is gone (unreachable, and a lapsed domain could be taken over);
-# Coin Metrics joins when its downloader lands.
-HOSTS: Final = frozenset({"www.bitstamp.net", "www.ecb.europa.eu"})
+# ADR 0039: Coin Metrics' reference rate, Bitstamp's candles, the ECB's rates.
+HOSTS: Final = frozenset({"community-api.coinmetrics.io", "www.bitstamp.net", "www.ecb.europa.eu"})
 # Tor Browser's User-Agent (Firefox 140 ESR): a common browser's, not a library's or this app's. Review
 # it at each Tor Browser major release.
 USER_AGENT: Final = "Mozilla/5.0 (Windows NT 10.0; rv:140.0) Gecko/20100101 Firefox/140.0"
@@ -66,6 +66,15 @@ class FetchError(Exception):
 
 class Cancelled(FetchError):
     """The user cancelled the refresh: not a failure, and never a partial result."""
+
+
+class RateLimited(FetchError):
+    """HTTP 429. `retry_after` is the wait the server asked for, in whole seconds, or None if it named
+    none (or named a date, which isn't read: the caller backs off instead)."""
+
+    def __init__(self, host: str, retry_after: int | None) -> None:
+        super().__init__(f"{host}: HTTP 429 (rate-limited)")
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)
@@ -204,6 +213,8 @@ def open_url(  # noqa: PLR0913 - the URL, the proxy, and four keyword-only limit
         except (OSError, http.client.HTTPException, ValueError) as e:
             limit.left(host)  # a step cut by the deadline (or a cancel) says so, not "failed"
             raise FetchError(f"{host}: the download failed ({type(e).__name__})") from None
+        if response.status == http.client.TOO_MANY_REQUESTS:
+            raise RateLimited(host, _retry_after(response.getheader("Retry-After")))
         if response.status != http.client.OK:
             _fail(f"{host}: HTTP {response.status} (a redirect or error; nothing is followed)")
         declared = (
@@ -230,6 +241,12 @@ def _length(header: str | None, host: str, max_bytes: int) -> int | None:
     if len(digits) > len(str(max_bytes)) or int(digits) > max_bytes:
         _fail(f"{host}: the response is larger than allowed")
     return int(digits)
+
+
+def _retry_after(header: str | None) -> int | None:
+    """Retry-After's delay in seconds (RFC 9110 §10.2.3), or None: an HTTP date, or anything else."""
+    text = (header or "").strip(" \t")
+    return int(text) if 0 < len(text) <= 6 and text.isascii() and text.isdigit() else None
 
 
 def _check_url(url: str) -> tuple[str, str]:
@@ -459,3 +476,101 @@ def download_ecb(proxy: Proxy | None, cancelled: Callable[[], bool]) -> tuple[Ra
     except UnicodeDecodeError:
         _fail("www.ecb.europa.eu: the rates file isn't ASCII")
     return ecb_rates(lines), hashlib.sha256(data).hexdigest()
+
+
+# --- Coin Metrics' reference rate (ADR 0039). The URL is fixed but for `end_time`, the day before the
+# refresh's UTC date: calendar-only, so the request is the same for every user (T-301). It also keeps a
+# clock a little behind UTC from asking for a day the server already counts as over.
+REFERENCE_URL: Final = (
+    "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics?assets=btc&metrics=PriceUSD"
+    "&frequency=1d&paging_from=start&page_size=10000&start_time=2010-07-18&end_time={end}"
+)
+REFERENCE_HOST: Final = "community-api.coinmetrics.io"
+REFERENCE_PAGE_DAYS: Final = 10_000  # the API's largest page_size: the whole history fits in one page
+REFERENCE_MAX: Final = 8 << 20  # every page together: 10,000 rows are about 800 kB
+# A 429 is honoured, never dodged (ADR 0039): wait as Retry-After says, or back off 10, 20, then 40 s,
+# at most RETRIES times. A longer wait than RETRY_WAIT_MAX fails the refresh: it stays well under Tor's
+# usual 10-minute circuit lifetime, and the download never asks Tor for a new circuit.
+RETRIES: Final = 3
+RETRY_WAIT: Final = 10
+RETRY_WAIT_MAX: Final = 60
+
+
+def download_reference(
+    complete_before: date,
+    proxy: Proxy | None,
+    cancelled: Callable[[], bool],
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[list[DailyPrice], str]:
+    """Coin Metrics' daily reference rate for every complete day, and a SHA-256 over the pages as
+    fetched, each prefixed with its number and length. Each next page is the fixed URL plus only the
+    response's checked `next_page_token`; the server's `next_page_url` is never followed. The pages are
+    capped by what the history can fill, and one deadline and one byte limit cover them all (T-304)."""
+    first = REFERENCE_URL.format(end=(complete_before - timedelta(days=1)).isoformat())
+    pages = max(0, (complete_before - FIRST_DAY).days) // REFERENCE_PAGE_DAYS + 2
+    until = time.monotonic() + DEADLINE
+    left = REFERENCE_MAX
+    sha = hashlib.sha256()
+    out: list[DailyPrice] = []
+    after: date | None = None
+    url = first
+    for n in range(pages):
+        data = _reference_page(url, proxy, cancelled, until=until, left=left, sleep=sleep)
+        left -= len(data)
+        sha.update(f"{n}:{len(data)}\n".encode() + data)
+        try:
+            text = data.decode("ascii")
+        except UnicodeDecodeError:
+            _fail(f"{REFERENCE_HOST}: a page isn't ASCII")
+        page = reference_page(text, complete_before, after)
+        out.extend(page.prices)
+        if page.next_token is None:
+            return out, sha.hexdigest()
+        if page.last is None:
+            _fail(f"{REFERENCE_HOST}: a page with no rows points to another")
+        after = page.last
+        url = f"{first}&next_page_token={page.next_token}"
+    _fail(f"{REFERENCE_HOST}: more pages than the history can fill")
+
+
+def _reference_page(  # noqa: PLR0913 - the URL, the proxy, and the download's shared limits
+    url: str,
+    proxy: Proxy | None,
+    cancelled: Callable[[], bool],
+    *,
+    until: float,
+    left: int,
+    sleep: Callable[[float], None],
+) -> bytes:
+    """One page, retried after a 429 as RETRIES allows, within the download's deadline and bytes."""
+    for attempt in range(RETRIES + 1):
+        try:
+            with open_url(
+                url, proxy, max_bytes=left, deadline=_time_left(until), cancelled=cancelled
+            ) as body:
+                return body.read()
+        except RateLimited as e:
+            if attempt == RETRIES:
+                _fail(f"{REFERENCE_HOST}: still rate-limited after {RETRIES} retries")
+            wait = RETRY_WAIT << attempt if e.retry_after is None else e.retry_after
+            if wait > RETRY_WAIT_MAX:
+                _fail(f"{REFERENCE_HOST}: rate-limited for longer than {RETRY_WAIT_MAX} s")
+            if wait >= _time_left(until):
+                _fail(f"{REFERENCE_HOST}: the download took too long")
+            _wait(wait, cancelled, sleep)
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns or fails
+
+
+def _time_left(until: float) -> float:
+    left = until - time.monotonic()
+    if left <= 0:
+        _fail(f"{REFERENCE_HOST}: the download took too long")
+    return left
+
+
+def _wait(seconds: int, cancelled: Callable[[], bool], sleep: Callable[[float], None]) -> None:
+    """Wait `seconds`, a second at a time, so a cancel takes effect within one."""
+    for _ in range(seconds):
+        if cancelled():
+            raise Cancelled(f"{REFERENCE_HOST}: the refresh was cancelled")
+        sleep(1.0)

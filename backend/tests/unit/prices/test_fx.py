@@ -19,7 +19,7 @@ HEADER = "Date,USD,JPY,GBP,CYP,\n"  # the real file's shape: a trailing comma, r
 
 
 def usd(day: date, price: str, source: str = "bitstamp") -> DailyPrice:
-    return DailyPrice(day, "USD", Decimal(price), "vwap", source)
+    return DailyPrice(day, "USD", Decimal(price), "reference", source)
 
 
 def shown(day: date, currency: str, price: str, source: str = "bitstamp") -> DailyPrice:

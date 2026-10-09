@@ -25,7 +25,7 @@ from coinacct.prices import (
 )
 
 
-def p(day: int, price: str, method: Method = "vwap", currency: str = "USD") -> DailyPrice:
+def p(day: int, price: str, method: Method = "reference", currency: str = "USD") -> DailyPrice:
     return DailyPrice(date(2024, 1, day), currency, Decimal(price).quantize(CENT), method, "test")
 
 
@@ -56,7 +56,7 @@ def test_only_a_positive_whole_number_of_cents_is_a_price(fields: dict[str, Any]
         "day": date(2024, 1, 1),
         "currency": "USD",
         "price": Decimal("1.00"),
-        "method": "vwap",
+        "method": "reference",
         "source": "test",
     }
     DailyPrice(**good)
@@ -65,7 +65,7 @@ def test_only_a_positive_whole_number_of_cents_is_a_price(fields: dict[str, Any]
 
 
 def test_the_largest_price_is_accepted_and_checked_without_a_decimal_error() -> None:
-    top = DailyPrice(date(2024, 1, 2), "USD", MAX_PRICE, "vwap", "test")
+    top = DailyPrice(date(2024, 1, 2), "USD", MAX_PRICE, "reference", "test")
     assert check([p(1, "1.00"), top])[1] == [Outlier(date(2024, 1, 2), Decimal("1.00"), top.price)]
 
 
@@ -86,21 +86,21 @@ def test_the_trade_average_wins_and_the_typical_price_fills_the_other_days() -> 
 
 
 @pytest.mark.parametrize(
-    ("vwap", "typical", "message"),
+    ("reference", "typical", "message"),
     [
-        ([p(1, "1", "typical")], [], "expected a vwap price"),
+        ([p(1, "1", "typical")], [], "expected a reference price"),
         ([], [p(1, "1")], "expected a typical price"),
         ([p(1, "1"), p(1, "2")], [], "priced twice"),
         ([], [p(1, "1", "typical"), p(1, "1", "typical")], "priced twice"),
         ([p(1, "1")], [p(2, "1", "typical", "EUR")], "mix currencies"),
-        ([p(1, "1")], [p(1, "1", "typical", "EUR")], "mix currencies"),  # even when VWAP would win the day
+        ([p(1, "1")], [p(1, "1", "typical", "EUR")], "mix currencies"),  # even where the reference wins
     ],
 )
 def test_combining_bad_series_is_refused(
-    vwap: list[DailyPrice], typical: list[DailyPrice], message: str
+    reference: list[DailyPrice], typical: list[DailyPrice], message: str
 ) -> None:
     with pytest.raises(PriceError, match=message):
-        combine(vwap, typical)
+        combine(reference, typical)
 
 
 def test_empty_and_display_only_series_combine() -> None:
@@ -148,12 +148,12 @@ def test_the_content_hash_is_the_files_sha256() -> None:
     assert content_hash(b"abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 
 
-def test_days_where_the_vwap_and_typical_price_part_by_more_than_a_quarter_are_flagged() -> None:
-    vwap = [p(1, "100"), p(2, "100"), p(3, "100"), p(4, "100.01"), p(6, "100")]
+def test_days_where_the_reference_and_typical_price_part_by_more_than_a_quarter_are_flagged() -> None:
+    reference = [p(1, "100"), p(2, "100"), p(3, "100"), p(4, "100.01"), p(6, "100")]
     typical = [p(n, x, "typical") for n, x in ((1, "125"), (2, "125.01"), (3, "79.99"), (4, "80"), (5, "1"))]
     # 125 is exactly a quarter above 100: not flagged; 125.01 and 79.99 are past it; 100.01 vs 80 is
-    # 1.250125 apart. Day 5 has no VWAP and day 6 no typical price: nothing to compare.
-    assert mismatches(vwap, typical) == [
+    # 1.250125 apart. Day 5 has no reference rate and day 6 no typical price: nothing to compare.
+    assert mismatches(reference, typical) == [
         Mismatch(date(2024, 1, 2), Decimal("100.00"), Decimal("125.01")),
         Mismatch(date(2024, 1, 3), Decimal("100.00"), Decimal("79.99")),
         Mismatch(date(2024, 1, 4), Decimal("100.01"), Decimal("80.00")),
@@ -161,14 +161,14 @@ def test_days_where_the_vwap_and_typical_price_part_by_more_than_a_quarter_are_f
 
 
 def test_the_mismatch_check_is_exact_whatever_the_callers_decimal_context() -> None:
-    vwap, typical = [p(1, "100.00")], [p(1, "125.01", "typical")]
+    reference, typical = [p(1, "100.00")], [p(1, "125.01", "typical")]
     with localcontext(Context(prec=2, traps=[Inexact, Rounded])):
-        got = mismatches(vwap, typical)
+        got = mismatches(reference, typical)
     assert [m.day for m in got] == [date(2024, 1, 1)]
 
 
 def test_the_mismatch_check_refuses_mixed_currencies_and_the_wrong_methods() -> None:
     with pytest.raises(PriceError, match="the series mix currencies"):
         mismatches([p(1, "1")], [p(1, "1", "typical", "EUR")])
-    with pytest.raises(PriceError, match="expected a vwap price, got typical"):
+    with pytest.raises(PriceError, match="expected a reference price, got typical"):
         mismatches([p(1, "1", "typical")], [p(1, "1", "typical")])
