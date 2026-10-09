@@ -6,15 +6,17 @@ T-302, T-303, T-305).
   followed, so a source can't send the request anywhere else.
 - **Optionally through a SOCKS5 proxy on loopback** (Tor), with remote DNS: the host name goes to the
   proxy, never to a local resolver, so no lookup leaves the machine either (T-302).
-- **One fixed request shape:** GET, with the User-Agent, Accept and Accept-Language of a common browser
-  (Tor Browser's), never a library's or this app's name. That keeps the request ordinary; it can't make
-  it indistinguishable from a browser (the TLS handshake is Python's). The URLs come from the parsers'
-  modules, never from user records (T-301).
+- **One fixed request shape:** GET, with Tor Browser's User-Agent and a generic Accept (PLAN §6: a
+  common browser User-Agent and nothing else), never a library's or this app's name. That keeps the
+  request ordinary; it can't make it indistinguishable from a browser (the TLS handshake is Python's).
+  The URLs come from the parsers' modules, never from user records (T-301).
 - **Tor stream isolation:** each connection offers the proxy a fresh random username and password,
   so Tor puts it on its own circuit, apart from the user's other Tor traffic (Tor's IsolateSOCKSAuth,
   on by default; Bitcoin Core's -proxyrandomize does the same).
 - **Bounded:** each response is a stream of at most `max_bytes`, with a timeout on every read and a
-  deadline for the whole download. A body shorter than its declared length is an error, not an end.
+  deadline for the whole download that cuts the connection whatever it is doing. A body shorter than
+  its declared length is an error, not an end; a body with no declared length can't be checked that
+  way, so the parsers validate what they read (T-304).
 
 Fetching happens only when the user asks for a refresh (services). Nothing here runs on import.
 """
@@ -24,25 +26,23 @@ from __future__ import annotations
 import http.client
 import io
 import ipaddress
+import math
 import secrets
 import socket
 import ssl
-import time
-from collections.abc import Iterator
+import threading
+from collections.abc import Buffer, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Final, NoReturn
 from urllib.parse import urlsplit
 
 HOSTS: Final = frozenset({"api.bitcoincharts.com", "www.bitstamp.net", "www.ecb.europa.eu"})  # ADR 0007
-# Tor Browser's headers (Firefox 140 ESR): a common browser's, not a library's or this app's. Review them
-# when Tor Browser moves to a new ESR (the next is due in 2027).
+# Tor Browser's User-Agent (Firefox 140 ESR): a common browser's, not a library's or this app's. Review
+# it at each Tor Browser major release.
 USER_AGENT: Final = "Mozilla/5.0 (Windows NT 10.0; rv:140.0) Gecko/20100101 Firefox/140.0"
-HEADERS: Final = {
-    "User-Agent": USER_AGENT,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
+# PLAN §6: a common browser User-Agent and nothing else about the client (`Accept: */*` is generic).
+HEADERS: Final = {"User-Agent": USER_AGENT, "Accept": "*/*"}
 TIMEOUT: Final = 60.0  # seconds, for the connection and for each read
 DEADLINE: Final = 1800.0  # seconds for a whole download: a slow drip can't hold a refresh forever
 
@@ -82,30 +82,69 @@ class Body(io.RawIOBase):
         host: str,
         max_bytes: int,
         declared: int | None,
-        deadline: float,
+        watchdog: _Watchdog,
     ) -> None:
         super().__init__()
         self._response, self._host, self._max, self._declared = response, host, max_bytes, declared
-        self._deadline, self._read = deadline, 0
+        self._watchdog, self._read = watchdog, 0
 
     def readable(self) -> bool:
         return True
 
-    def readinto(self, buffer: memoryview | bytearray) -> int:  # type: ignore[override]
-        if time.monotonic() > self._deadline:
-            _fail(f"{self._host}: the download took too long")
+    def readinto(self, buffer: Buffer) -> int:
+        if self.closed:
+            raise ValueError("read from a closed download")
+        self._watchdog.check(self._host)
         view = memoryview(buffer).cast("B")
         room = min(len(view), self._max - self._read + 1)  # one byte past the limit shows it's exceeded
         try:
             n = self._response.readinto(view[:room]) if room else 0
-        except (OSError, http.client.HTTPException) as e:
+        except (OSError, http.client.HTTPException, ValueError) as e:  # ValueError: a bad chunk size
+            self._watchdog.check(self._host)  # a read the watchdog cut short is "too long", not "failed"
             raise FetchError(f"{self._host}: the download failed ({type(e).__name__})") from None
+        self._watchdog.check(self._host)
         self._read += n
         if self._read > self._max:
             _fail(f"{self._host}: the response is larger than allowed")
         if n == 0 and len(view) and self._declared is not None and self._read != self._declared:
             _fail(f"{self._host}: the download was cut off")
         return n
+
+
+class _Watchdog:
+    """Cuts the connection once the deadline passes, whatever it is doing: connecting, the SOCKS or TLS
+    handshake, reading headers or the body. Socket timeouts bound each read; only this bounds them all,
+    so a source that sends a byte just under every timeout can't hold the refresh (the job worker is
+    single, architecture §3). It keeps shutting the connection's socket down, once a second, until
+    stopped, so a socket created just after the deadline is caught too."""
+
+    def __init__(self, conn: http.client.HTTPConnection, seconds: float) -> None:
+        self._conn, self._done, self.fired = conn, threading.Event(), False
+        self._thread = threading.Thread(target=self._run, args=(seconds,), name="price-download-deadline")
+        self._thread.daemon = True
+        self._thread.start()
+
+    def _run(self, seconds: float) -> None:
+        if self._done.wait(seconds):
+            return
+        self.fired = True
+        while True:
+            sock = self._conn.sock
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            if self._done.wait(1.0):
+                return
+
+    def check(self, host: str) -> None:
+        if self.fired:
+            _fail(f"{host}: the download took too long")
+
+    def stop(self) -> None:
+        self._done.set()
+        self._thread.join()
 
 
 @contextmanager
@@ -121,7 +160,9 @@ def open_url(
     `deadline` is in seconds for the whole download, from now."""
     if type(max_bytes) is not int or max_bytes < 0:
         _fail("max_bytes must be a non-negative integer")
-    until = time.monotonic() + deadline
+    for name, value in (("timeout", timeout), ("deadline", deadline)):
+        if type(value) not in (int, float) or not 0 < value < math.inf:  # NaN fails both comparisons
+            _fail(f"{name} must be a positive number of seconds")
     host, target = _check_url(url)
     if proxy is None:
         conn: http.client.HTTPSConnection = http.client.HTTPSConnection(
@@ -129,23 +170,45 @@ def open_url(
         )
     else:
         conn = _SocksHTTPSConnection(host, proxy, timeout)
+    watchdog = _Watchdog(conn, deadline)
+    body: Body | None = None
     try:
         try:
             conn.request("GET", target, headers=HEADERS)
             response = conn.getresponse()
-        except (OSError, http.client.HTTPException) as e:
+        except FetchError:  # from the SOCKS5 handshake: a cut there is the deadline, not the proxy
+            watchdog.check(host)
+            raise
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            watchdog.check(host)
             raise FetchError(f"{host}: the download failed ({type(e).__name__})") from None
+        watchdog.check(host)
         if response.status != http.client.OK:
             _fail(f"{host}: HTTP {response.status} (a redirect or error; nothing is followed)")
-        length = response.getheader("Content-Length")
-        declared = int(length) if length is not None and length.isascii() and length.isdigit() else None
-        if length is not None and declared is None:
-            _fail(f"{host}: the response's length is malformed")
-        if declared is not None and declared > max_bytes:
-            _fail(f"{host}: the response is larger than allowed")
-        yield Body(response, host, max_bytes, declared, until)
+        declared = (
+            None if response.chunked else _length(response.getheader("Content-Length"), host, max_bytes)
+        )
+        body = Body(response, host, max_bytes, declared, watchdog)
+        yield body
     finally:
+        watchdog.stop()
+        if body is not None:
+            body.close()
         conn.close()
+
+
+def _length(header: str | None, host: str, max_bytes: int) -> int | None:
+    """The declared Content-Length, or None. Surrounding spaces and tabs are allowed (RFC 9110 §5.5);
+    anything but ASCII digits is malformed, and a length past `max_bytes` is refused before reading.
+    The digits are counted before conversion, so a huge header can't reach int()'s length limit."""
+    if header is None:
+        return None
+    text = header.strip(" \t")
+    if not text or not text.isascii() or not text.isdigit():
+        _fail(f"{host}: the response's length is malformed")
+    if len(text.lstrip("0")) > len(str(max_bytes)) or int(text) > max_bytes:
+        _fail(f"{host}: the response is larger than allowed")
+    return int(text)
 
 
 def _check_url(url: str) -> tuple[str, str]:
@@ -181,6 +244,7 @@ class _SocksHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self) -> None:
         sock = socket.create_connection((self._proxy.host, self._proxy.port), timeout=self.timeout)
+        self.sock = sock  # visible to the deadline watchdog from here on, through the handshakes
         try:
             try:
                 socks5_connect(sock, self.host, 443)

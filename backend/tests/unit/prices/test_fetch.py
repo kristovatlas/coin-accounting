@@ -13,6 +13,7 @@ import io
 import socket
 import ssl
 import threading
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -38,7 +39,7 @@ class FakeServer:
     """One connection on loopback: an optional SOCKS5 handshake (choosing no authentication, or
     username/password when `auth` is set), then one HTTP exchange."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 (a test double's knobs, all keyword-only)
         self,
         response: bytes,
         *,
@@ -46,11 +47,12 @@ class FakeServer:
         http: bool = True,
         auth: bytes | None = None,
         then_close: bool = False,
+        drip: float = 0.0,
     ) -> None:
         self.listener = socket.create_server(("127.0.0.1", 0))
         self.port = self.listener.getsockname()[1]
         self.response, self.socks_reply, self.http, self.auth = response, socks, http, auth
-        self.then_close = then_close
+        self.then_close, self.drip = then_close, drip
         self.greeting = b""
         self.credentials = b""
         self.socks_request = b""
@@ -87,7 +89,12 @@ class FakeServer:
                     if not chunk:
                         return
                     self.request += chunk
-                conn.sendall(self.response)
+                if self.drip:
+                    for i in range(len(self.response)):
+                        conn.sendall(self.response[i : i + 1])
+                        time.sleep(self.drip)
+                else:
+                    conn.sendall(self.response)
                 if not self.then_close:
                     recv_exactly(conn, 1)  # wait for the client to hang up
             except (ConnectionError, TimeoutError):
@@ -135,8 +142,8 @@ def test_a_download_sends_one_fixed_request_and_streams_the_body(direct: list[Fa
     lines = head.split("\r\n")
     assert lines[0] == "GET /api/v2/ohlc/btcusd/?step=86400&limit=1000 HTTP/1.1"
     headers = sorted(line.split(": ", 1)[0] for line in lines[1:] if line)
-    # a browser's headers and the ones http.client adds; nothing else about the app
-    assert headers == ["Accept", "Accept-Encoding", "Accept-Language", "Host", "User-Agent"]
+    # PLAN §6: a browser User-Agent, a generic Accept, and what http.client adds; nothing about the app
+    assert headers == ["Accept", "Accept-Encoding", "Host", "User-Agent"]
     assert f"User-Agent: {USER_AGENT}" in lines and "Host: www.bitstamp.net" in lines
     assert all(f"{k}: {v}" in lines for k, v in HEADERS.items())
 
@@ -391,17 +398,98 @@ def test_a_body_that_stalls_times_out_as_a_fetch_error(direct: list[FakeServer])
             body.read()
 
 
-def test_a_download_past_its_deadline_is_stopped(direct: list[FakeServer]) -> None:
-    direct.append(FakeServer(ok(b"abc")))
+def test_headers_that_drip_past_the_deadline_are_cut_off(direct: list[FakeServer]) -> None:
+    # each byte arrives well within the per-read timeout; only the whole-download deadline stops it
+    direct.append(FakeServer(ok(b"abc") + b"x" * 100, drip=0.05))
+    started = time.monotonic()
+    with pytest.raises(FetchError, match=r"www\.bitstamp\.net: the download took too long"):
+        with open_url(URL, max_bytes=10, timeout=5, deadline=0.3):
+            pass
+    assert time.monotonic() - started < 2.5
+
+
+def test_a_body_that_drips_past_the_deadline_is_cut_off(direct: list[FakeServer]) -> None:
+    head = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"
+    direct.append(FakeServer(head + b"a" * 100, drip=0.01))
+    started = time.monotonic()
     with pytest.raises(FetchError, match="took too long"):
-        with open_url(URL, max_bytes=10, deadline=-1) as body:
+        with open_url(URL, max_bytes=100, timeout=5, deadline=0.6) as body:
             body.read()
+    assert time.monotonic() - started < 3
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("deadline", float("nan")),
+        ("deadline", float("inf")),
+        ("deadline", 0),
+        ("deadline", -1),
+        ("deadline", True),
+        ("timeout", "1"),
+        ("timeout", 0),
+    ],
+)
+def test_the_timeout_and_deadline_must_be_positive_finite_seconds(name: str, value: object) -> None:
+    with pytest.raises(FetchError, match=f"{name} must be a positive number of seconds"):
+        with open_url(URL, max_bytes=1, **{name: value}):  # type: ignore[arg-type]  # bad on purpose
+            pass
+
+
+def test_a_chunked_body_ignores_a_content_length_beside_it(direct: list[FakeServer]) -> None:
+    head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 999\r\n\r\n"
+    direct.append(FakeServer(head + b"3\r\nabc\r\n0\r\n\r\n"))
+    with open_url(URL, max_bytes=10) as body:  # RFC 9112 §6.1: Transfer-Encoding wins
+        assert body.read() == b"abc"
+
+
+def test_a_bad_chunk_size_is_a_fetch_error(direct: list[FakeServer]) -> None:
+    head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    direct.append(FakeServer(head + b"zz\r\nabc\r\n"))
+    with pytest.raises(FetchError, match=r"the download failed \((IncompleteRead|ValueError)\)"):
+        with open_url(URL, max_bytes=10) as body:
+            body.read()
+
+
+def test_a_declared_length_may_have_surrounding_spaces(direct: list[FakeServer]) -> None:
+    direct.append(FakeServer(b"HTTP/1.1 200 OK\r\nContent-Length: 3 \t\r\n\r\nabc"))
+    with open_url(URL, max_bytes=3) as body:
+        assert body.read() == b"abc"
+
+
+def test_a_huge_declared_length_is_too_large_not_a_crash(direct: list[FakeServer]) -> None:
+    direct.append(FakeServer(b"HTTP/1.1 200 OK\r\nContent-Length: " + b"9" * 5000 + b"\r\n\r\nabc"))
+    with pytest.raises(FetchError, match="larger than allowed"):
+        with open_url(URL, max_bytes=10):
+            pass
+
+
+def test_an_empty_body_fits_a_zero_limit(direct: list[FakeServer]) -> None:
+    direct.append(FakeServer(ok(b"")))
+    with open_url(URL, max_bytes=0) as body:
+        assert body.read() == b""
+
+
+def test_a_body_without_a_declared_length_ends_where_the_connection_does(direct: list[FakeServer]) -> None:
+    # nothing at this layer can tell a cut from an end here: the parsers validate what they read (T-304)
+    direct.append(FakeServer(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabc", then_close=True))
+    with open_url(URL, max_bytes=10) as body:
+        assert body.read() == b"abc"
+
+
+def test_a_body_is_closed_when_the_download_ends(direct: list[FakeServer]) -> None:
+    direct.append(FakeServer(ok(b"abc")))
+    with open_url(URL, max_bytes=10) as body:
+        pass
+    assert body.closed
+    with pytest.raises(ValueError, match="closed"):
+        body.read()
 
 
 @pytest.mark.parametrize("limit", [-1, -2, 1.5, True, "10"])
 def test_the_size_limit_must_be_a_non_negative_integer(limit: object) -> None:
     with pytest.raises(FetchError, match="max_bytes must be a non-negative integer"):
-        with open_url(URL, max_bytes=limit):  # type: ignore[arg-type]
+        with open_url(URL, max_bytes=limit):  # type: ignore[arg-type]  # bad on purpose
             pass
 
 
@@ -413,3 +501,37 @@ def test_a_malformed_declared_length_is_refused(direct: list[FakeServer], length
     with pytest.raises(FetchError, match="length is malformed"):
         with open_url(URL, max_bytes=10):
             pass
+
+
+def test_the_watchdog_catches_a_socket_made_after_the_deadline_and_tolerates_a_closed_one() -> None:
+    class Conn:
+        sock: Any = None
+
+    conn = Conn()
+    dog = fetch._Watchdog(conn, 0.01)  # type: ignore[arg-type]  # only .sock is read
+    time.sleep(0.1)  # fired with no socket yet: nothing to shut down, keeps watching
+    a, b = socket.socketpair()
+    conn.sock = a
+    time.sleep(1.2)  # the next pass shuts the new socket down
+    assert a.recv(1) == b""  # shut down for reading: end of stream at once
+    a.close()  # shutting down a closed socket fails; the watchdog shrugs that off
+    time.sleep(1.1)
+    dog.stop()
+    b.close()
+    with pytest.raises(FetchError, match="x: the download took too long"):
+        dog.check("x")
+
+
+def test_a_proxy_that_stalls_its_handshake_is_cut_off_at_the_deadline() -> None:
+    silent = socket.create_server(("127.0.0.1", 0))  # accepts (through the backlog), never answers
+    started = time.monotonic()
+    with silent, pytest.raises(FetchError, match=r"www\.ecb\.europa\.eu: the download took too long"):
+        with open_url(
+            "https://www.ecb.europa.eu/",
+            Proxy("127.0.0.1", silent.getsockname()[1]),
+            max_bytes=1,
+            timeout=5,
+            deadline=0.3,
+        ):
+            pass
+    assert time.monotonic() - started < 2.5
