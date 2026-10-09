@@ -15,17 +15,19 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   basis is the donor's basis, held from the donor's date (tacked, IRC §1223(2)). If the FMV at the gift
   was lower, that FMV is its loss basis, held from the gift date. At a disposal, proceeds above the
   gain basis give a gain against it; proceeds below the loss basis give a loss against that; proceeds
-  in between give neither (the basis used is the proceeds). Only an FMV strictly below the donor's
-  basis makes a loss basis; a part of a lot whose loss share has reached its gain share through
-  rounding keeps the donor's basis and date. The donor's basis is their adjusted basis, including any
-  gift-tax increase (IRC §1015(d)), which the caller works out. An unknown donor basis is a **blocking
-  condition** (ADR 0009, T-509): the lot counts as basis 0.00 until the user enters one.
+  in between give neither (the basis used is the proceeds). Whether a lot has a loss basis is decided
+  once, at the gift, from the exact values: only an FMV strictly below the donor's basis makes one,
+  and then every part of the lot keeps it, even where its cent-rounded share equals the gain share
+  (the loss share is capped at the gain share). The donor's basis is entered as the user has it:
+  §1015(d) gift-tax adjustments are out of scope for v1 (ADR 0009). An unknown donor basis is a
+  **blocking condition** (ADR 0009, T-509): the lot counts as basis 0.00 until the user enters one.
 - **Disposals** (`sell`, `spend`, `gift_out`) use lots of **the same account** only (ADR 0008 §1). Proceeds
   are net of disposal costs, and can be negative when the costs exceed what was received (ADR 0009). A
   **gift given** (`gift_out`) has no proceeds and no gain or loss, and makes no Form 8949 row (ADR 0011):
   it reports the basis and date that pass to the recipient. Lots are chosen:
   - **automatically,** by the account's standing method (FIFO unless another is recorded; ADR 0021 §1).
-    These choices are never late;
+    These choices are never late. FIFO takes lots in the order they reached the account: a gift by the
+    day it was received, not its tacked donor date (a tax position for the owner to confirm, #241);
   - **or by the user.** A choice made after the moment of the disposal (Treas. Reg. §1.1012-1(j): no
     later than the date and time of the sale) is reported as late **only if** its lots differ from the
     standing method's (ADR 0021 §2), with the standing method's figures (ADR 0008 §4). The user's
@@ -85,6 +87,9 @@ class Acquisition:
     basis: Decimal | None  # USD: cost plus fees, the FMV at receipt, or a gift's donor basis (None: unknown)
     fmv: Decimal | None = None  # gift_in only: the FMV at the gift
     donor_acquired: date | None = None  # gift_in only: the donor's acquisition date
+    # gift_in only: the donor's lot counted as long-term whatever its dates (an inheritance, IRC §1223(9));
+    # whether that passes through a gift is the caller's tax position (#241).
+    donor_always_long: bool = False
 
 
 @dataclass(frozen=True)
@@ -163,6 +168,7 @@ class GiftGiven:
     basis: Decimal
     acquired: date
     unknown_basis: bool
+    always_long: bool = False  # the lot counted as long-term whatever its dates (an inheritance)
 
 
 @dataclass(frozen=True)
@@ -289,6 +295,7 @@ class _Engine:
         loss_from: date | None = None
         unknown = False
         acquired = a.on
+        always_long = a.kind == "inherit" or (a.kind == "gift_in" and a.donor_always_long is True)
         if a.kind == "gift_in":
             if a.fmv is None or type(a.donor_acquired) is not date or not GENESIS <= a.donor_acquired <= a.on:
                 raise EngineError(
@@ -304,16 +311,14 @@ class _Engine:
                 if fmv < basis:
                     loss_basis, loss_from = fmv, a.on
         else:
-            if a.fmv is not None or a.donor_acquired is not None:
+            if a.fmv is not None or a.donor_acquired is not None or a.donor_always_long:
                 raise EngineError(
                     f"acquisition {a.id!r}: only a gift has an FMV at the gift and a donor's date"
                 )
             if a.basis is None:
                 raise EngineError(f"acquisition {a.id!r}: only a gift's basis can be unknown")
             basis = _usd(a.basis, a.id)
-        lot = Lot(
-            a.id, a.account, acquired, a.sats, basis, a.kind == "inherit", loss_basis, loss_from, unknown
-        )
+        lot = Lot(a.id, a.account, acquired, a.sats, basis, always_long, loss_basis, loss_from, unknown)
         entry = _Open(lot, a.sats, basis, loss_basis, a.kind == "gift_in")
         self._open.setdefault(a.account, []).append(entry)
         self._first.setdefault(a.account, 0)
@@ -329,7 +334,8 @@ class _Engine:
         self._first[account] = first
         picks: list[Pick] = []
         left = sats
-        for o in lots[first:]:
+        for i in range(first, len(lots)):  # by index: a slice would copy the rest of the list each time
+            o = lots[i]
             if left == 0:
                 break
             take = min(o.sats, left)
@@ -374,7 +380,9 @@ class _Engine:
     def _gift(self, a: Allocation) -> GiftGiven:
         lot = self._lots[a.lot].lot
         lot_basis = a.basis if a.lot_basis is None else a.lot_basis
-        return GiftGiven(a.disposal, a.lot, a.sats, lot_basis, lot.acquired, lot.unknown_basis)
+        return GiftGiven(
+            a.disposal, a.lot, a.sats, lot_basis, lot.acquired, lot.unknown_basis, lot.always_long
+        )
 
     def _split(
         self, d: Disposal, proceeds: Decimal, picks: Sequence[Pick], *, apply: bool
@@ -397,12 +405,8 @@ class _Engine:
             loss = None if loss_left is None else share(loss_left, pick.sats, sats)
             rest = subtract(basis_left, basis)
             loss_rest = None if loss_left is None or loss is None else subtract(loss_left, loss)
-            # Rounding can bring the loss basis up to the gain basis: from then on, one basis.
-            left[pick.lot] = (
-                sats - pick.sats,
-                rest,
-                None if loss_rest is None or loss_rest >= rest else loss_rest,
-            )
+            # The loss basis stays (decided at the gift), but never above the gain basis left.
+            left[pick.lot] = (sats - pick.sats, rest, None if loss_rest is None else min(loss_rest, rest))
             sats_left -= pick.sats
             proceeds_left = subtract(proceeds_left, part)
             out.append(self._allocation(d, o.lot, (pick.sats, basis, loss), part))
@@ -423,7 +427,7 @@ class _Engine:
         used = basis
         if lot.unknown_basis:
             rule = "unknown"
-        elif loss is not None and loss < basis and lot.loss_from is not None:  # a gift with a lower FMV
+        elif loss is not None and lot.loss_from is not None:  # a gift whose FMV was lower: dual basis
             if proceeds > basis:
                 rule = "donor"
             elif proceeds < loss:

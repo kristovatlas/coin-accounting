@@ -72,7 +72,8 @@ def test_a_gift_with_a_lower_fmv_has_a_dual_basis_irc1015(
         long_term,
         D(gain),
     )
-    assert a.lot_basis in (None, D("10000.00"))  # the lot gives up its own basis whatever the rule
+    # The lot gives up its own 10000.00 whatever the rule; `lot_basis` is set where it differs from `basis`.
+    assert a.lot_basis == (None if D(basis) == D("10000.00") else D("10000.00"))
     assert a.lot_loss_basis == D("6000.00")
 
 
@@ -266,14 +267,14 @@ def test_the_dual_basis_rule_holds_for_any_gift(donor: int, fmv: int, proceeds: 
     result = run([g, sell("s", SOLD, sold, str(D(proceeds).scaleb(-2)))])
     (a,) = result.allocations
     gain_basis = a.lot_basis if a.lot_basis is not None else a.basis
-    if a.lot_loss_basis is None or a.lot_loss_basis >= gain_basis:  # one basis (equal after rounding too)
+    if a.lot_loss_basis is None:  # FMV not below the donor's basis: one basis
         assert a.rule == "donor" and a.basis == gain_basis and a.acquired == DONOR_DAY
     elif a.proceeds > gain_basis:
-        assert a.rule == "donor" and a.gain > 0
+        assert a.rule == "donor" and a.gain > 0 and a.acquired == DONOR_DAY
     elif a.proceeds < a.lot_loss_basis:
         assert a.rule == "fmv_at_gift" and a.gain < 0 and a.acquired == GIFT_DAY
     else:
-        assert a.rule == "no_gain_or_loss" and a.gain == 0
+        assert a.rule == "no_gain_or_loss" and a.gain == 0 and a.acquired == DONOR_DAY
     held = result.holdings[0].basis if result.holdings else D("0.00")
     assert gain_basis + held == D(donor).scaleb(-2)  # the lot's own basis is conserved
 
@@ -312,8 +313,8 @@ def test_long_decimals_that_arent_cents_are_refused_as_engine_errors_t502(amount
         run([Acquisition("b", "w", date(2024, 1, 1), "buy", 1, amount)])
 
 
-# Property: however a dust-sized gift is cut up, a loss never takes the gift date unless its loss share
-# is strictly below its gain share (rounding must not make the FMV rule apply at equal values).
+# Property: however a dust-sized gift with a lower FMV is cut up, every part keeps a loss basis no
+# higher than its gain basis, and only a loss below it takes the gift date (IRC §1015(a)).
 
 
 @settings(max_examples=300, deadline=None)
@@ -324,7 +325,7 @@ def test_long_decimals_that_arent_cents_are_refused_as_engine_errors_t502(amount
     cuts=st.lists(st.integers(1, 5), min_size=1, max_size=12),
     cents=st.integers(-50, 600),
 )
-def test_rounding_never_applies_the_fmv_rule_at_equal_bases(
+def test_a_dust_split_gift_keeps_its_dual_basis(
     donor: int, gap: int, sats: int, cuts: list[int], cents: int
 ) -> None:
     fmv = max(donor - gap, 0)
@@ -340,9 +341,10 @@ def test_rounding_never_applies_the_fmv_rule_at_equal_bases(
         left -= take
     result = run(events)
     for a in result.allocations:
+        # The FMV was lower at the gift, so every part keeps a loss basis no higher than its gain basis.
+        assert a.lot_loss_basis is not None and a.lot_loss_basis <= (a.lot_basis or a.basis)
         if a.rule == "fmv_at_gift":
-            assert a.lot_loss_basis is not None and a.lot_basis is not None
-            assert a.lot_loss_basis < a.lot_basis and a.acquired == GIFT_DAY
+            assert a.acquired == GIFT_DAY and a.proceeds < a.lot_loss_basis
         else:
             assert a.acquired == DONOR_DAY
     used = sum((a.lot_basis if a.lot_basis is not None else a.basis) for a in result.allocations)
@@ -350,11 +352,84 @@ def test_rounding_never_applies_the_fmv_rule_at_equal_bases(
     assert used + held == D(donor).scaleb(-2)  # the gain basis is conserved
 
 
-def test_a_gift_whose_bases_meet_through_rounding_keeps_one_basis() -> None:
-    # Donor basis 0.11, FMV 0.10, 4 sats; one sold: the shares are 0.03 and 0.02 (a loss basis still
-    # below), and what is left is 0.08 and 0.08: from then on the lot has one basis.
+def test_a_gift_keeps_its_loss_basis_when_rounded_shares_meet_irc1015() -> None:
+    # Donor basis 0.11, FMV 0.10, 4 sats; one sold: shares 0.03 and 0.02, and what is left is 0.08 and
+    # 0.08. In law the FMV was lower at the gift, so a loss on the rest is still against the FMV and
+    # held from the gift date (Treas. Reg. §1.1223-1(b)): rounding doesn't make it one basis.
     events: list[Event] = [gift("0.11", "0.10", sats=4), sell("s", SOLD, 1, "0.00")]
     result = run(events)
-    assert result.holdings == (Lot("g", "w", DONOR_DAY, 3, D("0.08"), False, None, None, False),)
+    assert result.holdings == (Lot("g", "w", DONOR_DAY, 3, D("0.08"), False, D("0.08"), GIFT_DAY, False),)
     later = run([*events, sell("s2", SOLD + timedelta(days=1), 3, "0.00")])
-    assert {a.rule for a in later.allocations if a.disposal == "s2"} == {"donor"}
+    (a,) = [a for a in later.allocations if a.disposal == "s2"]
+    assert (a.rule, a.acquired, a.long_term) == ("fmv_at_gift", GIFT_DAY, False)
+
+
+# Property: any mix of buys, gifts received, sales and gifts given conserves every lot's sats and gain
+# basis across sales, gifts given and holdings (T-502).
+
+
+@settings(max_examples=300, deadline=None)
+@given(st.data())
+def test_any_mix_with_gifts_conserves_sats_and_basis(data: st.DataObject) -> None:
+    events: list[Event] = []
+    start = date(2021, 1, 1).toordinal()
+    for i in range(data.draw(st.integers(0, 16))):
+        on = date.fromordinal(start + 2 * i)
+        sats = data.draw(st.integers(1, 2 * BTC))
+        cents = D(data.draw(st.integers(0, 10**8))).scaleb(-2)
+        kind = data.draw(st.sampled_from(["buy", "gift_in", "sell", "gift_out"]))
+        if kind == "buy":
+            events.append(Acquisition(f"e{i}", "w", on, "buy", sats, cents))
+        elif kind == "gift_in":
+            fmv = D(data.draw(st.integers(0, 10**8))).scaleb(-2)
+            events.append(Acquisition(f"e{i}", "w", on, "gift_in", sats, cents, fmv, DONOR_DAY))
+        elif kind == "sell":
+            events.append(sell(f"e{i}", on, sats, str(cents)))
+        else:
+            events.append(sell(f"e{i}", on, sats, "0.00", kind="gift_out"))
+    result = run(events)
+    lots = [e for e in events if isinstance(e, Acquisition)]
+    sold = sum(a.sats for a in result.allocations)
+    given = sum(g.sats for g in result.gifts)
+    held = sum(h.sats for h in result.holdings)
+    assert sum(lot.sats for lot in lots) == sold + given + held
+    basis_used = sum((a.lot_basis if a.lot_basis is not None else a.basis) for a in result.allocations)
+    basis_given = sum(g.basis for g in result.gifts)
+    basis_held = sum(h.basis for h in result.holdings)
+    assert sum((lot.basis or D("0.00")) for lot in lots) == basis_used + basis_given + basis_held
+    for h in result.holdings:  # a lot's loss basis, when it has one, is never above its gain basis
+        assert h.loss_basis is None or h.loss_basis <= h.basis
+
+
+def test_a_gift_of_an_inherited_lot_can_carry_its_long_term_status_irc1223() -> None:
+    # The donor inherited the coins two months before the gift: the caller says the lot counted as
+    # long-term in the donor's hands (§1223(9)); with tacking (§1223(2)) a sale soon after is long-term.
+    inherited = Acquisition(
+        "g",
+        "w",
+        GIFT_DAY,
+        "gift_in",
+        BTC,
+        D("5000.00"),
+        D("9000.00"),
+        date(2024, 1, 1),
+        donor_always_long=True,
+    )
+    (a,) = run([inherited, sell("s", SOLD, BTC, "9500.00")]).allocations
+    assert a.long_term
+    plain = Acquisition("g", "w", GIFT_DAY, "gift_in", BTC, D("5000.00"), D("9000.00"), date(2024, 1, 1))
+    (b,) = run([plain, sell("s", SOLD, BTC, "9500.00")]).allocations
+    assert not b.long_term  # without it: held from 1 January, five months
+
+
+def test_a_gift_given_of_an_inherited_lot_says_so() -> None:
+    events: list[Event] = [
+        Acquisition("i", "w", date(2024, 5, 1), "inherit", BTC, D("60000.00")),
+        sell("out", date(2024, 6, 1), BTC, "0.00", kind="gift_out"),
+    ]
+    assert run(events).gifts == (GiftGiven("out", "i", BTC, D("60000.00"), date(2024, 5, 1), False, True),)
+
+
+def test_only_a_gift_can_carry_a_donors_long_term_status() -> None:
+    with pytest.raises(EngineError, match="only a gift"):
+        run([Acquisition("b", "w", GIFT_DAY, "buy", 1, D("1.00"), donor_always_long=True)])

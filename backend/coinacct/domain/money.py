@@ -45,7 +45,9 @@ CONTEXT: Final = Context(
 _DIVIDE: Final = Context(
     prec=60, rounding=ROUND_HALF_EVEN, traps=[FloatOperation, InvalidOperation, DivisionByZero, Overflow]
 )
-_TEXT: Final = re.compile(r"-?[0-9]+(\.[0-9]+)?", re.ASCII)  # extra decimals must be zeros (below)
+# Bounded lengths (a quadrillion has 16 digits), so no long text reaches Decimal; extra decimals must be
+# zeros (below).
+_TEXT: Final = re.compile(r"-?[0-9]{1,20}(\.[0-9]{1,40})?", re.ASCII)
 
 
 def signed_usd(value: str | Decimal) -> Decimal:

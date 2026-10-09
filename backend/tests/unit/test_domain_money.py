@@ -151,3 +151,9 @@ def test_reading_usd_ignores_the_callers_context_t502() -> None:
         assert usd("999999999999999.99") == Decimal("999999999999999.99")
         assert signed_usd("-1234.56") == Decimal("-1234.56")
         assert usd(Decimal("1." + "0" * 100)) == Decimal("1.00")
+
+
+@pytest.mark.parametrize("text", ["1" * 21, "1." + "0" * 41, "9" * 10_000])
+def test_usd_text_has_bounded_lengths(text: str) -> None:
+    with pytest.raises(ValueError, match="written as digits"):  # refused before Decimal sees it
+        usd(text)
