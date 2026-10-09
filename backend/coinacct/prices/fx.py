@@ -7,8 +7,8 @@ parsed and every supported currency converted, so nothing reveals which one the 
 
 Display only: tax figures are always USD (ADR 0007). A weekend or holiday uses the latest earlier rate
 within MAX_RATE_AGE; a USD day with no rate that recent, or whose conversion rounds below a cent, gets
-no display price (a gap). Blank lines at the end of the file and a byte-order mark are ignored. Pure
-and exact:
+no display price (a gap). Blank lines at the end of the file and a byte-order mark are ignored. Pure and
+exact:
 rates are integers scaled by 10^6, rounded once, half to even, to cents. A malformed file raises
 `PriceError` naming its line, before any value is returned (T-304).
 """
@@ -22,13 +22,12 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Final, NoReturn
 
-from coinacct.prices import MAX_PRICE, DailyPrice, PriceError
+from coinacct.prices import MAX_CENTS, DailyPrice, PriceError
 
 ECB_SOURCE: Final = "ecb:eurofxref-hist"
 DISPLAY: Final = ("EUR", "GBP")  # every display currency, always converted together (T-301)
 MAX_RATE_AGE: Final = timedelta(days=7)  # the ECB skips weekends and TARGET holidays, never a week
 _SCALE: Final = 10**6
-_MAX_CENTS: Final = int(MAX_PRICE.scaleb(2))
 _COLUMNS: Final = ("USD", *(c for c in DISPLAY if c != "EUR"))  # EUR is the base: no column
 _RATE: Final = re.compile(r"([0-9]{1,6})\.([0-9]{1,6})")
 _DAY: Final = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
@@ -94,10 +93,14 @@ def _header(fields: list[str], n: int) -> list[str]:
 def to_display(usd: Sequence[DailyPrice], rates: Rates) -> list[DailyPrice]:
     """Every USD price in every display currency, by the latest ECB rate on or before its day and at
     most MAX_RATE_AGE older. EUR is USD divided by the USD rate; another currency is that times its
-    own rate. The result keeps the USD price's day and gets method "fx"."""
+    own rate. The result keeps the USD price's day and gets method "fx". Every rate in `rates` is
+    checked, used or not, since they may come from anywhere (a cache, an upload)."""
+    for day, row in rates.items():
+        if not all(type(v) is int and v > 0 for v in row.values()):
+            _fail(f"{day}: a rate must be a positive integer scaled by 10^6")
     for before, p in zip((None, *usd), usd, strict=False):
-        if p.currency != "USD" or p.method == "fx":
-            _fail(f"{p.day}: expected a USD market price, got {p.currency} by {p.method}")
+        if p.currency != "USD":  # DailyPrice already refuses a USD price made by "fx"
+            _fail(f"{p.day}: expected a USD market price, got {p.currency}")
         if before is not None and p.day <= before.day:
             _fail(f"{p.day}: the USD series isn't sorted by day, or prices a day twice")
     days = sorted(rates)
@@ -107,20 +110,20 @@ def to_display(usd: Sequence[DailyPrice], rates: Rates) -> list[DailyPrice]:
             rate = _latest(rates, days, p.day, currency)
             if rate is None:
                 continue
-            per_usd, per_target = rate
+            rate_day, per_usd, per_target = rate
             num, den = p.price.as_integer_ratio()  # exact, whatever the caller's decimal context
             converted = _round(num * 100 * per_target, den * per_usd)
             if converted == 0:  # rounds to nothing: no display price that day, like a missing rate
                 continue
-            if converted > _MAX_CENTS:  # only an absurd rate gets here: refuse the input, loudly
-                _fail(f"{p.day}: the {currency} price at that day's rate is out of range")
+            if converted > MAX_CENTS:  # only an absurd rate gets here: refuse the input, loudly
+                _fail(f"{p.day}: the {currency} price at the rate of {rate_day} is out of range")
             out.append(DailyPrice(p.day, currency, _text(converted), "fx", f"{ECB_SOURCE}*{p.source}"))
     return out
 
 
-def _latest(rates: Rates, days: list[date], on: date, currency: str) -> tuple[int, int] | None:
-    """(USD per euro, `currency` per euro) from the latest day on or before `on` with both rates,
-    within MAX_RATE_AGE; None if there is none."""
+def _latest(rates: Rates, days: list[date], on: date, currency: str) -> tuple[date, int, int] | None:
+    """(the rate's day, USD per euro, `currency` per euro) from the latest day on or before `on` with
+    both rates, within MAX_RATE_AGE; None if there is none."""
     i = bisect.bisect_right(days, on)
     while i:
         i -= 1
@@ -129,10 +132,7 @@ def _latest(rates: Rates, days: list[date], on: date, currency: str) -> tuple[in
             return None
         row = rates[day]
         if "USD" in row and (currency == "EUR" or currency in row):
-            pair = row["USD"], _SCALE if currency == "EUR" else row[currency]
-            if not all(type(v) is int and v > 0 for v in pair):  # rates from anywhere, not only ecb_rates
-                _fail(f"{day}: a rate must be a positive integer scaled by 10^6")
-            return pair
+            return day, row["USD"], _SCALE if currency == "EUR" else row[currency]
     return None
 
 

@@ -22,7 +22,10 @@ CURRENCIES: Final = ("USD", "EUR", "GBP")  # USD for tax figures; the others for
 CENT: Final = Decimal("0.01")
 # Our own context for the little arithmetic here, whatever the caller's: exact, or an error.
 _EXACT: Final = Context(prec=60, traps=[Inexact, InvalidOperation, Overflow])
-MAX_PRICE: Final = Decimal("999999999999999.99")  # 15 integer digits, as the parsers read them
+# The largest price: just below 10^15, the most the parsers' 15 integer digits can hold. A value that
+# rounds up past it is refused. Both are literals, so no import-time arithmetic meets the caller's context.
+MAX_PRICE: Final = Decimal("999999999999999.99")
+MAX_CENTS: Final = 99_999_999_999_999_999
 # A day-over-day rise of more than 50 %, or a fall of more than a third, is flagged for review, never
 # refused: such moves are rare enough that bad data is the likelier cause, and the user can override.
 OUTLIER_FACTOR: Final = Decimal("1.5")

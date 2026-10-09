@@ -216,6 +216,17 @@ def test_the_callers_decimal_context_changes_nothing() -> None:
     assert str(p.price) == "42166.67"
 
 
+def test_a_price_that_rounds_past_the_largest_is_refused_naming_its_line() -> None:
+    top = "999999999999999.995"  # 15 digits, which round half to even past MAX_PRICE
+    with pytest.raises(PriceError, match="the day ending at line 1: the price is out of range"):
+        vwap_by_day([f"{JAN1},{top},1", END], LATER)
+    with pytest.raises(PriceError, match="candle 1: the price is out of range"):
+        typical_by_day(page(candle(open=top, high=top, low=top, close=top)), "USD", LATER)
+    assert vwap_by_day([f"{JAN1},999999999999999.994,1", END], LATER)[0].price == Decimal(
+        "999999999999999.99"
+    )
+
+
 def test_deeply_nested_json_is_refused_as_invalid() -> None:
     with pytest.raises(PriceError, match="not valid JSON"):
         typical_by_day("[" * 100_000 + "]" * 100_000, "USD", LATER)
