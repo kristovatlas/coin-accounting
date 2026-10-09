@@ -52,7 +52,10 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   method could not carry is shown as its own parts, none arriving: the user's choice still stands).
   **A self-transfer is refused** (`EngineError`) until UTXO tracing exists (the owner's decision on
   #243): between the user's own wallets the spent outputs identify the lots (ADR 0008 §2, ADR 0009), and
-  the account's FIFO order would silently give other figures. UTXO tracing is the next M6 slice.
+  the account's FIFO order would silently give other figures. **Deposits and spends from a self-custody
+  wallet have the same gap** and still use the account's order: the engine doesn't know which accounts
+  are wallets. UTXO tracing, the next M6 slice, covers all three, and lifts the refusal (or limits it,
+  once a wallet can record whole-wallet FIFO, ADR 0008 §2); it blocks release.
   - **A network fee** on a deposit or self-transfer (`fee_sats` of the sats that leave) is, by default,
     no disposal: its basis stays with the coins that arrive. With `fee_treatment="dispose"` it is a
     small taxable disposal at `fee_value`, its FMV (ADR 0009's stated tax position, printed on reports).

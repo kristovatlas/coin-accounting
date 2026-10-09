@@ -551,6 +551,7 @@ def test_a_created_lot_stays_unrecorded_however_far_it_moves() -> None:
     first = move(
         "wd1", "a", "b", 10, kind="withdrawal", missing_basis=D("1.00"), missing_acquired=date(2023, 1, 1)
     )
+    # the hops' kind doesn't matter here (self-transfers are refused until UTXO tracing, #243)
     hop = move("t1", "b", "c", 10, kind="deposit", on=date(2025, 1, 2))
     away = move("t2", "c", "d", 10, kind="deposit", on=date(2025, 1, 3))
     # c and d only ever held the created lot, now gone on: a withdrawal from c can take a basis again.
