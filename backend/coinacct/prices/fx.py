@@ -98,11 +98,13 @@ def to_display(usd: Sequence[DailyPrice], rates: Rates) -> list[DailyPrice]:
     after the `*` in its own, so a price converted from an import stays identifiable (T-303).
     Every rate in `rates` is checked, used or not, and so is the mapping's shape, since the rates may
     come from anywhere (a cache, an upload)."""
+    if not isinstance(rates, Mapping):
+        _fail("the rates must map each day (a date) to its currencies' rates")
     for day, row in rates.items():
         if type(day) is not date or not isinstance(row, Mapping):  # a datetime is a date too
             _fail("the rates must map each day (a date) to its currencies' rates")
         if not all(type(c) is str and type(v) is int and 0 < v <= MAX_RATE for c, v in row.items()):
-            _fail(f"{day}: a rate must be a positive integer scaled by 10^6, at most {MAX_RATE}")
+            _fail(f"{day}: a rate must be a positive integer scaled by 10^6, at most 999999.999999 per euro")
     for before, p in zip((None, *usd), usd, strict=False):
         if p.currency != "USD":  # DailyPrice already refuses a USD price made by "fx"
             _fail(f"{p.day}: expected a USD price, got {p.currency}")

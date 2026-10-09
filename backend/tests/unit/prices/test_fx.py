@@ -104,17 +104,23 @@ def test_the_largest_rate_the_csv_can_hold_is_accepted() -> None:
     assert [(p.currency, p.price) for p in shown] == [("EUR", Decimal("0.01")), ("GBP", Decimal("10000.00"))]
 
 
+_SHAPE = r"the rates must map each day \(a date\) to its currencies' rates"
+_RATE = r"2024-01-02: a rate must be a positive integer scaled by 10\^6, at most 999999\.999999 per euro"
+
+
 @pytest.mark.parametrize(
-    "rates",
+    ("rates", "message"),
     [
-        {datetime(2024, 1, 2): {"USD": 1}},  # a datetime is a date too, but not a day
-        {"2024-01-02": {"USD": 1}},
-        {date(2024, 1, 2): [("USD", 1)]},
-        {date(2024, 1, 2): {1: 1}},
+        ({datetime(2024, 1, 2): {"USD": 1}}, _SHAPE),  # a datetime is a date too, but not a day
+        ({"2024-01-02": {"USD": 1}}, _SHAPE),
+        ({date(2024, 1, 2): [("USD", 1)]}, _SHAPE),
+        ([(date(2024, 1, 2), {"USD": 1})], _SHAPE),  # not a mapping at all
+        (None, _SHAPE),
+        ({date(2024, 1, 2): {1: 1}}, _RATE),  # a currency that isn't a code
     ],
 )
-def test_a_rate_mapping_of_the_wrong_shape_is_refused_not_crashed_on(rates: Any) -> None:
-    with pytest.raises(PriceError, match=r"must map each day \(a date\)|a rate must be a positive integer"):
+def test_a_rate_mapping_of_the_wrong_shape_is_refused_not_crashed_on(rates: Any, message: str) -> None:
+    with pytest.raises(PriceError, match=message):
         to_display([usd(date(2024, 1, 2), "1.00")], rates)
 
 
