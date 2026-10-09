@@ -111,7 +111,7 @@ def _diverged(**last: object) -> list[Event]:
     return [Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("1.00")), created, hop, empty, out]
 
 
-def test_a_replay_that_cant_follow_an_event_stops_there_and_later_warnings_say_so() -> None:
+def test_a_replay_that_cant_follow_an_event_stops_there_and_names_it() -> None:
     # The real run creates a lot in x for wd2's unrecorded sats; the replay, where x holds recorded
     # lots, refuses a basis for unrecorded sats there and stops. A late choice after that is figured
     # on the user's lots, and says so
@@ -138,29 +138,39 @@ def test_after_a_stop_a_differing_late_choice_is_figured_on_the_users_lots() -> 
     assert [a.lot for a in warning.standing] == ["b1"]  # FIFO on the user's lots
 
 
-def test_where_the_replay_falls_short_the_warning_counts_the_missing_sats() -> None:
-    # wd2 names no basis: the real run creates an unknown-basis lot in x and moves it to y; the
-    # replay, with x recorded, reports missing lots and moves nothing. A late sale from y choosing the
-    # only lot y holds matches FIFO for the user, but the replay has nothing to sell: it is warned,
-    # with no figures and 10 sats missing
+def test_where_only_the_real_run_creates_a_lot_the_replay_stops() -> None:
+    # wd2 names no basis: the real run creates an unknown-basis lot in x for it; the replay, with x
+    # recorded, reports missing lots instead. The two would hold different sats from here, so the
+    # replay stops at wd2, and a late choice after it is judged on the user's lots: y's only lot is
+    # FIFO's there, so no warning
     events = _diverged()
     on = date(2025, 3, 4)
     late = Disposal("s2", "y", on, noon(on), "sell", 10, D("5.00"), (Pick("wd2@@unrecorded@wd2", 10),), LATE)
     result = run([*events, late])
-    assert result.replay_stopped is None
-    assert result.late[-1] == LateIdentification("s2", LATE, (), 10, True)
-    deposit = Transfer(
-        "d2",
-        "y",
-        "z",
-        on,
-        noon(on),
-        "deposit",
-        10,
-        picks=(Pick("wd2@@unrecorded@wd2", 10),),
-        identified_at=LATE,
-    )
-    assert run([*events, deposit]).late[-1] == LateIdentification("d2", LATE, (), 10, True)
+    assert result.replay_stopped == "wd2"
+    assert [w.disposal for w in result.late] == ["t1"]
+
+
+def test_where_only_the_replay_would_create_a_lot_it_stops_too() -> None:
+    # The other way round: the engine-created lot is older than b1, so the replay's FIFO moves it to x
+    # (x stays unrecorded there) while the user's late choice moves b1 (x recorded). Both sell x empty;
+    # a withdrawal from x naming no basis is missing lots for the user but would create a lot in the
+    # replay: it stops there instead of inventing a lot the real run never had
+    created = Transfer(
+        "wd0", "e", "w", date(2025, 2, 1), noon(date(2025, 2, 1)), "withdrawal", 10,
+        missing_basis=D("2.00"), missing_acquired=date(2023, 6, 1),
+    )  # fmt: skip
+    hop = Transfer(
+        "t1", "w", "x", date(2025, 3, 1), noon(date(2025, 3, 1)), "deposit", 10,
+        picks=(Pick("b1", 10),), identified_at=LATE,
+    )  # fmt: skip
+    empty = Disposal("s1", "x", date(2025, 3, 2), noon(date(2025, 3, 2)), "sell", 10, D("50.00"))
+    out = Transfer("wd2", "x", "y", date(2025, 3, 3), noon(date(2025, 3, 3)), "withdrawal", 10)
+    b1 = Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("1.00"))
+    result = run([b1, created, hop, empty, out])
+    assert result.replay_stopped == "wd2"
+    assert [type(b).__name__ for b in result.blocking] == ["MissingLots"]  # the user's run: no lot made
+    assert [lot.id for lot in result.created] == ["wd0@@unrecorded"]
 
 
 def test_a_late_gift_given_is_figured_in_the_replay() -> None:

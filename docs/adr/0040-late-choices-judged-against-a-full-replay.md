@@ -31,10 +31,11 @@ Chosen option: 2, the owner's decision on #238 (2026-10-09).
 - **The figures shown:** the replay's.
 - **What still stands:** the user's choice is still used, and the warning is still warn-only (ADR 0008 §4).
 - **An on-time choice the replay can't follow:** it names lots the replay doesn't hold in full, so the replay uses the standing method for all of it.
-- **Where the replay falls short:** the two runs can disagree on whether an account holds lots the user recorded, and so on whether a withdrawal creates a lot. The warning then counts the sats the replay couldn't cover.
-- **If the replay can't apply an event at all,** it stops there, and the result names that event:
-  - **Causes:** the same disagreement, or a fee that would use up the last sats of a gift's part.
-  - **Every later warning:** figured on the user's lots, and marked as such.
+- **The replay always holds the same sats as the real run.** It stops wherever the two would part, and the result names that event:
+  - **When the runs disagree on creating a lot:** one counts an account's lots as recorded and the other doesn't, so a withdrawal would create a lot for unrecorded sats in only one of them.
+  - **When the replay can't apply an event:** for example, a fee that would use up the last sats of a gift's part.
+  - **Every later late choice:** judged and figured on the user's lots, and marked as such. A late choice that matches the user's lots, but not what the replay would have held, is then not warned about.
+  - **Reports must show a stopped replay,** with the event it stopped at (M7).
 - **Lot ids:** the warning's lot ids are the replay's. Each figure carries its own basis and dates.
 - **This is a stated tax position** (ADR 0009). It is printed with the reports.
 

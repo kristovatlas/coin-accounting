@@ -436,4 +436,11 @@ def test_any_history_conserves_sats_basis_and_proceeds(data: st.DataObject) -> N
     result = run(events)
     _assert_conserved(events, result)
     assert {late.disposal for late in result.late} == expect_late
+    # the warnings' figures are the replay's own allocations for that disposal (#238): no transfers
+    # here, so the replay never stops
+    replay_allocations = run(replay).allocations
+    assert result.replay_stopped is None
+    for warning in result.late:
+        assert warning.replayed
+        assert warning.standing == tuple(a for a in replay_allocations if a.disposal == warning.disposal)
     assert run(events) == result  # deterministic
