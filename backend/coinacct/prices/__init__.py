@@ -32,8 +32,9 @@ MAX_CENTS: Final = 99_999_999_999_999_999
 # refused: such moves are rare enough that bad data is the likelier cause, and the user can override.
 OUTLIER_FACTOR: Final = Decimal("1.5")
 # Where a day has both a trade VWAP and a typical price, they should be close: (H+L+C)/3 weighs the
-# day's extremes, so the two part on a volatile day, but by more than a quarter only when a source is
-# wrong or has changed its format. Flagged for review, never refused (T-303, T-304).
+# day's extremes, so the two part on a volatile or thin day, but rarely by more than a quarter, so a
+# broken or changed source is the likelier cause. Flagged for review, never refused (T-303, T-304).
+# It catches gross errors and format changes, not a subtle shift of a few percent (#262).
 MISMATCH_FACTOR: Final = Decimal("1.25")
 
 
@@ -110,9 +111,7 @@ def content_hash(data: bytes) -> str:
 def combine(vwap: Iterable[DailyPrice], typical: Iterable[DailyPrice]) -> list[DailyPrice]:
     """One series by day: the trade VWAP where there is one, otherwise the typical price (ADR 0007).
     Both series must be in the same currency, and neither may price a day twice."""
-    best, fill = _by_day(vwap, "vwap"), _by_day(typical, "typical")
-    if len({p.currency for p in (*best.values(), *fill.values())}) > 1:
-        raise PriceError("the series mix currencies")
+    best, fill = _pair(vwap, typical)
     for p in fill.values():
         best.setdefault(p.day, p)
     return [best[d] for d in sorted(best)]
@@ -120,10 +119,8 @@ def combine(vwap: Iterable[DailyPrice], typical: Iterable[DailyPrice]) -> list[D
 
 def mismatches(vwap: Iterable[DailyPrice], typical: Iterable[DailyPrice]) -> list[Mismatch]:
     """The days, in order, on which both series have a price and the two differ by more than
-    MISMATCH_FACTOR: a cheap check for a tampered or changed source, where they overlap (T-303)."""
-    best, other = _by_day(vwap, "vwap"), _by_day(typical, "typical")
-    if len({p.currency for p in (*best.values(), *other.values())}) > 1:
-        raise PriceError("the series mix currencies")
+    MISMATCH_FACTOR: a cheap check for a broken or changed source, where they overlap (T-303)."""
+    best, other = _pair(vwap, typical)
     out: list[Mismatch] = []
     for day in sorted(best.keys() & other.keys()):
         a, b = best[day].price, other[day].price
@@ -149,6 +146,17 @@ def check(series: Sequence[DailyPrice]) -> tuple[list[Gap], list[Outlier]]:
         if moved:
             outliers.append(Outlier(p.day, before.price, p.price))
     return gaps, outliers
+
+
+def _pair(
+    vwap: Iterable[DailyPrice], typical: Iterable[DailyPrice]
+) -> tuple[dict[date, DailyPrice], dict[date, DailyPrice]]:
+    """Both series by day, checked the same way for `combine` and `mismatches`: the right methods,
+    no day twice, one currency."""
+    best, other = _by_day(vwap, "vwap"), _by_day(typical, "typical")
+    if len({p.currency for p in (*best.values(), *other.values())}) > 1:
+        raise PriceError("the series mix currencies")
+    return best, other
 
 
 def _by_day(series: Iterable[DailyPrice], method: Method) -> dict[date, DailyPrice]:
