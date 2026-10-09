@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| Version | 0.2.34 |
-| Last updated | 2026-10-06 |
+| Version | 0.2.35 |
+| Last updated | 2026-10-09 |
 | Related | [`PLAN.md`](../PLAN.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`DEPENDENCIES.md`](DEPENDENCIES.md) · `docs/adr/` · `docs/architecture.md` |
 
 Items marked **(verify at setup)** depend on tool behaviour to be confirmed when M0 configures the toolchain. If a tool doesn't behave as described, the M0 PR must propose an equivalent control here. Tool versions referenced: pnpm 12.x, uv (current), Socket Firewall Free 1.15.x, as of 2026-09.
@@ -274,7 +274,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
   - a new data store, or moving data across the VeraCrypt boundary
   - a new dependency with network, native-code or install-time execution capability
   - changes to tax rules or doxx rules
-  - storage format changes, or a change in how chain data is obtained from the node
+  - storage format changes, or a change in how chain data is obtained from the node. A migration that implements PLAN §2's data model (or the architecture) is not a storage format change by itself; where the DB lives or is protected (secrets stored in it included), data outside that model, a PLAN change that adds, removes or redefines a kind of stored data, deleting or altering data that can't be recomputed (by the migration, or by a rule it adds), and loosening a schema rule that a THREAT_MODEL mitigation or an accepted ADR's invariant relies on are ([ADR 0038](adr/0038-schema-changes-within-the-data-model.md))
   - weakening any control in this document or the threat model
   - changes to the architecture diagram
   - supported platform changes
@@ -437,3 +437,4 @@ A change is done only when:
 | 2026-10-06 | 0.2.32 | §2.5: the pnpm lockfile check lands with the first JavaScript dependencies (M0.3): a strict full read of `pnpm-lock.yaml` (registry-only sources, one sha512 integrity per package, no foreign keys or YAML constructs) and the 7-day cooldown from publish times that `make propose-js` records in `pnpm-lock.times.json` (owner decision: recorded at propose time, same back-dating limit as `uv.lock`). Known limit: a bare integrity means the registry configured for the package's scope, so `registry.npmjs.org` relies on the registry settings until #36 and #93 pin them; the `@jsr/` scope and `jsr:` specifiers fail |
 | 2026-10-06 | 0.2.33 | §2.3: the E2E browser pin: Chrome for Testing's headless shell 153.0.8010.12 (the build `@playwright/test` 1.63.0 uses) in `scripts/toolchain.lock`, a safe zip extractor in `toolchain.py`, and the `e2e-tools` target (M0.3 H4) |
 | 2026-10-06 | 0.2.34 | §3.1: the first E2E test (M0.3 H4). `make frontend` builds the production bundle, which the launcher reads into memory at start-up (`api/` has no filesystem access; architecture §2, ADR 0034) and the app serves under its CSP. `make e2e` starts a regtest node and the real launcher (`e2e/harness/app_under_test.py`), and drives the pinned headless Chrome through the launch file, the session claim, the status and Quit, failing on any CSP violation. CI's `tests` job runs it on Linux and macOS |
+| 2026-10-09 | 0.2.35 | §4.1: what "storage format changes" covers for user-DB migrations, per ADR 0038 (#232), which the owner accepts before this lands: a migration within PLAN §2's data model needs no ADR of its own; the cases that still do are listed there |
