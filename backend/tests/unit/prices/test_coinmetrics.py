@@ -148,6 +148,18 @@ def test_a_token_not_in_the_expected_form_is_refused(token: Any) -> None:
         reference_page(text, BEFORE, None)
 
 
+@pytest.mark.parametrize("token", [None, "absent"])
+def test_a_next_page_named_without_its_token_is_refused(token: str | None) -> None:
+    # the server says there is more but gives no token to ask for it: failing beats a cut-off history
+    top: dict[str, Any] = {"next_page_url": "https://community-api.coinmetrics.io/v4/x"}
+    if token is None:
+        top["next_page_token"] = None
+    with pytest.raises(PriceError, match="a next page is named without its token"):
+        reference_page(page(row("2024-01-01"), **top), BEFORE, None)
+    # a null URL on the last page is fine
+    assert reference_page(page(row("2024-01-01"), next_page_url=None), BEFORE, None).next_token is None
+
+
 def test_an_empty_page_has_no_last_day() -> None:
     got = reference_page(page(), BEFORE, date(2024, 1, 1))
     assert (got.prices, got.last, got.next_token) == ([], None, None)

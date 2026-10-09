@@ -78,9 +78,7 @@ def reference_page(text: str, complete_before: date, after: date | None) -> Page
     rows = doc["data"]
     if not isinstance(rows, list):
         _fail("Coin Metrics: expected a list of rows")
-    token = doc.get("next_page_token")
-    if token is not None and (not isinstance(token, str) or _TOKEN.fullmatch(token) is None):
-        _fail("Coin Metrics: the next page's token isn't in the expected form")
+    token = _token(doc)
     out: list[DailyPrice] = []
     seen = after
     for n, row in enumerate(rows, 1):
@@ -104,6 +102,17 @@ def reference_page(text: str, complete_before: date, after: date | None) -> Page
         if price is not None:
             out.append(DailyPrice(day, "USD", price, "reference", SOURCE))
     return Page(out, seen if seen != after else None, token)
+
+
+def _token(doc: dict[str, Any]) -> str | None:
+    """The next page's token, or None on the last page. A next page named without a token (more to
+    come, but no way to ask for it) fails, rather than end the history early."""
+    token = doc.get("next_page_token")
+    if token is not None and (not isinstance(token, str) or _TOKEN.fullmatch(token) is None):
+        _fail("Coin Metrics: the next page's token isn't in the expected form")
+    if token is None and doc.get("next_page_url") is not None:
+        _fail("Coin Metrics: a next page is named without its token")
+    return token
 
 
 def _day(text: Any, where: str) -> date:

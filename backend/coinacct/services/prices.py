@@ -33,13 +33,16 @@ STALE_USD: Final = timedelta(days=7)
 class Refreshed:
     """One refresh's result. `usd` is the tax series: Coin Metrics' reference rate, with Bitstamp's
     typical price on the days the rate lacks (ADR 0039). `mismatches` are the days the two part by more
-    than the check allows (T-303). `display` holds each display currency's series, Bitstamp's own pair
-    where it traded and the ECB conversion of USD elsewhere. `hashes` maps each source to the SHA-256 of
-    what was fetched (T-303). `usd_through` is the reference rate's last priced day (None if there is
-    none), and `usd_stale` says it is more than STALE_USD before the refresh's first incomplete day."""
+    than the check allows (T-303), and `reference_gaps` the days the rate itself lacks, so a feed that
+    drops days can't hide behind Bitstamp's fill. `display` holds each display currency's series,
+    Bitstamp's own pair where it traded and the ECB conversion of USD elsewhere. `hashes` maps each
+    source to the SHA-256 of what was fetched (T-303). `usd_through` is the reference rate's last priced
+    day (None if there is none), and `usd_stale` says it is more than STALE_USD before the refresh's
+    first incomplete day."""
 
     usd: list[DailyPrice]
     mismatches: list[Mismatch]
+    reference_gaps: list[Gap]
     display: dict[str, list[DailyPrice]]
     gaps: dict[str, list[Gap]]
     outliers: dict[str, list[Outlier]]
@@ -82,7 +85,8 @@ def _refresh(proxy: Proxy | None, stop: Callable[[], bool], complete_before: dat
         gaps[currency], outliers[currency] = check(series)
     through = reference[-1].day if reference else None
     stale = through is None or complete_before - through > STALE_USD
-    return Refreshed(usd, flagged, display, gaps, outliers, hashes, through, stale)
+    reference_gaps, _ = check(reference)
+    return Refreshed(usd, flagged, reference_gaps, display, gaps, outliers, hashes, through, stale)
 
 
 def _prefer(market: Sequence[DailyPrice], converted: Sequence[DailyPrice]) -> list[DailyPrice]:

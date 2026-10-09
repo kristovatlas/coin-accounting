@@ -106,6 +106,14 @@ def test_days_where_the_two_usd_sources_part_are_flagged(sources: dict[str, Any]
     ]
 
 
+def test_the_reference_rates_own_gaps_are_reported_though_bitstamp_fills_them(
+    sources: dict[str, Any],
+) -> None:
+    got = run()  # Aug 19 has no reference value: Bitstamp prices it, and the gap is still reported
+    assert [(g.first.day, g.last.day) for g in got.reference_gaps] == [(19, 19)]
+    assert got.gaps["USD"] == []
+
+
 def test_a_current_reference_rate_is_not_stale(sources: dict[str, Any]) -> None:
     got = run()  # its last day is Aug 21; the refresh's first incomplete day is Aug 22
     assert (got.usd_through, got.usd_stale) == (date(2011, 8, 21), False)

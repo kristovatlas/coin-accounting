@@ -38,7 +38,7 @@ import zipfile
 import zlib
 from collections.abc import Buffer, Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final, NoReturn, cast
 from urllib.parse import urlsplit
@@ -103,8 +103,8 @@ class Isolation:
     """SOCKS5 username and password (RFC 1929) that Tor uses only to choose a circuit (IsolateSOCKSAuth):
     connections offering the same pair may share one, and a fresh pair gets a circuit of its own."""
 
-    user: bytes
-    password: bytes
+    user: bytes = field(repr=False)  # kept out of logs: they would tie log lines to a circuit
+    password: bytes = field(repr=False)
 
     @classmethod
     def fresh(cls) -> Isolation:

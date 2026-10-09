@@ -869,6 +869,10 @@ def test_one_download_uses_one_isolation_pair_for_every_page_and_retry(cm: dict[
     download(cm)
     pairs = [limits["isolation"] for limits in cm["limits"]]
     assert len(pairs) == 4 and all(p is pairs[0] for p in pairs)  # a 429 is waited out on one circuit
+    second = CM_FIRST + "&next_page_token=0.a"
+    assert cm["asked"] == [CM_FIRST, CM_FIRST, second, second]  # a retry repeats its own page's URL
+    assert pairs[0].user.decode() not in repr(pairs[0])  # kept out of logs
+    assert pairs[0].password.decode() not in repr(pairs[0])
     assert isinstance(pairs[0], fetch.Isolation) and len(pairs[0].user) == len(pairs[0].password) == 16
     first = pairs[0]
     cm["answers"], cm["limits"] = [cm_page(1)], []
