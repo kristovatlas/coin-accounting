@@ -11,7 +11,7 @@ import threading
 import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -20,6 +20,7 @@ import pytest
 from coinacct.prices import DailyPrice, PriceError, fetch
 from coinacct.prices.fetch import FetchError
 from coinacct.services import prices as service
+from coinacct.services.jobs import JobWorker, State
 
 TODAY = date(2011, 8, 22)  # four complete days on Bitstamp's grid: one OHLC page per pair
 DAY = 86_400
@@ -71,7 +72,9 @@ def sources(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, bytes]]:
 
 
 def run(cancelled: threading.Event | None = None) -> service.Refreshed:
-    return service.refresh(None, cancelled or threading.Event(), today=lambda: TODAY)
+    got = service.refresh(None, cancelled or threading.Event(), today=lambda: TODAY)
+    assert got is not None
+    return got
 
 
 def usd(day: int, price: str, method: str, source: str) -> DailyPrice:
@@ -117,7 +120,8 @@ def test_each_source_has_its_content_hash(sources: dict[str, Any]) -> None:
     assert hashes["bitcoincharts:bitstampUSD"] == hashlib.sha256(DUMP).hexdigest()
     assert hashes["ecb:eurofxref-hist"] == hashlib.sha256(sources[fetch.ECB_URL]).hexdigest()
     page = sources[fetch.OHLC_URL.format(currency="usd", start=AUG18)]
-    assert hashes["bitstamp:ohlc:btcusd"] == hashlib.sha256(page).hexdigest()
+    framed = f"{AUG18}:{len(page)}\n".encode() + page  # each page framed by its start and length
+    assert hashes["bitstamp:ohlc:btcusd"] == hashlib.sha256(framed).hexdigest()
 
 
 def test_gaps_and_outliers_are_reported_per_series(sources: dict[str, Any]) -> None:
@@ -128,18 +132,61 @@ def test_gaps_and_outliers_are_reported_per_series(sources: dict[str, Any]) -> N
     assert [o.day.day for o in got.outliers["EUR"]] == [19]
 
 
-def test_a_cancelled_refresh_stops_with_an_error(sources: dict[str, Any]) -> None:
+def test_a_cancelled_refresh_returns_nothing_so_the_job_is_cancelled_not_failed(
+    sources: dict[str, Any],
+) -> None:
     stop = threading.Event()
     stop.set()
-    with pytest.raises(FetchError, match="cancelled"):
-        run(stop)
+    assert service.refresh(None, stop, today=lambda: TODAY) is None
+    assert sources["__asked__"] == []  # cancelled before the first download: nothing fetched
+
+
+def test_a_cancel_during_a_download_also_returns_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    stop = threading.Event()
+
+    def dump(*args: Any) -> Any:
+        stop.set()
+        raise fetch.Cancelled("api.bitcoincharts.com: the refresh was cancelled")
+
+    monkeypatch.setattr(fetch, "download_dump", dump)
+    assert service.refresh(None, stop, today=lambda: TODAY) is None
+
+
+def test_an_ecb_line_ending_in_a_control_byte_is_refused_not_split_off(sources: dict[str, Any]) -> None:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:  # splitlines() would split at the \x0c and accept the file
+        z.writestr("eurofxref-hist.csv", "Date,USD,GBP,\n2011-08-19,2.000000,1.000000,\x0c\n")
+    sources[fetch.ECB_URL] = out.getvalue()
+    with pytest.raises(PriceError, match="line 2: expected 3 fields"):
+        run()
+
+
+def test_a_cancelled_refresh_job_ends_cancelled(sources: dict[str, Any]) -> None:
+    worker = JobWorker()
+    worker.start()
+    started = threading.Event()
+    release = threading.Event()
+
+    def job(cancelled: threading.Event) -> object:
+        started.set()
+        release.wait(5)
+        return service.refresh(None, cancelled, today=lambda: TODAY)
+
+    job_id = worker.submit("prices", job)
+    assert started.wait(5)
+    worker.cancel(job_id)
+    release.set()
+    worker.stop()
+    done = worker.job(job_id)
+    assert done is not None and done.state is State.CANCELLED
 
 
 @pytest.mark.parametrize(
     ("url", "data", "error", "message"),
     [
         (fetch.DUMP_URL, b"not gzip", FetchError, "isn't a valid gzip"),
-        (fetch.DUMP_URL, gzip.compress(b"\xff\n"), FetchError, "valid gzip of ASCII"),
+        (fetch.DUMP_URL, gzip.compress(b"\xff\n"), FetchError, "line 1 of the dump isn't ASCII"),
+        (fetch.DUMP_URL, gzip.compress(b"1" * 300), FetchError, "longer than any trade"),  # no newline
         (fetch.DUMP_URL, gzip.compress(b"junk\n"), PriceError, "line 1"),
         (fetch.ECB_URL, b"not a zip", FetchError, "valid zip"),
         (fetch.ECB_URL, b"PK\x05\x06" + b"\x00" * 18, FetchError, "valid zip"),  # empty: no member
@@ -165,10 +212,43 @@ def test_an_ecb_zip_with_another_file_too_is_refused(sources: dict[str, Any]) ->
         run()
 
 
-def test_an_ohlc_page_holding_an_earlier_day_is_refused(sources: dict[str, Any]) -> None:
-    sources[fetch.OHLC_URL.format(currency="usd", start=AUG18)] = ohlc("BTC/USD", candle(-1, "9"))
-    with pytest.raises(FetchError, match="holds an earlier day"):
+@pytest.mark.parametrize("bad", [candle(-1, "9"), candle(-1, "9", volume="0")])
+def test_an_ohlc_page_answering_for_an_earlier_day_is_refused(sources: dict[str, Any], bad: Any) -> None:
+    sources[fetch.OHLC_URL.format(currency="usd", start=AUG18)] = ohlc("BTC/USD", bad)
+    with pytest.raises(PriceError, match="2011-08-17 is outside the requested page"):
         run()
+
+
+def test_ohlc_pages_join_at_their_boundary_and_a_page_answering_for_later_days_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    second = AUG18 + 1000 * DAY
+    pages = {
+        fetch.OHLC_URL.format(currency="usd", start=AUG18): ohlc("BTC/USD", candle(999, "1")),
+        fetch.OHLC_URL.format(currency="usd", start=second): ohlc(
+            "BTC/USD", candle(1000, "2"), candle(1001, "3")
+        ),
+    }
+    asked: list[str] = []
+
+    @contextmanager
+    def fake(url: str, proxy: Any = None, **limits: Any) -> Iterator[io.BytesIO]:
+        asked.append(url)
+        yield io.BytesIO(pages[url])
+
+    monkeypatch.setattr(fetch, "open_url", fake)
+    until = date(2011, 8, 18) + timedelta(days=1002)
+    prices, digest = fetch.download_ohlc("USD", until, None, lambda: False)
+    assert [(p.day - date(2011, 8, 18)).days for p in prices] == [999, 1000, 1001]  # once each, in order
+    assert asked == list(pages)
+    framed = b"".join(
+        f"{s}:{len(pages[u])}\n".encode() + pages[u] for s, u in zip((AUG18, second), pages, strict=True)
+    )
+    assert digest == hashlib.sha256(framed).hexdigest()
+    # a first page answering with the second page's days (a changed `start`) is refused, not trimmed
+    pages[fetch.OHLC_URL.format(currency="usd", start=AUG18)] = ohlc("BTC/USD", candle(1000, "2"))
+    with pytest.raises(PriceError, match="outside the requested page"):
+        fetch.download_ohlc("USD", until, None, lambda: False)
 
 
 def test_the_pages_follow_bitstamps_grid_to_the_download_day() -> None:
@@ -181,21 +261,62 @@ def test_the_pages_follow_bitstamps_grid_to_the_download_day() -> None:
 def test_the_refresh_uses_the_utc_date_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[date] = []
 
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> Clock:
+            return cls(2026, 10, 8, 23, 59, 59, tzinfo=tz)  # a fixed instant: no race with midnight
+
     def dump(complete_before: date, *args: Any) -> Any:
         seen.append(complete_before)
         raise FetchError("stop here")
 
+    monkeypatch.setattr(service, "datetime", Clock)
     monkeypatch.setattr(fetch, "download_dump", dump)
     with pytest.raises(FetchError):
         service.refresh(None, threading.Event())
-    assert seen == [datetime.now(UTC).date()]
+    assert seen == [date(2026, 10, 8)]
+
+
+def test_a_dump_that_unzips_past_its_limit_is_refused(
+    sources: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fetch, "DUMP_TEXT_MAX", 20)
+    with pytest.raises(FetchError, match="unzips to more than allowed"):
+        run()
+
+
+@pytest.mark.parametrize("how", ["encrypted", "bzip2"])
+def test_an_ecb_zip_packed_an_unexpected_way_is_refused(sources: dict[str, Any], how: str) -> None:
+    out = io.BytesIO()
+    method = zipfile.ZIP_BZIP2 if how == "bzip2" else zipfile.ZIP_DEFLATED
+    with zipfile.ZipFile(out, "w", compression=method) as z:
+        z.writestr("eurofxref-hist.csv", "Date,USD,GBP,\n")
+    data = bytearray(out.getvalue())
+    if how == "encrypted":  # set the encrypted flag in the local and central headers
+        for sig in (b"PK\x03\x04", b"PK\x01\x02"):
+            at = data.index(sig) + (6 if sig == b"PK\x03\x04" else 8)
+            data[at] |= 0x1
+    sources[fetch.ECB_URL] = bytes(data)
+    with pytest.raises(FetchError, match="encrypted or packed an unexpected way"):
+        run()
+
+
+def test_an_ecb_file_with_a_stray_control_byte_is_refused_not_split(sources: dict[str, Any]) -> None:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("eurofxref-hist.csv", "Date,USD,GBP,\n2011-08-19,2.000000,\x0c1.000000,\n")
+    sources[fetch.ECB_URL] = out.getvalue()
+    with pytest.raises(PriceError, match="line 2"):
+        run()
 
 
 def test_the_downloads_stop_once_cancelled_and_refuse_an_unknown_pair() -> None:
-    with pytest.raises(FetchError, match=r"www\.bitstamp\.net: the refresh was cancelled"):
+    with pytest.raises(fetch.Cancelled, match=r"www\.bitstamp\.net: the refresh was cancelled"):
         fetch.download_ohlc("USD", TODAY, None, lambda: True)
-    with pytest.raises(FetchError, match=r"www\.ecb\.europa\.eu: the refresh was cancelled"):
+    with pytest.raises(fetch.Cancelled, match=r"www\.ecb\.europa\.eu: the refresh was cancelled"):
         fetch.download_ecb(None, lambda: True)
+    with pytest.raises(fetch.Cancelled, match=r"api\.bitcoincharts\.com: the refresh was cancelled"):
+        fetch.download_dump(TODAY, None, lambda: True)
     with pytest.raises(FetchError, match="unsupported currency"):
         fetch.download_ohlc("JPY", TODAY, None, lambda: False)
 

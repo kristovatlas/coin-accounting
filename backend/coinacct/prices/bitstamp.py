@@ -65,10 +65,14 @@ def vwap_by_day(lines: Iterable[str], complete_before: date) -> list[DailyPrice]
     return [p for p in out if p.day < complete_before]
 
 
-def typical_by_day(text: str, currency: str, complete_before: date) -> list[DailyPrice]:
+def typical_by_day(
+    text: str, currency: str, complete_before: date, *, within: tuple[date, date | None] | None = None
+) -> list[DailyPrice]:
     """Each complete UTC day's typical price (H+L+C)/3 from one page of Bitstamp's daily OHLC JSON for
     BTC in `currency`. A candle with no volume (no trades that day) gets no price. Bitstamp's page always
-    covers whole days, so its last day is kept when it is before `complete_before`."""
+    covers whole days, so its last day is kept when it is before `complete_before`. With `within`
+    (first, end), every candle, priced or not, must fall on a day from `first` and before `end` (if
+    any): a page that answers for other days is refused, not filtered (T-304)."""
     if currency not in CURRENCIES:
         _fail(f"unsupported currency {currency!r}")
     try:
@@ -104,6 +108,8 @@ def typical_by_day(text: str, currency: str, complete_before: date) -> list[Dail
         on = datetime.fromtimestamp(when, UTC).date()
         if seen is not None and on <= seen:
             _fail(f"{where}: out of day order, or a day twice")
+        if within is not None and (on < within[0] or (within[1] is not None and on >= within[1])):
+            _fail(f"{where}: {on} is outside the requested page")
         seen = on
         if _number(c["volume"], where):
             out.append(

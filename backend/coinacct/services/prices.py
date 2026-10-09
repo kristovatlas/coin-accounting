@@ -15,8 +15,9 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 from coinacct.prices import DailyPrice, Gap, Outlier, check, combine, fetch
-from coinacct.prices.fetch import Proxy
-from coinacct.prices.fx import DISPLAY, to_display
+from coinacct.prices.bitstamp import DUMP_SOURCE, OHLC_SOURCE
+from coinacct.prices.fetch import Cancelled, Proxy
+from coinacct.prices.fx import DISPLAY, ECB_SOURCE, to_display
 
 
 @dataclass(frozen=True)
@@ -34,19 +35,28 @@ class Refreshed:
 
 def refresh(
     proxy: Proxy | None, cancelled: threading.Event, today: Callable[[], date] | None = None
-) -> Refreshed:
+) -> Refreshed | None:
     """Download and check everything. Days from `today` (the UTC date) on are partial, so left out.
-    Any failure raises FetchError or PriceError before anything is returned (T-304)."""
-    complete_before = (today or _utc_today)()
-    stop = cancelled.is_set
+    Any failure raises FetchError or PriceError before anything is returned (T-304). A cancel (asked
+    before each download and during every read) returns None, so the job worker records the job as
+    cancelled, not failed."""
+    if cancelled.is_set():  # before anything: not even the first connection
+        return None
+    try:
+        return _refresh(proxy, cancelled.is_set, (today or _utc_today)())
+    except Cancelled:
+        return None
+
+
+def _refresh(proxy: Proxy | None, stop: Callable[[], bool], complete_before: date) -> Refreshed:
     vwap, dump_hash = fetch.download_dump(complete_before, proxy, stop)
     typical: dict[str, list[DailyPrice]] = {}
-    hashes = {"bitcoincharts:bitstampUSD": dump_hash}
+    hashes = {DUMP_SOURCE: dump_hash}
     for currency in ("USD", *DISPLAY):
-        typical[currency], hashes[f"bitstamp:ohlc:btc{currency.lower()}"] = fetch.download_ohlc(
+        typical[currency], hashes[f"{OHLC_SOURCE}:btc{currency.lower()}"] = fetch.download_ohlc(
             currency, complete_before, proxy, stop
         )
-    rates, hashes["ecb:eurofxref-hist"] = fetch.download_ecb(proxy, stop)
+    rates, hashes[ECB_SOURCE] = fetch.download_ecb(proxy, stop)
     usd = combine(vwap, typical["USD"])
     converted = to_display(usd, rates)
     display = {c: _prefer(typical[c], [p for p in converted if p.currency == c]) for c in DISPLAY}
