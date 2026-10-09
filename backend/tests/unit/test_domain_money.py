@@ -8,12 +8,12 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from coinacct.domain.money import add, share, subtract, usd
+from coinacct.domain.money import add, share, signed_usd, subtract, usd
 
 
 @pytest.mark.parametrize(
     ("text", "value"),
-    [("0", "0.00"), ("12.5", "12.50"), (" 1000.00 ", "1000.00"), ("1.230", "1.23"), ("1E+2", "100.00")],
+    [("0", "0.00"), ("12.5", "12.50"), (" 1000.00 ", "1000.00"), ("1.230", "1.23")],
 )
 def test_usd_reads_exact_cents(text: str, value: str) -> None:
     assert usd(text) == Decimal(value)
@@ -26,7 +26,33 @@ LONG = "1." + "0" * 59 + "1"
 
 @pytest.mark.parametrize(
     "text",
-    ["0.001", "1.234", "-1", "NaN", "Infinity", "abc", "", "1e100", "1000000000000000", LONG, "1" + "0" * 70],
+    [
+        *(
+            "0.001",
+            "1.234",
+            "-1",
+            "NaN",
+            "Infinity",
+            "abc",
+            "",
+            "1e100",
+            "1000000000000000",
+            LONG,
+            "1" + "0" * 70,
+        ),
+        # only plain ASCII digits: no exponents, grouping, signs other than "-", or other scripts' digits
+        *(
+            "1E+2",
+            "1_000.00",
+            "1,000.00",
+            "+1.00",
+            "\uff11\uff10\uff10",
+            "\u0661\u0660\u0660",
+            ".5",
+            "1.",
+            "\n1.00",
+        ),
+    ],
 )
 def test_usd_refuses_what_isnt_exact_cents_below_a_quadrillion(text: str) -> None:
     with pytest.raises(ValueError):  # never decimal.InvalidOperation or Overflow
@@ -96,3 +122,25 @@ def test_shares_of_what_remains_add_up_to_the_whole(cents: int, parts: list[int]
         left_sats -= p
     assert total == amount
     assert left == 0
+
+
+@pytest.mark.parametrize(("text", "value"), [("-12.34", "-12.34"), ("-0.00", "0.00"), ("5", "5.00")])
+def test_signed_usd_reads_negative_net_proceeds_adr0009(text: str, value: str) -> None:
+    assert str(signed_usd(text)) == value
+
+
+@pytest.mark.parametrize("text", ["-0.001", "-1000000000000000", "--1", "- 1"])
+def test_signed_usd_refuses_the_same_forms(text: str) -> None:
+    with pytest.raises(ValueError):
+        signed_usd(text)
+
+
+def test_a_negative_amount_splits_like_its_size() -> None:
+    assert share(Decimal("-0.10"), 1, 3) == Decimal("-0.03")
+    assert share(Decimal("-0.07"), 1, 2) == Decimal("-0.04")
+    assert share(Decimal("-5.00"), 2, 2) == Decimal("-5.00")
+
+
+def test_a_share_is_of_at_most_the_supply() -> None:
+    with pytest.raises(ValueError):
+        share(Decimal("1.00"), 1, 21_000_000 * 100_000_000 + 1)

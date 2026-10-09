@@ -1,15 +1,26 @@
-"""Lots in an account: acquisitions create them, sales and spends use them (PLAN §7; ADRs 0008, 0009, 0021).
+"""Lots in an account: acquisitions create them, sales, spends and gifts use them (PLAN §7; ADRs 0008,
+0009, 0011, 0021).
 
-Pure: events in, allocations and holdings out. The caller (`services/`) gives the events in time order.
-The engine never reads the clock. Each event carries its **tax date** (`on`, already in the user's time
-zone, for the holding period); a disposal also carries the **moment** it happened (`at`), and a user's
-choice of lots the moment it was made (`identified_at`): both timezone-aware UTC (ENGINEERING §5.2).
+Pure: events in, allocations and holdings out. The caller (`services/`) gives the events in time order:
+by tax date, and disposals by moment. The engine never reads the clock. Each event carries its **tax
+date** (`on`, already in the user's time zone, for the holding period); a disposal also carries the
+**moment** it happened (`at`), and a user's choice of lots the moment it was made (`identified_at`):
+both timezone-aware UTC (ENGINEERING §5.2). A disposal's tax date is within a day of its moment's UTC
+date (time zones run from UTC-12 to UTC+14), and disposals come in the order of their moments.
 
-- **Acquisitions** (`buy`, `p2p_buy`, `income`, `inherit`) each create one lot: its sats, its basis
-  (cost plus fees, or the FMV the caller computed) and its date. Gifts, the 2025 opening allocation,
-  movements between accounts and UTXO tracing come in later slices.
-- **Disposals** (`sell`, `spend`) use lots of **the same account** only (ADR 0008 §1). Proceeds are net of
-  disposal costs (ADR 0009). Lots are chosen:
+- **Acquisitions** (`buy`, `p2p_buy`, `income`, `inherit`, `gift_in`) each create one lot: its sats, its
+  basis (cost plus fees, or the FMV the caller computed) and its date. The 2025 opening allocation,
+  movements between accounts, fees by role and UTXO tracing come in later slices.
+- **A gift received** (`gift_in`; IRC §1015(a), Treas. Reg. §1.1015-1(a)) has a **dual basis**. Its gain
+  basis is the donor's basis, held from the donor's date (tacked, IRC §1223(2)). If the FMV at the gift
+  was lower, that FMV is its loss basis, held from the gift date. At a disposal, proceeds above the
+  gain basis give a gain against it; proceeds below the loss basis give a loss against that; proceeds
+  in between give neither (the basis used is the proceeds). An unknown donor basis is a **blocking
+  condition** (ADR 0009, T-509): the lot counts as basis 0.00 until the user enters one.
+- **Disposals** (`sell`, `spend`, `gift_out`) use lots of **the same account** only (ADR 0008 §1). Proceeds
+  are net of disposal costs, and can be negative when the costs exceed what was received (ADR 0009). A
+  **gift given** (`gift_out`) has no proceeds and no gain or loss, and makes no Form 8949 row (ADR 0011):
+  it reports the basis and date that pass to the recipient. Lots are chosen:
   - **automatically,** by the account's standing method (FIFO unless another is recorded; ADR 0021 §1).
     These choices are never late;
   - **or by the user.** A choice made after the moment of the disposal (Treas. Reg. §1.1012-1(j): no
@@ -17,14 +28,15 @@ choice of lots the moment it was made (`identified_at`): both timezone-aware UTC
     standing method's (ADR 0021 §2), with the standing method's figures (ADR 0008 §4). The user's
     choice is used either way. The standing method is applied to the lots as they stand at that
     disposal, after the user's earlier choices (a full replay without them is a later decision, #238).
-- **Splits are exact.** A lot's basis and a disposal's proceeds are split by sats with `domain.money.share`,
-  always as a share of what remains, and the last part takes the remainder. So every split adds up
-  to the whole, to the cent. All money arithmetic runs in the fixed `domain.money` context (T-502).
+- **Splits are exact.** Bases and proceeds are split by sats with `domain.money.share`, always as a share
+  of what remains, and the last part takes the remainder. So every split adds up to the whole, to the
+  cent. All money arithmetic runs in the fixed `domain.money` context (T-502).
 - **Holding period** (IRC §1222; Rev. Rul. 66-7): the day after acquisition starts it, and a disposal
   is long-term if it is more than one year later: after the first anniversary of the acquisition. A
   lot acquired on the last day of a month has its anniversary on the last day of that month a year
-  later (Rev. Rul. 66-6): bought 28 February 2023, it is long-term from 1 March 2024, not 29 February.
-  An inherited lot is always long-term (IRC §1223(9)).
+  later (Rev. Rul. 66-6, applied to the one-year period: a tax position for the owner to confirm,
+  #239): bought 28 February 2023, it is long-term from 1 March 2024, not 29 February. An inherited lot
+  is always long-term (IRC §1223(9)).
 - **Not enough lots** for an automatic disposal is a **blocking condition** (ADR 0009): the lots that
   exist are used, and the rest of the disposal is reported as missing basis. Invalid input (a choice
   naming lots the account doesn't hold, a wrong type) raises `EngineError`.
@@ -40,15 +52,19 @@ from decimal import Decimal, localcontext
 from typing import Final, Literal
 
 from coinacct.domain.chain import MAX_SATS
-from coinacct.domain.money import CONTEXT, share, subtract, usd
+from coinacct.domain.money import CONTEXT, share, signed_usd, subtract, usd
 
-type AcquisitionKind = Literal["buy", "p2p_buy", "income", "inherit"]
-type DisposalKind = Literal["sell", "spend"]
+type AcquisitionKind = Literal["buy", "p2p_buy", "income", "inherit", "gift_in"]
+type DisposalKind = Literal["sell", "spend", "gift_out"]
 type Method = Literal["fifo"]
+# How an allocation's basis was found: the lot's own basis; a gift's donor basis (a gain) or FMV at the
+# gift (a loss); between the two, neither; or a gift's donor basis that isn't known (blocking).
+type BasisRule = Literal["cost", "donor", "fmv_at_gift", "no_gain_or_loss", "unknown"]
 
-ACQUISITION_KINDS: Final[frozenset[str]] = frozenset({"buy", "p2p_buy", "income", "inherit"})
-DISPOSAL_KINDS: Final[frozenset[str]] = frozenset({"sell", "spend"})
+ACQUISITION_KINDS: Final[frozenset[str]] = frozenset({"buy", "p2p_buy", "income", "inherit", "gift_in"})
+DISPOSAL_KINDS: Final[frozenset[str]] = frozenset({"sell", "spend", "gift_out"})
 METHODS: Final[frozenset[str]] = frozenset({"fifo"})
+ZERO: Final = Decimal("0.00")
 
 
 class EngineError(ValueError):
@@ -62,7 +78,9 @@ class Acquisition:
     on: date
     kind: AcquisitionKind
     sats: int
-    basis: Decimal  # USD: cost plus acquisition fees, or the FMV at receipt
+    basis: Decimal | None  # USD: cost plus fees, the FMV at receipt, or a gift's donor basis (None: unknown)
+    fmv: Decimal | None = None  # gift_in only: the FMV at the gift
+    donor_acquired: date | None = None  # gift_in only: the donor's acquisition date
 
 
 @dataclass(frozen=True)
@@ -79,7 +97,7 @@ class Disposal:
     at: datetime  # the moment, timezone-aware UTC
     kind: DisposalKind
     sats: int
-    proceeds: Decimal  # USD, net of disposal costs
+    proceeds: Decimal  # USD, net of disposal costs; 0.00 for a gift given
     picks: tuple[Pick, ...] | None = None  # None: the account's standing method
     identified_at: datetime | None = None  # when the user chose `picks`, timezone-aware UTC
 
@@ -89,7 +107,8 @@ type Event = Acquisition | Disposal
 
 @dataclass(frozen=True)
 class Lot:
-    """What is left of a lot."""
+    """What is left of a lot. For a gift, `basis` and `acquired` are the donor's (the gain basis), and
+    `loss_basis`/`loss_from` the FMV at the gift and the gift date when that FMV was lower."""
 
     id: str
     account: str
@@ -97,11 +116,16 @@ class Lot:
     sats: int
     basis: Decimal
     always_long: bool
+    loss_basis: Decimal | None = None
+    loss_from: date | None = None
+    unknown_basis: bool = False
 
 
 @dataclass(frozen=True)
 class Allocation:
-    """One disposal's use of one lot: a Form 8949 row's numbers (ADR 0011 chooses its box)."""
+    """One disposal's use of one lot: a Form 8949 row's numbers (ADR 0011 chooses its box). `basis`
+    and `acquired` are the ones the gain or loss is figured with (`rule`); `lot_basis` is what the
+    lot gave up of its own basis."""
 
     disposal: str
     lot: str
@@ -111,6 +135,9 @@ class Allocation:
     acquired: date
     disposed: date
     long_term: bool
+    rule: BasisRule = "cost"
+    lot_basis: Decimal | None = None  # None: the same as `basis`
+    lot_loss_basis: Decimal | None = None  # a gift's FMV basis the lot gave up, when it has one
 
     @property
     def gain(self) -> Decimal:
@@ -119,10 +146,25 @@ class Allocation:
 
 
 @dataclass(frozen=True)
+class GiftGiven:
+    """A gift's use of one lot: no gain or loss, and no Form 8949 row (ADR 0011). The recipient takes
+    the donor's basis and date (`basis`, `acquired`); `fmv_basis` is set when the lot itself was a gift
+    with a lower FMV, which the recipient needs too."""
+
+    disposal: str
+    lot: str
+    sats: int
+    basis: Decimal
+    acquired: date
+    fmv_basis: Decimal | None
+    unknown_basis: bool
+
+
+@dataclass(frozen=True)
 class LateIdentification:
     """A choice made after its disposal whose lots differ from the standing method's (ADR 0021 §2).
     `standing` is what the standing method would have used, with its figures, shown with the warning
-    (ADR 0008 §4). Its sats may fall short of the disposal's if the account held fewer lots then."""
+    (ADR 0008 §4); for a gift given, its figures are those of a sale for 0.00."""
 
     disposal: str
     identified_at: datetime
@@ -139,11 +181,20 @@ class MissingLots:
 
 
 @dataclass(frozen=True)
+class UnknownBasis:
+    """Blocking: a gift received whose donor basis isn't known (ADR 0009, T-509). The user enters one;
+    zero is the conservative choice."""
+
+    lot: str
+
+
+@dataclass(frozen=True)
 class Result:
     allocations: tuple[Allocation, ...]
+    gifts: tuple[GiftGiven, ...]
     holdings: tuple[Lot, ...]  # the lots left, in acquisition order across accounts, without empty ones
     late: tuple[LateIdentification, ...]
-    blocking: tuple[MissingLots, ...]
+    blocking: tuple[MissingLots | UnknownBasis, ...]
 
 
 @dataclass
@@ -151,6 +202,8 @@ class _Open:
     lot: Lot
     sats: int
     basis: Decimal
+    loss_basis: Decimal | None
+    gift: bool
 
 
 def long_term(acquired: date, disposed: date) -> bool:
@@ -175,16 +228,18 @@ class _Engine:
         for account, method in methods.items():
             if method not in METHODS:
                 raise EngineError(f"account {account!r}: unknown standing method {method!r}")
-        self._methods = methods
         self._open: dict[str, list[_Open]] = {}  # account -> its lots, in acquisition order
+        self._first: dict[str, int] = {}  # account -> the index of its first lot that isn't used up
         self._lots: dict[str, _Open] = {}  # every lot, in acquisition order
         self._seen: set[str] = set()
         self._allocations: list[Allocation] = []
+        self._gifts: list[GiftGiven] = []
         self._late: list[LateIdentification] = []
-        self._blocking: list[MissingLots] = []
+        self._blocking: list[MissingLots | UnknownBasis] = []
 
     def run(self, events: Sequence[Event]) -> Result:
         last: date | None = None
+        last_moment: datetime | None = None
         for event in events:
             _check_common(event)
             if event.id in self._seen:
@@ -195,30 +250,81 @@ class _Engine:
             last = event.on
             if isinstance(event, Acquisition):
                 self._acquire(event)
-            else:
-                self._dispose(event)
+                continue
+            _check_moment(event.at, f"disposal {event.id!r}: its moment")
+            if abs((event.on - event.at.date()).days) > 1:
+                raise EngineError(f"disposal {event.id!r}: its tax date is more than a day from its moment")
+            if last_moment is not None and event.at < last_moment:
+                raise EngineError(f"disposal {event.id!r} is out of time order")
+            last_moment = event.at
+            self._dispose(event)
         holdings = tuple(
-            Lot(o.lot.id, o.lot.account, o.lot.acquired, o.sats, o.basis, o.lot.always_long)
+            Lot(
+                o.lot.id,
+                o.lot.account,
+                o.lot.acquired,
+                o.sats,
+                o.basis,
+                o.lot.always_long,
+                o.loss_basis,
+                o.lot.loss_from,
+                o.lot.unknown_basis,
+            )
             for o in self._lots.values()
             if o.sats > 0
         )
-        return Result(tuple(self._allocations), holdings, tuple(self._late), tuple(self._blocking))
+        return Result(
+            tuple(self._allocations), tuple(self._gifts), holdings, tuple(self._late), tuple(self._blocking)
+        )
 
     def _acquire(self, a: Acquisition) -> None:
         if a.kind not in ACQUISITION_KINDS:
             raise EngineError(f"acquisition {a.id!r}: unknown kind {a.kind!r}")
-        basis = _usd(a.basis, a.id)
-        lot = Lot(a.id, a.account, a.on, a.sats, basis, always_long=a.kind == "inherit")
-        entry = _Open(lot, a.sats, basis)
+        loss_basis: Decimal | None = None
+        loss_from: date | None = None
+        unknown = False
+        acquired = a.on
+        if a.kind == "gift_in":
+            if a.fmv is None or type(a.donor_acquired) is not date or a.donor_acquired > a.on:
+                raise EngineError(
+                    f"gift {a.id!r}: a gift names its FMV and the donor's date, on or before it"
+                )
+            fmv = _usd(a.fmv, a.id)
+            acquired = a.donor_acquired
+            if a.basis is None:
+                unknown, basis = True, ZERO
+                self._blocking.append(UnknownBasis(a.id))
+            else:
+                basis = _usd(a.basis, a.id)
+                if fmv < basis:
+                    loss_basis, loss_from = fmv, a.on
+        else:
+            if a.fmv is not None or a.donor_acquired is not None:
+                raise EngineError(
+                    f"acquisition {a.id!r}: only a gift has an FMV at the gift and a donor's date"
+                )
+            if a.basis is None:
+                raise EngineError(f"acquisition {a.id!r}: only a gift's basis can be unknown")
+            basis = _usd(a.basis, a.id)
+        lot = Lot(
+            a.id, a.account, acquired, a.sats, basis, a.kind == "inherit", loss_basis, loss_from, unknown
+        )
+        entry = _Open(lot, a.sats, basis, loss_basis, a.kind == "gift_in")
         self._open.setdefault(a.account, []).append(entry)
+        self._first.setdefault(a.account, 0)
         self._lots[a.id] = entry
 
     def _standing(self, account: str, sats: int) -> tuple[list[Pick], int]:
-        """The standing method's picks for `sats`, and the sats it couldn't cover. The only standing
-        method so far is FIFO (METHODS; checked in __init__)."""
+        """FIFO's picks for `sats`, and the sats it couldn't cover. FIFO is the only standing method so
+        far (METHODS, checked in __init__). The scan starts at the account's first lot not used up."""
+        lots = self._open.get(account, [])
+        first = self._first.get(account, 0)
+        while first < len(lots) and lots[first].sats == 0:
+            first += 1
+        self._first[account] = first
         picks: list[Pick] = []
         left = sats
-        for o in self._open.get(account, []):
+        for o in lots[first:]:
             if left == 0:
                 break
             take = min(o.sats, left)
@@ -230,8 +336,9 @@ class _Engine:
     def _dispose(self, d: Disposal) -> None:
         if d.kind not in DISPOSAL_KINDS:
             raise EngineError(f"disposal {d.id!r}: unknown kind {d.kind!r}")
-        _check_moment(d.at, f"disposal {d.id!r}: its moment")
-        proceeds = _usd(d.proceeds, d.id)
+        proceeds = _signed_usd(d.proceeds, d.id)
+        if d.kind == "gift_out" and proceeds != 0:
+            raise EngineError(f"disposal {d.id!r}: a gift given has no proceeds")
         missing = 0
         if d.picks is None:
             if d.identified_at is not None:
@@ -249,41 +356,83 @@ class _Engine:
                     figures, _ = self._split(d, proceeds, standing, apply=False)
                     self._late.append(LateIdentification(d.id, d.identified_at, tuple(figures)))
         allocations, rest = self._split(d, proceeds, picks, apply=True)
-        self._allocations.extend(allocations)
+        if d.kind == "gift_out":
+            self._gifts.extend(self._gift(a) for a in allocations)
+        else:
+            self._allocations.extend(allocations)
         if missing:  # the standing picks covered all but `missing` sats; `rest` is their proceeds
             self._blocking.append(MissingLots(d.id, missing, rest))
+
+    def _gift(self, a: Allocation) -> GiftGiven:
+        lot = self._lots[a.lot].lot
+        lot_basis = a.basis if a.lot_basis is None else a.lot_basis
+        return GiftGiven(
+            a.disposal, a.lot, a.sats, lot_basis, lot.acquired, a.lot_loss_basis, lot.unknown_basis
+        )
 
     def _split(
         self, d: Disposal, proceeds: Decimal, picks: Sequence[Pick], *, apply: bool
     ) -> tuple[list[Allocation], Decimal]:
         """The allocations of `picks`, and the proceeds left for sats they don't cover. Proceeds follow
-        the sats: each part is a share of what remains of the disposal, the last part the rest; basis
-        is a share of what remains of the lot. With `apply` the lots are used up; without, the figures
-        are only computed (the late warning's)."""
+        the sats: each part is a share of what remains of the disposal, the last part the rest; a lot's
+        bases are shares of what remains of them. With `apply` the lots are used up; without, the
+        figures are only computed (the late warning's)."""
         out: list[Allocation] = []
         sats_left, proceeds_left = d.sats, proceeds
-        lots_left = {p.lot: (self._lots[p.lot].sats, self._lots[p.lot].basis) for p in picks}
+        left = {
+            p.lot: (self._lots[p.lot].sats, self._lots[p.lot].basis, self._lots[p.lot].loss_basis)
+            for p in picks
+        }
         for pick in picks:
             o = self._lots[pick.lot]
             part = share(proceeds_left, pick.sats, sats_left)
-            sats, basis_left = lots_left[pick.lot]
+            sats, basis_left, loss_left = left[pick.lot]
             basis = share(basis_left, pick.sats, sats)
-            lots_left[pick.lot] = (sats - pick.sats, subtract(basis_left, basis))
+            loss = None if loss_left is None else share(loss_left, pick.sats, sats)
+            left[pick.lot] = (
+                sats - pick.sats,
+                subtract(basis_left, basis),
+                None if loss_left is None or loss is None else subtract(loss_left, loss),
+            )
             sats_left -= pick.sats
             proceeds_left = subtract(proceeds_left, part)
-            term = o.lot.always_long or long_term(o.lot.acquired, d.on)
-            out.append(Allocation(d.id, pick.lot, pick.sats, basis, part, o.lot.acquired, d.on, term))
+            out.append(self._allocation(d, o.lot, (pick.sats, basis, loss), part))
         if apply:
-            for lot, (sats, basis) in lots_left.items():
-                self._lots[lot].sats, self._lots[lot].basis = sats, basis
+            for lot, (sats, basis, loss) in left.items():
+                entry = self._lots[lot]
+                entry.sats, entry.basis, entry.loss_basis = sats, basis, loss
         return out, proceeds_left
+
+    def _allocation(
+        self, d: Disposal, lot: Lot, taken: tuple[int, Decimal, Decimal | None], proceeds: Decimal
+    ) -> Allocation:
+        """The basis and holding period a gain or loss is figured with (the module docstring). `taken`
+        is the sats and the shares of the lot's bases this allocation uses."""
+        sats, basis, loss = taken
+        acquired = lot.acquired
+        rule: BasisRule = "cost"
+        used = basis
+        if lot.unknown_basis:
+            rule = "unknown"
+        elif loss is not None and lot.loss_from is not None:  # a gift with a lower FMV: dual basis
+            if proceeds > basis:
+                rule = "donor"
+            elif proceeds < loss:
+                rule, used, acquired = "fmv_at_gift", loss, lot.loss_from
+            else:
+                rule, used = "no_gain_or_loss", proceeds
+        elif self._lots[lot.id].gift:
+            rule = "donor"
+        term = lot.always_long or long_term(acquired, d.on)
+        lot_basis = None if used == basis else basis
+        return Allocation(d.id, lot.id, sats, used, proceeds, acquired, d.on, term, rule, lot_basis, loss)
 
     def _checked_picks(self, d: Disposal, chosen: tuple[Pick, ...]) -> list[Pick]:
         """The user's picks, checked, with repeats of a lot merged (first-seen order)."""
         wanted: dict[str, int] = {}
         for pick in chosen:
-            if not isinstance(pick, Pick):
-                raise EngineError(f"disposal {d.id!r}: a choice is a tuple of Picks")
+            if not isinstance(pick, Pick) or not isinstance(pick.lot, str) or not pick.lot:
+                raise EngineError(f"disposal {d.id!r}: a choice is a tuple of Picks naming lots")
             _check_sats(pick.sats, f"disposal {d.id!r}")
             entry = self._lots.get(pick.lot)
             if entry is None or entry.lot.account != d.account:
@@ -314,7 +463,7 @@ def _check_common(event: Event) -> None:
 
 
 def _check_moment(moment: object, where: str) -> None:
-    if not isinstance(moment, datetime) or moment.utcoffset() != UTC.utcoffset(None):
+    if not isinstance(moment, datetime) or moment.tzinfo is not UTC:
         raise EngineError(f"{where} must be a timezone-aware UTC datetime")
 
 
@@ -326,5 +475,12 @@ def _check_sats(sats: object, where: str) -> None:
 def _usd(value: Decimal, event: str) -> Decimal:
     try:
         return usd(value)
+    except ValueError as e:
+        raise EngineError(f"event {event!r}: {e}") from None
+
+
+def _signed_usd(value: Decimal, event: str) -> Decimal:
+    try:
+        return signed_usd(value)
     except ValueError as e:
         raise EngineError(f"event {event!r}: {e}") from None
