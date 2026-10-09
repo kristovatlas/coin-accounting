@@ -6,7 +6,9 @@ The ECB's historical file (`eurofxref-hist.csv`) has one row per TARGET business
 parsed and every supported currency converted, so nothing reveals which one the user displays (T-301).
 
 Display only: tax figures are always USD (ADR 0007). A weekend or holiday uses the latest earlier rate
-within MAX_RATE_AGE; a USD day with no rate that recent gets no display price (a gap). Pure and exact:
+within MAX_RATE_AGE; a USD day with no rate that recent, or whose conversion rounds below a cent, gets
+no display price (a gap). Blank lines at the end of the file and a byte-order mark are ignored. Pure
+and exact:
 rates are integers scaled by 10^6, rounded once, half to even, to cents. A malformed file raises
 `PriceError` naming its line, before any value is returned (T-304).
 """
@@ -15,17 +17,18 @@ from __future__ import annotations
 
 import bisect
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Final, NoReturn
 
-from coinacct.prices import DailyPrice, PriceError
+from coinacct.prices import MAX_PRICE, DailyPrice, PriceError
 
 ECB_SOURCE: Final = "ecb:eurofxref-hist"
 DISPLAY: Final = ("EUR", "GBP")  # every display currency, always converted together (T-301)
 MAX_RATE_AGE: Final = timedelta(days=7)  # the ECB skips weekends and TARGET holidays, never a week
 _SCALE: Final = 10**6
+_MAX_CENTS: Final = int(MAX_PRICE.scaleb(2))
 _COLUMNS: Final = ("USD", *(c for c in DISPLAY if c != "EUR"))  # EUR is the base: no column
 _RATE: Final = re.compile(r"([0-9]{1,6})\.([0-9]{1,6})")
 _DAY: Final = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
@@ -40,18 +43,9 @@ def ecb_rates(lines: Iterable[str]) -> dict[date, dict[str, int]]:
     out: dict[date, dict[str, int]] = {}
     header: list[str] | None = None
     last: date | None = None
-    for n, raw in enumerate(lines, 1):
-        fields = raw.removesuffix("\n").removesuffix("\r").split(",")
-        if fields and fields[-1] == "":
-            fields.pop()  # the ECB ends every line with a comma
+    for n, fields in _rows(lines):
         if header is None:
-            if not fields or fields[0] != "Date" or len(fields) < 2:
-                _fail(f"line {n}: expected the header Date,<currencies>")
-            header = fields[1:]
-            if not all(_CODE.fullmatch(c) for c in header) or len(set(header)) != len(header):
-                _fail(f"line {n}: expected distinct three-letter currency codes")
-            if not set(_COLUMNS) <= set(header):
-                _fail(f"line {n}: the file lacks the USD or a display currency's rates")
+            header = _header(fields, n)
             continue
         if len(fields) != len(header) + 1:
             _fail(f"line {n}: expected {len(header) + 1} fields")
@@ -59,40 +53,68 @@ def ecb_rates(lines: Iterable[str]) -> dict[date, dict[str, int]]:
         if last is not None and day >= last:
             _fail(f"line {n}: out of date order (the file is newest first), or a day twice")
         last = day
-        row = {}
-        for code, text in zip(header, fields[1:], strict=True):
-            if code in _COLUMNS and text not in ("N/A", ""):
-                row[code] = _rate(text, f"line {n}")
-        out[day] = row
+        out[day] = {
+            code: _rate(text, f"line {n}")
+            for code, text in zip(header, fields[1:], strict=True)
+            if code in _COLUMNS and text not in ("N/A", "")
+        }
     if header is None:
         _fail("the file is empty")
     return out
+
+
+def _rows(lines: Iterable[str]) -> Iterator[tuple[int, list[str]]]:
+    """Each non-blank line's number and comma-separated fields, without the ECB's trailing comma. A
+    byte-order mark is dropped; blank lines may only end the file."""
+    blank = 0  # the line number of a blank line: only more blank lines may follow it
+    for n, raw in enumerate(lines, 1):
+        text = raw.removesuffix("\n").removesuffix("\r")
+        if n == 1:
+            text = text.removeprefix("\ufeff")
+        if not text:
+            blank = blank or n
+            continue
+        if blank:
+            _fail(f"line {blank}: a blank line before the end of the file")
+        fields = text.split(",")
+        yield n, fields[:-1] if fields[-1] == "" else fields
+
+
+def _header(fields: list[str], n: int) -> list[str]:
+    if fields[0] != "Date" or len(fields) < 2:
+        _fail(f"line {n}: expected the header Date,<currencies>")
+    codes = fields[1:]
+    if not all(_CODE.fullmatch(c) for c in codes) or len(set(codes)) != len(codes):
+        _fail(f"line {n}: expected distinct three-letter currency codes")
+    if not set(_COLUMNS) <= set(codes):
+        _fail(f"line {n}: the file lacks the USD or a display currency's rates")
+    return codes
 
 
 def to_display(usd: Sequence[DailyPrice], rates: Rates) -> list[DailyPrice]:
     """Every USD price in every display currency, by the latest ECB rate on or before its day and at
     most MAX_RATE_AGE older. EUR is USD divided by the USD rate; another currency is that times its
     own rate. The result keeps the USD price's day and gets method "fx"."""
+    for before, p in zip((None, *usd), usd, strict=False):
+        if p.currency != "USD" or p.method == "fx":
+            _fail(f"{p.day}: expected a USD market price, got {p.currency} by {p.method}")
+        if before is not None and p.day <= before.day:
+            _fail(f"{p.day}: the USD series isn't sorted by day, or prices a day twice")
     days = sorted(rates)
     out: list[DailyPrice] = []
     for currency in DISPLAY:
         for p in usd:
-            if p.currency != "USD":
-                _fail(f"{p.day}: expected a USD price, got {p.currency}")
             rate = _latest(rates, days, p.day, currency)
             if rate is None:
                 continue
             per_usd, per_target = rate
-            cents = int(p.price.scaleb(2).to_integral_exact())  # exact: a price is whole cents
-            out.append(
-                DailyPrice(
-                    p.day,
-                    currency,
-                    _cents(cents * per_target, per_usd),
-                    "fx",
-                    f"{ECB_SOURCE}*{p.source}",
-                )
-            )
+            num, den = p.price.as_integer_ratio()  # exact, whatever the caller's decimal context
+            converted = _round(num * 100 * per_target, den * per_usd)
+            if converted == 0:  # rounds to nothing: no display price that day, like a missing rate
+                continue
+            if converted > _MAX_CENTS:  # only an absurd rate gets here: refuse the input, loudly
+                _fail(f"{p.day}: the {currency} price at that day's rate is out of range")
+            out.append(DailyPrice(p.day, currency, _text(converted), "fx", f"{ECB_SOURCE}*{p.source}"))
     return out
 
 
@@ -107,15 +129,23 @@ def _latest(rates: Rates, days: list[date], on: date, currency: str) -> tuple[in
             return None
         row = rates[day]
         if "USD" in row and (currency == "EUR" or currency in row):
-            return row["USD"], _SCALE if currency == "EUR" else row[currency]
+            pair = row["USD"], _SCALE if currency == "EUR" else row[currency]
+            if not all(type(v) is int and v > 0 for v in pair):  # rates from anywhere, not only ecb_rates
+                _fail(f"{day}: a rate must be a positive integer scaled by 10^6")
+            return pair
     return None
 
 
-def _cents(numerator: int, denominator: int) -> Decimal:
+def _round(numerator: int, denominator: int) -> int:
+    """numerator / denominator, rounded half to even to an integer (whole cents here)."""
     q, r = divmod(numerator, denominator)
     if 2 * r > denominator or (2 * r == denominator and q % 2):
         q += 1
-    return Decimal(f"{q // 100}.{q % 100:02d}")
+    return q
+
+
+def _text(cents: int) -> Decimal:
+    return Decimal(f"{cents // 100}.{cents % 100:02d}")  # built from text: exact in any context
 
 
 def _rate(text: str, where: str) -> int:
