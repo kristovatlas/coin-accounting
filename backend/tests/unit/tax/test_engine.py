@@ -302,6 +302,10 @@ def test_an_invalid_disposal_is_refused(kw: dict[str, object], sats: int, messag
         run(events)
 
 
+# A disposal kind the engine doesn't know (movements come in a later slice).
+WITHDRAWAL = Disposal("s", "exch", date(2024, 1, 1), at(date(2024, 1, 1)), "withdrawal", 1, D("1.00"))  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     ("events", "message"),
     [
@@ -314,8 +318,8 @@ def test_an_invalid_disposal_is_refused(kw: dict[str, object], sats: int, messag
         ([buy("b", date(2024, 1, 1), 1, "-1.00")], "negative"),
         ([buy("b", date(2024, 1, 1), 1, "1e100")], "quadrillion"),
         ([Acquisition("b", "exch", date(2024, 1, 1), "buy", 1, 1.5)], "finite Decimal"),  # type: ignore[arg-type]
-        ([buy("b", date(2024, 1, 1), 1, "1.00", kind="gift_in")], "unknown kind"),
-        ([Disposal("s", "exch", date(2024, 1, 1), ON_TIME, "gift_out", 1, D("1.00"))], "unknown kind"),  # type: ignore[arg-type]
+        ([buy("b", date(2024, 1, 1), 1, "1.00", kind="opening_allocation_2025")], "unknown kind"),
+        ([WITHDRAWAL], "unknown kind"),
         ([buy("", date(2024, 1, 1), 1, "1.00")], "names its id"),
         ([buy("b", date(2024, 1, 1), 1, "1.00", account="")], "names its id"),
         ([Acquisition("b", "exch", "2024-01-01", "buy", 1, D("1.00"))], "must be a date"),  # type: ignore[arg-type]
@@ -372,20 +376,22 @@ def _assert_conserved(events: list[Event], result: Result) -> None:
         bought = {e.id: e for e in events if isinstance(e, Acquisition) and e.account == account}
         used = [a for a in result.allocations if a.lot in bought]
         held = [h for h in result.holdings if h.account == account]
+        bases = [b.basis for b in bought.values() if b.basis is not None]  # buys: always known
+        assert len(bases) == len(bought)
         assert sum(b.sats for b in bought.values()) == sum(a.sats for a in used) + sum(h.sats for h in held)
-        assert sum(b.basis for b in bought.values()) == sum(a.basis for a in used) + sum(
-            h.basis for h in held
-        )
+        assert sum(bases) == sum(a.basis for a in used) + sum(h.basis for h in held)
     disposals = {e.id: e for e in events if isinstance(e, Disposal)}
     for d in disposals.values():
         parts = [a for a in result.allocations if a.disposal == d.id]
-        missing = [m for m in result.blocking if m.disposal == d.id]
+        missing = [m for m in result.blocking if isinstance(m, MissingLots) and m.disposal == d.id]
         assert sum(a.sats for a in parts) + sum(m.sats for m in missing) == d.sats
         assert sum(a.proceeds for a in parts) + sum(m.proceeds for m in missing) == d.proceeds
-        assert all(a.basis >= 0 and a.proceeds >= 0 for a in parts)
+        assert all(a.basis >= 0 for a in parts)  # proceeds can be negative (ADR 0009)
     for late in result.late:
-        assert sum(a.sats for a in late.standing) == disposals[late.disposal].sats
-        assert sum(a.proceeds for a in late.standing) == disposals[late.disposal].proceeds
+        figures = [a for a in late.standing if isinstance(a, Allocation)]  # sales only here: no gifts
+        assert len(figures) == len(late.standing)
+        assert sum(a.sats for a in figures) == disposals[late.disposal].sats
+        assert sum(a.proceeds for a in figures) == disposals[late.disposal].proceeds
     values = [v for a in result.allocations for v in (a.basis, a.proceeds)] + [
         h.basis for h in result.holdings
     ]
