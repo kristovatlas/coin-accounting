@@ -36,6 +36,8 @@ OUTLIER_FACTOR: Final = Decimal("1.5")
 # day's extremes, so the two part on a volatile or thin day, but rarely by more than a quarter, so a
 # broken or changed source is the likelier cause. Flagged for review, never refused (T-303, T-304).
 # It catches gross errors and format changes, not a subtle shift of a few percent (#262).
+# (Reasoned for a whole-day VWAP; ADR 0039's close-time reference rate may sit further from the typical
+# price on a volatile day, so the downloader's PR reviews the threshold, #262.)
 MISMATCH_FACTOR: Final = Decimal("1.25")
 
 

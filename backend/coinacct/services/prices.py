@@ -22,7 +22,9 @@ from coinacct.prices.fx import DISPLAY, ECB_SOURCE, to_display
 
 # The USD series' last priced day may be at most this far before the refresh's first incomplete day;
 # further back, or no USD day at all, is flagged stale: a source that stopped early, or came back
-# empty, must not pass unnoticed (T-303, T-304). A review flag, not a refusal.
+# empty, must not pass unnoticed (T-303, T-304). A review flag, not a refusal. This is the interim rule
+# (ADR 0039): once the reference rate lands, the flag is computed on that series before Bitstamp's
+# price fills its gaps, so a stopped rate can't hide behind the fill.
 STALE_USD: Final = timedelta(days=7)
 
 
@@ -31,7 +33,7 @@ class Refreshed:
     """One refresh's result. `usd` is the tax series; `display` holds each display currency's series,
     Bitstamp's own pair where it traded and the ECB conversion of USD elsewhere. `hashes` maps each
     source to the SHA-256 of what was fetched (T-303). Until the Coin Metrics downloader lands (ADR
-    0039), the USD series is Bitstamp's typical price alone: the reference rate, its cross-check
+    0039), the USD series is Bitstamp's typical price alone: the reference rate and its cross-check
     against Bitstamp (`prices.mismatches`) come with it. `usd_through` is the USD series' last priced
     day (None if there is none), and `usd_stale` says it is more than STALE_USD before the refresh's
     first incomplete day."""
