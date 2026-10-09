@@ -1,11 +1,11 @@
-"""Display prices in EUR and GBP from the USD series and the ECB's reference rates (PLAN §6, ADR 0007;
+"""Display prices in EUR and GBP from the USD series and the ECB's reference rates (PLAN §6, ADR 0039;
 THREAT_MODEL T-301, T-303, T-304).
 
 The ECB's historical file (`eurofxref-hist.csv`) has one row per TARGET business day, newest first:
 `Date,USD,JPY,…,` with each rate in units per euro and `N/A` where a currency had no rate. All of it is
 parsed and every supported currency converted, so nothing reveals which one the user displays (T-301).
 
-Display only: tax figures are always USD (ADR 0007). A weekend or holiday uses the latest earlier rate
+Display only: tax figures are always USD (ADR 0039). A weekend or holiday uses the latest earlier rate
 within MAX_RATE_AGE; a USD day with no rate that recent, or whose conversion rounds below a cent, gets
 no display price (a gap). Blank lines at the end of the file and a byte-order mark are ignored. Pure and
 exact:

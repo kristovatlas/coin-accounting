@@ -1,4 +1,4 @@
-"""A price CSV the user uploads, the fallback when a source disappears (ADR 0007; THREAT_MODEL T-304,
+"""A price CSV the user uploads, the fallback when a source disappears (ADR 0039; THREAT_MODEL T-304,
 T-701, TB6)."""
 
 from __future__ import annotations

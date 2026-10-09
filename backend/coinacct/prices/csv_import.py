@@ -1,4 +1,4 @@
-"""A price CSV the user uploads: the fallback when a source disappears (PLAN §6, ADR 0007; THREAT_MODEL
+"""A price CSV the user uploads: the fallback when a source disappears (PLAN §6, ADR 0039; THREAT_MODEL
 T-304, T-701, trust boundary TB6).
 
 The format is strict and documented, so nothing is guessed:
