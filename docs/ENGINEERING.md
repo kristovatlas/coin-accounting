@@ -274,7 +274,7 @@ A test exists to fail when behaviour breaks. Reviewers (human and AI) reject tes
   - a new data store, or moving data across the VeraCrypt boundary
   - a new dependency with network, native-code or install-time execution capability
   - changes to tax rules or doxx rules
-  - storage format changes, or a change in how chain data is obtained from the node. A migration that implements PLAN §2's data model (or the architecture) is not a storage format change by itself; where the DB lives or is protected (secrets stored in it included), data outside that model, a PLAN change that adds, removes or redefines a kind of stored data, deleting or altering data that can't be recomputed, and loosening a schema rule that a THREAT_MODEL mitigation relies on are ([ADR 0038](adr/0038-schema-changes-within-the-data-model.md))
+  - storage format changes, or a change in how chain data is obtained from the node. A migration that implements PLAN §2's data model (or the architecture) is not a storage format change by itself; where the DB lives or is protected (secrets stored in it included), data outside that model, a PLAN change that adds, removes or redefines a kind of stored data, deleting or altering data that can't be recomputed, and loosening a schema rule that a THREAT_MODEL mitigation or an accepted ADR's invariant relies on are ([ADR 0038](adr/0038-schema-changes-within-the-data-model.md))
   - weakening any control in this document or the threat model
   - changes to the architecture diagram
   - supported platform changes
