@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Context, Decimal, localcontext
+from decimal import ROUND_CEILING, Context, Decimal, Inexact, Rounded, localcontext
 
 import pytest
 from hypothesis import given
@@ -144,3 +144,10 @@ def test_a_negative_amount_splits_like_its_size() -> None:
 def test_a_share_is_of_at_most_the_supply() -> None:
     with pytest.raises(ValueError):
         share(Decimal("1.00"), 1, 21_000_000 * 100_000_000 + 1)
+
+
+def test_reading_usd_ignores_the_callers_context_t502() -> None:
+    with localcontext(Context(prec=3, rounding=ROUND_CEILING, traps=[Inexact, Rounded])):
+        assert usd("999999999999999.99") == Decimal("999999999999999.99")
+        assert signed_usd("-1234.56") == Decimal("-1234.56")
+        assert usd(Decimal("1." + "0" * 100)) == Decimal("1.00")

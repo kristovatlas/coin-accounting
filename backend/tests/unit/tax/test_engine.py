@@ -386,10 +386,12 @@ def _assert_conserved(events: list[Event], result: Result) -> None:
         missing = [m for m in result.blocking if isinstance(m, MissingLots) and m.disposal == d.id]
         assert sum(a.sats for a in parts) + sum(m.sats for m in missing) == d.sats
         assert sum(a.proceeds for a in parts) + sum(m.proceeds for m in missing) == d.proceeds
-        assert all(a.basis >= 0 and a.proceeds >= 0 for a in parts)
+        assert all(a.basis >= 0 for a in parts)  # proceeds can be negative (ADR 0009)
     for late in result.late:
-        assert sum(a.sats for a in late.standing) == disposals[late.disposal].sats
-        assert sum(a.proceeds for a in late.standing) == disposals[late.disposal].proceeds
+        figures = [a for a in late.standing if isinstance(a, Allocation)]  # sales only here: no gifts
+        assert len(figures) == len(late.standing)
+        assert sum(a.sats for a in figures) == disposals[late.disposal].sats
+        assert sum(a.proceeds for a in figures) == disposals[late.disposal].proceeds
     values = [v for a in result.allocations for v in (a.basis, a.proceeds)] + [
         h.basis for h in result.holdings
     ]

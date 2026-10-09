@@ -58,7 +58,7 @@ def signed_usd(value: str | Decimal) -> Decimal:
         value = Decimal(text)
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ValueError("a USD amount must be a finite Decimal")
-    if abs(value) >= MAX_USD:
+    if value.copy_abs() >= MAX_USD:  # exact: abs() would round in the caller's context
         raise ValueError("a USD amount must be below a quadrillion dollars")
     cents = value.quantize(CENT, context=_DIVIDE)  # bounded above, so this can't overflow
     if cents != value:  # an exact comparison: "1.230" is 1.23, "1.234" is refused
