@@ -551,8 +551,9 @@ def test_a_created_lot_stays_unrecorded_however_far_it_moves() -> None:
     first = move(
         "wd1", "a", "b", 10, kind="withdrawal", missing_basis=D("1.00"), missing_acquired=date(2023, 1, 1)
     )
-    hop = move("t1", "b", "c", 10, kind="self_transfer", on=date(2025, 1, 2))
-    away = move("t2", "c", "d", 10, kind="self_transfer", on=date(2025, 1, 3))
+    # the hops' kind doesn't matter here (self-transfers are refused until UTXO tracing, #243)
+    hop = move("t1", "b", "c", 10, kind="deposit", on=date(2025, 1, 2))
+    away = move("t2", "c", "d", 10, kind="deposit", on=date(2025, 1, 3))
     # c and d only ever held the created lot, now gone on: a withdrawal from c can take a basis again.
     again = move(
         "wd2",
@@ -628,3 +629,15 @@ def test_a_late_choice_stands_when_fifos_alternative_would_hit_refused_dust_adr0
         Moved("d", "b", "b@d", "x", 1, D("1.00"), date(2024, 1, 2), 0),
         Moved("d", "g", "g@d", "x", 0, D("10.00"), date(2020, 1, 1), 1),
     )
+
+
+@pytest.mark.parametrize("picks", [None, (Pick("b1", 5),)])
+def test_a_self_transfer_is_refused_until_utxo_tracing_exists(picks: tuple[Pick, ...] | None) -> None:
+    # #243, the owner's decision: between the user's own wallets the spent outputs identify the lots, so
+    # the account's FIFO order (or a choice of lots) must not stand in for them
+    events: list[Event] = [
+        Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("1.00")),
+        move("t1", "w", "v", 5, kind="self_transfer", picks=picks),
+    ]
+    with pytest.raises(EngineError, match=r"transfer 't1': .* needs UTXO tracing \(not built yet, #243\)"):
+        run(events)

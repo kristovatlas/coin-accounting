@@ -379,6 +379,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
    - fees by role
    - gifts and inheritance
    - blocking conditions
+   - **self-custody UTXO tracing** (ADR 0008 §2, #243): self-transfers, deposits and spends from a wallet take the lots of the outputs they spend. Until then the engine refuses self-transfers, and deposits and spends from a wallet use the account's order. Blocks release (the owner, 2026-10-09: self-custody transfers are extremely common)
 8. **M7 reports:** 8949 CSV (box selection per tax year), income summary, year summary/holdings, audit trail.
 9. Later:
    - exchange CSV import
