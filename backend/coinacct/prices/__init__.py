@@ -11,15 +11,18 @@ import hashlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Context, Decimal, Inexact, InvalidOperation, Overflow, localcontext
 from itertools import pairwise
 from typing import Final, Literal
 
 Method = Literal["vwap", "typical"]  # ADR 0007: the trade VWAP, or (H+L+C)/3 where there are no trades
 METHODS: Final = ("vwap", "typical")
+CURRENCIES: Final = ("USD", "EUR", "GBP")  # USD for tax figures; the others for display (ADR 0007)
 CENT: Final = Decimal("0.01")
-# A day-over-day move by more than this factor (either way) is flagged for review, not refused: BTC's
-# largest daily closes moved by well under half, so a jump of 50 % or more is far more likely bad data.
+# Our own context for the little arithmetic here, whatever the caller's: exact, or an error.
+EXACT: Final = Context(prec=60, traps=[Inexact, InvalidOperation, Overflow])
+# A day-over-day rise of more than 50 %, or a fall of more than a third, is flagged for review, never
+# refused: such moves are rare enough that bad data is the likelier cause, and the user can override.
 OUTLIER_FACTOR: Final = Decimal("1.5")
 
 
@@ -30,13 +33,30 @@ class PriceError(ValueError):
 
 @dataclass(frozen=True)
 class DailyPrice:
-    """The price of one BTC in `currency` on UTC day `day`, in whole cents, and how it was made."""
+    """The price of one BTC in `currency` on UTC day `day`, in whole cents, and how it was made. Only a
+    positive, whole number of cents can be built, so a zero or rounded-away price never reaches a tax
+    figure, whatever path made it (T-303)."""
 
     day: date
     currency: str
     price: Decimal
     method: Method
     source: str
+
+    def __post_init__(self) -> None:
+        if type(self.day) is not date:  # a datetime is a date too, but not a UTC day
+            raise PriceError("a price's day must be a date")
+        if self.currency not in CURRENCIES or self.method not in METHODS:
+            raise PriceError(f"{self.day}: unsupported currency or method")
+        if not isinstance(self.source, str) or not self.source:
+            raise PriceError(f"{self.day}: a price needs its source")
+        if (
+            type(self.price) is not Decimal
+            or not self.price.is_finite()
+            or self.price < CENT
+            or self.price.as_tuple().exponent != -2  # exactly two decimals, as every parser makes them
+        ):
+            raise PriceError(f"{self.day}: a price must be a positive whole number of cents")
 
 
 @dataclass(frozen=True)
@@ -65,18 +85,17 @@ def content_hash(data: bytes) -> str:
 def combine(vwap: Iterable[DailyPrice], typical: Iterable[DailyPrice]) -> list[DailyPrice]:
     """One series by day: the trade VWAP where there is one, otherwise the typical price (ADR 0007).
     Both series must be in the same currency, and neither may price a day twice."""
-    best = _by_day(vwap, "vwap")
-    for p in _by_day(typical, "typical").values():
-        best.setdefault(p.day, p)
-    out = [best[d] for d in sorted(best)]
-    if len({p.currency for p in out}) > 1:
+    best, fill = _by_day(vwap, "vwap"), _by_day(typical, "typical")
+    if len({p.currency for p in (*best.values(), *fill.values())}) > 1:
         raise PriceError("the series mix currencies")
-    return out
+    for p in fill.values():
+        best.setdefault(p.day, p)
+    return [best[d] for d in sorted(best)]
 
 
 def check(series: Sequence[DailyPrice]) -> tuple[list[Gap], list[Outlier]]:
     """The gaps and day-over-day outliers in a series sorted by day (T-303). Both are for the user to
-    review or override; neither is an error."""
+    review or override; neither is an error. The first day has no day before it to compare with."""
     gaps: list[Gap] = []
     outliers: list[Outlier] = []
     for before, p in pairwise(series):
@@ -84,7 +103,9 @@ def check(series: Sequence[DailyPrice]) -> tuple[list[Gap], list[Outlier]]:
             raise PriceError(f"{p.day}: the series isn't sorted by day, or prices a day twice")
         if p.day - before.day > timedelta(days=1):
             gaps.append(Gap(before.day + timedelta(days=1), p.day - timedelta(days=1)))
-        if max(p.price, before.price) > OUTLIER_FACTOR * min(p.price, before.price):
+        with localcontext(EXACT):
+            moved = max(p.price, before.price) > OUTLIER_FACTOR * min(p.price, before.price)
+        if moved:
             outliers.append(Outlier(p.day, before.price, p.price))
     return gaps, outliers
 

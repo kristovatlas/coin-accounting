@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from decimal import Decimal
+from decimal import Context, Decimal, Inexact, Rounded, localcontext
 from fractions import Fraction
 from typing import Any
 
@@ -27,32 +27,48 @@ def usd(day: date, price: str) -> DailyPrice:
 # --- the trade dump
 
 
+# The dump's last day is always dropped (it may be partial), so most dumps here end with this line.
+END = f"{JAN1 + 9 * DAY},1,1"
+
+
 def test_each_day_gets_its_volume_weighted_average() -> None:
     lines = [
         f"{JAN1},40000.000000000000,0.500000000000\n",
         f"{JAN1 + 60},42000,1.5\n",
         f"{JAN1 + DAY - 1},1,0\r\n",
         f"{JAN1 + DAY},45000.5,2\n",
+        END,
     ]
     # 2024-01-01: (40000 * 0.5 + 42000 * 1.5) / 2 = 41500; the zero-amount trade adds nothing
     assert vwap_by_day(lines, LATER) == [usd(date(2024, 1, 1), "41500.00"), usd(date(2024, 1, 2), "45000.50")]
+
+
+def test_the_dumps_last_day_is_dropped_as_possibly_partial() -> None:
+    assert vwap_by_day([f"{JAN1},10,1", f"{JAN1 + DAY},20,1"], LATER) == [usd(date(2024, 1, 1), "10.00")]
+    assert vwap_by_day([f"{JAN1},10,1", f"{JAN1 + DAY - 1},20,1"], LATER) == []
 
 
 @pytest.mark.parametrize(
     ("price", "cents"), [("1.005", "1.00"), ("1.015", "1.02"), ("1.0049", "1.00"), ("1.0051", "1.01")]
 )
 def test_the_average_is_rounded_once_half_to_even(price: str, cents: str) -> None:
-    assert vwap_by_day([f"{JAN1},{price},1"], LATER)[0].price == Decimal(cents)
+    assert vwap_by_day([f"{JAN1},{price},1", END], LATER)[0].price == Decimal(cents)
+
+
+@pytest.mark.parametrize("price", ["0.004999999999", "0.001", "0.005"])
+def test_an_average_that_rounds_below_a_cent_is_refused(price: str) -> None:
+    with pytest.raises(PriceError, match="2024-01-01: a price must be a positive whole number of cents"):
+        vwap_by_day([f"{JAN1},{price},1", END], LATER)
 
 
 def test_a_day_on_or_after_the_download_day_is_partial_and_dropped() -> None:
-    lines = [f"{JAN1},10,1", f"{JAN1 + DAY},20,1"]
+    lines = [f"{JAN1},10,1", f"{JAN1 + DAY},20,1", END]
     assert vwap_by_day(lines, date(2024, 1, 2)) == [usd(date(2024, 1, 1), "10.00")]
     assert vwap_by_day(lines, date(2024, 1, 1)) == []
 
 
 def test_a_day_without_volume_gets_no_price() -> None:
-    assert vwap_by_day([f"{JAN1},10,0", f"{JAN1 + DAY},20,1"], LATER) == [usd(date(2024, 1, 2), "20.00")]
+    assert vwap_by_day([f"{JAN1},10,0", f"{JAN1 + DAY},20,1", END], LATER) == [usd(date(2024, 1, 2), "20.00")]
     assert vwap_by_day([], LATER) == []
 
 
@@ -62,6 +78,8 @@ def test_a_day_without_volume_gets_no_price() -> None:
         ([f"{JAN1},10"], "line 1: expected time,price,amount"),
         ([f"{JAN1},10,1,2"], "line 1: expected time,price,amount"),
         ([""], "line 1: expected time,price,amount"),
+        ([f"{JAN1},10,1", "\n"], "line 2: expected time,price,amount"),  # a blank last line
+        ([f"\ufeff{JAN1},10,1"], "not a unix time"),  # a byte-order mark
         ([f"{JAN1 + 1},10,1", f"{JAN1},10,1"], "line 2: out of time order"),
         ([f"{JAN1},0,1"], "line 1: a price must be positive"),
         ([f"{JAN1},0.000,1"], "line 1: a price must be positive"),
@@ -89,22 +107,25 @@ def test_a_bad_line_after_good_days_still_refuses_the_whole_dump() -> None:
         vwap_by_day([f"{JAN1},10,1", f"{JAN1 + DAY},20,1", "junk"], LATER)
 
 
-_value = st.decimals(min_value=Decimal("0.000000000001"), max_value=Decimal("999999999999999"), places=12)
+_value = st.decimals(min_value=Decimal("0.01"), max_value=Decimal("999999999999999"), places=12)
 _amount = st.decimals(min_value=Decimal(0), max_value=Decimal("1000"), places=12)
+_trade = st.tuples(st.integers(0, 3 * DAY - 1), _value, _amount)
 
 
-@given(st.lists(st.tuples(st.integers(0, DAY - 1), _value, _amount), min_size=1, max_size=30))
-def test_the_average_is_exact_and_ignores_order_within_a_day(
+@given(st.lists(_trade, max_size=40).flatmap(st.permutations))
+def test_each_days_average_is_exact_whatever_the_order_within_a_second(
     trades: list[tuple[int, Decimal, Decimal]],
 ) -> None:
-    volume = sum((Fraction(a) for _, _, a in trades), Fraction(0))
-    trades.sort(key=lambda t: t[0])
-    got = vwap_by_day([f"{JAN1 + s},{p:f},{a:f}" for s, p, a in trades], LATER)
-    if volume == 0:
-        assert got == []
-        return
-    exact = sum((Fraction(p) * Fraction(a) for _, p, a in trades), Fraction(0)) / volume
-    assert got == [usd(date(2024, 1, 1), str(Decimal(round(exact * 100)) / 100))]  # round(): half to even
+    trades = sorted(trades, key=lambda t: t[0])  # stable: same-second trades stay in the drawn order
+    got = vwap_by_day([*(f"{JAN1 + s},{p:f},{a:f}" for s, p, a in trades), END], LATER)
+    want = []
+    for d in range(3):
+        day = [(Fraction(p), Fraction(a)) for s, p, a in trades if s // DAY == d]
+        volume = sum((a for _, a in day), Fraction(0))
+        if volume:
+            cents = round(sum((p * a for p, a in day), Fraction(0)) / volume * 100)  # round(): half to even
+            want.append(usd(date(2024, 1, 1 + d), str(Decimal(cents).scaleb(-2))))
+    assert got == want
 
 
 # --- daily OHLC
@@ -164,11 +185,35 @@ def test_a_candle_without_volume_and_partial_days_get_no_price() -> None:
         (page(candle(volume="-1")), "USD", "not a plain decimal"),
         (page(candle(), candle()), "USD", "candle 2: out of day order"),
         (page(candle(JAN1 + DAY), candle()), "USD", "candle 2: out of day order"),
+        (
+            page(candle(volume="0"), candle()),
+            "USD",
+            "candle 2: out of day order",
+        ),  # unpriced, then the same day
+        (page(candle(JAN1 + DAY, volume="0"), candle()), "USD", "candle 2: out of day order"),
+        (
+            page(candle(), candle(JAN1 + 2 * DAY, volume="0"), candle(JAN1 + DAY)),
+            "USD",
+            "candle 3: out of day",
+        ),
     ],
 )
 def test_malformed_ohlc_is_refused(text: str, currency: str, message: str) -> None:
     with pytest.raises(PriceError, match=message):
         typical_by_day(text, currency, LATER)
+
+
+def test_a_typical_price_that_rounds_below_a_cent_is_refused() -> None:
+    with pytest.raises(PriceError, match="a positive whole number of cents"):
+        typical_by_day(page(candle(open="0.001", high="0.001", low="0.001", close="0.001")), "USD", LATER)
+
+
+def test_the_callers_decimal_context_changes_nothing() -> None:
+    with localcontext(Context(prec=3, traps=[Inexact, Rounded])):
+        (p,) = typical_by_day(page(candle()), "USD", LATER)
+        (q,) = vwap_by_day([f"{JAN1},42166.666,1", END], LATER)
+    assert p.price == q.price == Decimal("42166.67")
+    assert str(p.price) == "42166.67"
 
 
 def test_deeply_nested_json_is_refused_as_invalid() -> None:

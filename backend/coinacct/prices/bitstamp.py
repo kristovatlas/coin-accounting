@@ -1,7 +1,9 @@
 """Bitstamp price data into daily prices (PLAN §6, ADR 0007; THREAT_MODEL T-303, T-304).
 
 - **Trade dump** (bitcoincharts' `bitstampUSD.csv`): one trade per line, `unix time,price,amount`, in
-  time order. Each UTC day's price is its volume-weighted average.
+  time order. Each UTC day's price is its volume-weighted average. The dump's last day is always
+  dropped: the archive may have stopped mid-day, and a partial average would replace that day's full
+  typical price. Blank lines and a byte-order mark are refused like any other malformed line.
 - **Daily OHLC** (Bitstamp's `/api/v2/ohlc/<pair>/` with `step=86400`): JSON candles. Each day's price
   is the typical price (H+L+C)/3, used where the dump has no trades (`prices.combine`).
 
@@ -20,7 +22,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final, NoReturn
 
-from coinacct.prices import CENT, DailyPrice, PriceError
+from coinacct.prices import CURRENCIES, DailyPrice, PriceError
 
 DUMP_SOURCE: Final = "bitcoincharts:bitstampUSD"
 OHLC_SOURCE: Final = "bitstamp:ohlc"
@@ -31,12 +33,11 @@ _TIME: Final = re.compile(r"[0-9]{1,12}")
 # 2009-01-03 (the genesis block) to 9999-12-31: a timestamp outside this is not a trade's.
 _FIRST: Final = 1_230_940_800
 _LAST: Final = 253_402_300_799
-CURRENCIES: Final = ("USD", "EUR", "GBP")  # Bitstamp's BTC pairs that are fetched, all of them (T-301)
 
 
 def vwap_by_day(lines: Iterable[str], complete_before: date) -> list[DailyPrice]:
-    """Each complete UTC day's volume-weighted average USD price from the trade dump's lines. A day
-    whose trades have no volume gets no price (a gap, for `prices.check`)."""
+    """Each complete UTC day's volume-weighted average USD price from the trade dump's lines, all but the
+    dump's last day. A day whose trades have no volume gets no price (a gap, for `prices.check`)."""
     out: list[DailyPrice] = []
     day: date | None = None
     value = volume = 0  # sum of price * amount (scale 10^24), sum of amounts (scale 10^12)
@@ -59,14 +60,14 @@ def vwap_by_day(lines: Iterable[str], complete_before: date) -> list[DailyPrice]
             day, value, volume = on, 0, 0
         value += price * amount
         volume += amount
-    if day is not None and volume:
-        out.append(DailyPrice(day, "USD", _cents(value, volume * _SCALE), "vwap", DUMP_SOURCE))
+    # the last day (`day`, still open) is never appended: the dump may end part-way through it
     return [p for p in out if p.day < complete_before]
 
 
 def typical_by_day(text: str, currency: str, complete_before: date) -> list[DailyPrice]:
     """Each complete UTC day's typical price (H+L+C)/3 from one page of Bitstamp's daily OHLC JSON for
-    BTC in `currency`. A candle with no volume (no trades that day) gets no price."""
+    BTC in `currency`. A candle with no volume (no trades that day) gets no price. Bitstamp's page always
+    covers whole days, so its last day is kept when it is before `complete_before`."""
     if currency not in CURRENCIES:
         _fail(f"unsupported currency {currency!r}")
     try:
@@ -86,6 +87,7 @@ def typical_by_day(text: str, currency: str, complete_before: date) -> list[Dail
     if not isinstance(candles, list):
         _fail("OHLC: expected a list of candles")
     out: list[DailyPrice] = []
+    seen: date | None = None  # the last candle's day, priced or not
     for n, c in enumerate(candles, 1):
         where = f"candle {n}"
         if not isinstance(c, dict) or set(c) != {"timestamp", "open", "high", "low", "close", "volume"}:
@@ -99,8 +101,9 @@ def typical_by_day(text: str, currency: str, complete_before: date) -> list[Dail
         if not 0 < lo <= min(o, cl) <= max(o, cl) <= h:
             _fail(f"{where}: needs 0 < low <= open, close <= high")
         on = datetime.fromtimestamp(when, UTC).date()
-        if out and on <= out[-1].day:
+        if seen is not None and on <= seen:
             _fail(f"{where}: out of day order, or a day twice")
+        seen = on
         if _number(c["volume"], where):
             out.append(
                 DailyPrice(
@@ -115,11 +118,12 @@ def typical_by_day(text: str, currency: str, complete_before: date) -> list[Dail
 
 
 def _cents(numerator: int, denominator: int) -> Decimal:
-    """numerator / denominator, rounded half to even to whole cents, exactly."""
+    """numerator / denominator, rounded half to even to whole cents, exactly. Built from text, which
+    `Decimal` takes exactly whatever the caller's context (no context arithmetic at all)."""
     q, r = divmod(numerator * 100, denominator)
     if 2 * r > denominator or (2 * r == denominator and q % 2):
         q += 1
-    return Decimal(q) * CENT
+    return Decimal(f"{q // 100}.{q % 100:02d}")
 
 
 def _number(text: str, where: str) -> int:
