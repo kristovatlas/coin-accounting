@@ -181,10 +181,9 @@ The doxx set of a coin is the set of **identity-knowing entities** (`knows_ident
 - **Sell planner:** lists UTXOs by doxx set, with basis, holding period and certainty.
 
 ### 6. Prices (`prices/`)
-- **USD:** bulk-download Bitstamp history and compute a **daily volume-weighted average price per UTC day**.
-  - Planned source: the full bitstampUSD trade dump (bitcoincharts archive) for history, plus Bitstamp's paginated daily OHLCV for recent days.
-  - Where there is no trade-level data, fall back to the daily typical price, (H+L+C)/3. The `method` column records which was used.
-  - The M5 step checks that these sources are still up.
+- **USD:** each UTC day's price is **Coin Metrics' daily reference rate** (`PriceUSD`, ADR 0039): a volume-weighted price across vetted exchanges, published for every day since July 2010 and downloaded in bulk from its free community API.
+  - Bitstamp's paginated daily OHLCV is the second source. Its typical price, (H+L+C)/3, is compared with the reference rate every day (a review flag), and fills any day the rate lacks. The `method` column records which was used.
+  - The bitcoincharts trade archive is no longer used: it was unreachable in October 2026 (ADR 0039).
 - **Other fiat (display only):** Bitstamp EUR/GBP pairs, or USD × ECB historical FX. **All supported pairs are fetched every time**, so the download doesn't reveal the user's currency or residency.
 - **Requests:** made only when the user clicks refresh. They don't depend on user records (events, addresses, tags); only the start of the incremental range depends on what is already cached. An httpx client with an optional SOCKS5/Tor proxy (remote DNS) sends a common browser User-Agent and nothing else.
 - **Overrides:** the user can override the valuation per event, e.g. an exchange fill price, the W-2/payroll value for salary, or a timestamped rate for income on a volatile day.
