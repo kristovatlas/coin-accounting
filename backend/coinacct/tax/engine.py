@@ -295,7 +295,9 @@ class _Engine:
         loss_from: date | None = None
         unknown = False
         acquired = a.on
-        always_long = a.kind == "inherit" or (a.kind == "gift_in" and a.donor_always_long is True)
+        if type(a.donor_always_long) is not bool:
+            raise EngineError(f"acquisition {a.id!r}: donor_always_long is True or False")
+        always_long = a.kind == "inherit" or (a.kind == "gift_in" and a.donor_always_long)
         if a.kind == "gift_in":
             if a.fmv is None or type(a.donor_acquired) is not date or not GENESIS <= a.donor_acquired <= a.on:
                 raise EngineError(
@@ -405,7 +407,9 @@ class _Engine:
             loss = None if loss_left is None else share(loss_left, pick.sats, sats)
             rest = subtract(basis_left, basis)
             loss_rest = None if loss_left is None or loss is None else subtract(loss_left, loss)
-            # The loss basis stays (decided at the gift), but never above the gain basis left.
+            # The loss basis stays (decided at the gift), but never above the gain basis left. The cap
+            # never binds in practice: the bases differ by at least a cent and a partial take's shares
+            # by less, so half-to-even rounding can't reverse their order; it bounds, never drops, cents.
             left[pick.lot] = (sats - pick.sats, rest, None if loss_rest is None else min(loss_rest, rest))
             sats_left -= pick.sats
             proceeds_left = subtract(proceeds_left, part)
@@ -436,7 +440,9 @@ class _Engine:
                 rule, used = "no_gain_or_loss", proceeds
         elif self._lots[lot.id].gift:
             rule = "donor"
-        term = lot.always_long or long_term(acquired, d.on)
+        # A loss against the FMV is held from the gift date only (Treas. Reg. §1.1223-1(b)): the donor's
+        # inherited long-term status tacks only where the donor's basis is used.
+        term = (lot.always_long and rule != "fmv_at_gift") or long_term(acquired, d.on)
         lot_basis = None if used == basis else basis
         return Allocation(d.id, lot.id, sats, used, proceeds, acquired, d.on, term, rule, lot_basis, loss)
 

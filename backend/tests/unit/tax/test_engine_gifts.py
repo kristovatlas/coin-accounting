@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from hypothesis import given, settings
@@ -342,7 +343,9 @@ def test_a_dust_split_gift_keeps_its_dual_basis(
     result = run(events)
     for a in result.allocations:
         # The FMV was lower at the gift, so every part keeps a loss basis no higher than its gain basis.
-        assert a.lot_loss_basis is not None and a.lot_loss_basis <= (a.lot_basis or a.basis)
+        assert a.lot_loss_basis is not None and a.lot_loss_basis <= (
+            a.lot_basis if a.lot_basis is not None else a.basis
+        )
         if a.rule == "fmv_at_gift":
             assert a.acquired == GIFT_DAY and a.proceeds < a.lot_loss_basis
         else:
@@ -433,3 +436,25 @@ def test_a_gift_given_of_an_inherited_lot_says_so() -> None:
 def test_only_a_gift_can_carry_a_donors_long_term_status() -> None:
     with pytest.raises(EngineError, match="only a gift"):
         run([Acquisition("b", "w", GIFT_DAY, "buy", 1, D("1.00"), donor_always_long=True)])
+
+
+def test_an_inherited_gift_loss_against_the_fmv_is_held_from_the_gift_date() -> None:
+    # Donor basis 10000, FMV 6000, inherited by the donor; sold for 5000 three months after the gift:
+    # a loss against the FMV, held from the gift date (Treas. Reg. §1.1223-1(b)), so short-term even
+    # though the donor's lot counted as long-term.
+    g = Acquisition(
+        "g", "w", GIFT_DAY, "gift_in", BTC, D("10000.00"), D("6000.00"), DONOR_DAY, donor_always_long=True
+    )
+    (a,) = run([g, sell("s", SOLD, BTC, "5000.00")]).allocations
+    assert (a.rule, a.acquired, a.long_term, a.gain) == ("fmv_at_gift", GIFT_DAY, False, D("-1000.00"))
+    (b,) = run([g, sell("s", SOLD, BTC, "12000.00")]).allocations
+    assert (b.rule, b.long_term) == ("donor", True)  # the donor's basis: the status tacks
+
+
+@pytest.mark.parametrize("flag", [1, "yes", None])
+def test_donor_always_long_is_a_bool(flag: Any) -> None:  # Any: deliberately not a bool
+    g = Acquisition(
+        "g", "w", GIFT_DAY, "gift_in", BTC, D("1.00"), D("1.00"), DONOR_DAY, donor_always_long=flag
+    )
+    with pytest.raises(EngineError, match="True or False"):
+        run([g])
