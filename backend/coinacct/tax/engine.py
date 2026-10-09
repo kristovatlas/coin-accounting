@@ -42,6 +42,22 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   later (Rev. Rul. 66-6, applied to the one-year period: a tax position for the owner to confirm,
   #239): bought 28 February 2023, it is long-term from 1 March 2024, not 29 February. An inherited lot
   is always long-term (IRC §1223(9)).
+- **Movements never create lots** (ADR 0009). A **transfer** (`deposit` into an exchange account,
+  `withdrawal` out of one, `self_transfer` between the user's own wallets) moves lots from one account
+  to another: each moved part keeps its lot's basis, dates and status, under a new id (`lot@transfer`),
+  and takes its place in the destination by acquisition date. Lots are chosen as for a disposal, with
+  the same late check (ADR 0008 §3 and §4); UTXO tracing for self-custody comes in a later slice.
+  - **A network fee** on a deposit or self-transfer (`fee_sats` of the sats that leave) is, by default,
+    no disposal: its basis stays with the coins that arrive. With `fee_treatment="dispose"` it is a
+    small taxable disposal at `fee_value`, its FMV (ADR 0009's stated tax position, printed on reports).
+  - **An exchange's BTC withdrawal fee** is always a small disposal at its FMV (ADR 0009's default).
+  - The fee is taken from the chosen lots in proportion to their sats, every moved part keeping at
+    least one sat where it can; a part that is all fee carries its basis to the transfer's last
+    moved part (dust only).
+  - **A withdrawal from an account with no lots for some of its sats** creates a lot for them in the
+    source account first: with the basis and date the user supplies (`missing_basis`,
+    `missing_acquired`), or with **unknown basis**, a blocking condition (ADR 0009, T-509). Any other
+    shortfall is missing basis, as for a disposal.
 - **Not enough lots** for an automatic disposal is a **blocking condition** (ADR 0009): the lots that
   exist are used, and the rest of the disposal is reported as missing basis. Invalid input (a choice
   naming lots the account doesn't hold, a wrong type) raises `EngineError`.
@@ -49,6 +65,7 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from calendar import monthrange
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -57,11 +74,13 @@ from decimal import Decimal, localcontext
 from typing import Final, Literal
 
 from coinacct.domain.chain import MAX_SATS
-from coinacct.domain.money import CONTEXT, share, signed_usd, subtract, usd
+from coinacct.domain.money import CONTEXT, add, share, signed_usd, subtract, usd
 
 type AcquisitionKind = Literal["buy", "p2p_buy", "income", "inherit", "gift_in"]
 type DisposalKind = Literal["sell", "spend", "gift_out"]
 type Method = Literal["fifo"]
+type TransferKind = Literal["deposit", "withdrawal", "self_transfer"]
+type FeeTreatment = Literal["carry", "dispose"]
 # How an allocation's basis was found: the lot's own basis; a gift's donor basis (a gain) or FMV at the
 # gift (a loss); between the two, neither; or a gift's donor basis that isn't known (blocking).
 type BasisRule = Literal["cost", "donor", "fmv_at_gift", "no_gain_or_loss", "unknown"]
@@ -69,6 +88,8 @@ type BasisRule = Literal["cost", "donor", "fmv_at_gift", "no_gain_or_loss", "unk
 ACQUISITION_KINDS: Final[frozenset[str]] = frozenset({"buy", "p2p_buy", "income", "inherit", "gift_in"})
 DISPOSAL_KINDS: Final[frozenset[str]] = frozenset({"sell", "spend", "gift_out"})
 METHODS: Final[frozenset[str]] = frozenset({"fifo"})
+TRANSFER_KINDS: Final[frozenset[str]] = frozenset({"deposit", "withdrawal", "self_transfer"})
+FEE_TREATMENTS: Final[frozenset[str]] = frozenset({"carry", "dispose"})
 ZERO: Final = Decimal("0.00")
 GENESIS: Final = date(2009, 1, 3)  # no bitcoin was acquired before the genesis block
 
@@ -111,7 +132,24 @@ class Disposal:
     identified_at: datetime | None = None  # when the user chose `picks`, timezone-aware UTC
 
 
-type Event = Acquisition | Disposal
+@dataclass(frozen=True)
+class Transfer:
+    id: str
+    account: str  # where the coins leave
+    to: str  # where they arrive
+    on: date  # the tax date
+    at: datetime  # the moment, timezone-aware UTC
+    kind: TransferKind
+    sats: int  # the sats that leave `account`, the fee included
+    fee_sats: int = 0  # of those, the network or withdrawal fee
+    fee_value: Decimal = Decimal("0.00")  # USD FMV of the fee sats (a fee disposal's proceeds)
+    picks: tuple[Pick, ...] | None = None  # None: the source account's standing method
+    identified_at: datetime | None = None  # when the user chose `picks`, timezone-aware UTC
+    missing_basis: Decimal | None = None  # withdrawal only: the basis of sats the account holds no lots for
+    missing_acquired: date | None = None  # withdrawal only: and their acquisition date
+
+
+type Event = Acquisition | Disposal | Transfer
 
 
 @dataclass(frozen=True)
@@ -172,14 +210,30 @@ class GiftGiven:
 
 
 @dataclass(frozen=True)
+class Moved:
+    """A transfer's move of part of a lot: `sats` arrive in `to` as lot `into`, carrying `basis` (the fee's
+    basis too, when it was carried) and the lot's dates and status."""
+
+    transfer: str
+    lot: str
+    into: str
+    to: str
+    sats: int
+    basis: Decimal
+    acquired: date
+    carried_fee: int = 0  # fee sats whose basis this part carries (the carry treatment)
+
+
+@dataclass(frozen=True)
 class LateIdentification:
     """A choice made after its disposal whose lots differ from the standing method's (ADR 0021 §2).
     `standing` is what the standing method would have used, with its figures, shown with the warning
-    (ADR 0008 §4): allocations for a sale or spend, and gift records (no gain or loss) for a gift given."""
+    (ADR 0008 §4): allocations for a sale or spend, gift records (no gain or loss) for a gift given, and
+    the lots it would have moved (before any fee) for a transfer."""
 
     disposal: str
     identified_at: datetime
-    standing: tuple[Allocation, ...] | tuple[GiftGiven, ...]
+    standing: tuple[Allocation, ...] | tuple[GiftGiven, ...] | tuple[Moved, ...]
 
 
 @dataclass(frozen=True)
@@ -203,9 +257,10 @@ class UnknownBasis:
 class Result:
     allocations: tuple[Allocation, ...]
     gifts: tuple[GiftGiven, ...]
-    holdings: tuple[Lot, ...]  # the lots left, in acquisition order across accounts, without empty ones
+    holdings: tuple[Lot, ...]  # the lots left, in the order they were created or moved in, without empty ones
     late: tuple[LateIdentification, ...]
     blocking: tuple[MissingLots | UnknownBasis, ...]
+    moves: tuple[Moved, ...] = ()
 
 
 @dataclass
@@ -228,14 +283,21 @@ def long_term(acquired: date, disposed: date) -> bool:
     return disposed > anniversary
 
 
-def run(events: Sequence[Event], methods: Mapping[str, Method] | None = None) -> Result:
-    """Apply `events` in order. `methods` holds each account's standing method (FIFO if absent)."""
+def run(
+    events: Sequence[Event],
+    methods: Mapping[str, Method] | None = None,
+    fee_treatment: FeeTreatment = "carry",
+) -> Result:
+    """Apply `events` in order. `methods` holds each account's standing method (FIFO if absent);
+    `fee_treatment` is the user's choice for network fees on deposits and self-transfers (ADR 0009)."""
+    if fee_treatment not in FEE_TREATMENTS:
+        raise EngineError(f"unknown fee treatment {fee_treatment!r}")
     with localcontext(CONTEXT):
-        return _Engine(methods or {}).run(events)
+        return _Engine(methods or {}, fee_treatment).run(events)
 
 
 class _Engine:
-    def __init__(self, methods: Mapping[str, Method]) -> None:
+    def __init__(self, methods: Mapping[str, Method], fee_treatment: FeeTreatment = "carry") -> None:
         for account, method in methods.items():
             if method not in METHODS:
                 raise EngineError(f"account {account!r}: unknown standing method {method!r}")
@@ -247,6 +309,8 @@ class _Engine:
         self._gifts: list[GiftGiven] = []
         self._late: list[LateIdentification] = []
         self._blocking: list[MissingLots | UnknownBasis] = []
+        self._moves: list[Moved] = []
+        self._fee_treatment = fee_treatment
 
     def run(self, events: Sequence[Event]) -> Result:
         last: date | None = None
@@ -268,7 +332,10 @@ class _Engine:
             if last_moment is not None and event.at < last_moment:
                 raise EngineError(f"disposal {event.id!r} is out of time order")
             last_moment = event.at
-            self._dispose(event)
+            if isinstance(event, Transfer):
+                self._transfer(event)
+            else:
+                self._dispose(event)
         holdings = tuple(
             Lot(
                 o.lot.id,
@@ -285,7 +352,12 @@ class _Engine:
             if o.sats > 0
         )
         return Result(
-            tuple(self._allocations), tuple(self._gifts), holdings, tuple(self._late), tuple(self._blocking)
+            tuple(self._allocations),
+            tuple(self._gifts),
+            holdings,
+            tuple(self._late),
+            tuple(self._blocking),
+            tuple(self._moves),
         )
 
     def _acquire(self, a: Acquisition) -> None:
@@ -346,31 +418,37 @@ class _Engine:
                 left -= take
         return picks, left
 
+    def _choose(self, e: Disposal | Transfer) -> tuple[list[Pick], int, list[Pick] | None]:
+        """The lots `e` uses: the standing method's, or the user's checked picks; the sats the account
+        holds no lots for (standing method only); and, for a late choice whose lots differ from the
+        standing method's (ADR 0021 §2), the standing method's picks."""
+        if e.picks is None:
+            if e.identified_at is not None:
+                raise EngineError(f"disposal {e.id!r}: a standing-method disposal has no identification time")
+            picks, missing = self._standing(e.account, e.sats)
+            return picks, missing, None
+        if e.identified_at is None:
+            raise EngineError(f"disposal {e.id!r}: a chosen set of lots needs the time it was chosen")
+        _check_moment(e.identified_at, f"disposal {e.id!r}: its identification time")
+        # Valid picks mean the account holds the sats, so FIFO isn't short either.
+        picks = self._checked_picks(e, e.picks)
+        if e.identified_at > e.at:
+            standing, _ = self._standing(e.account, e.sats)
+            if _merged(picks) != _merged(standing):
+                return picks, 0, standing
+        return picks, 0, None
+
     def _dispose(self, d: Disposal) -> None:
         if d.kind not in DISPOSAL_KINDS:
             raise EngineError(f"disposal {d.id!r}: unknown kind {d.kind!r}")
         proceeds = _signed_usd(d.proceeds, d.id)
         if d.kind == "gift_out" and proceeds != 0:
             raise EngineError(f"disposal {d.id!r}: a gift given has no proceeds")
-        missing = 0
-        if d.picks is None:
-            if d.identified_at is not None:
-                raise EngineError(f"disposal {d.id!r}: a standing-method disposal has no identification time")
-            picks, missing = self._standing(d.account, d.sats)
-        else:
-            if d.identified_at is None:
-                raise EngineError(f"disposal {d.id!r}: a chosen set of lots needs the time it was chosen")
-            _check_moment(d.identified_at, f"disposal {d.id!r}: its identification time")
-            # Valid picks mean the account holds the sats, so FIFO isn't short either.
-            picks = self._checked_picks(d, d.picks)
-            if d.identified_at > d.at:
-                standing, _ = self._standing(d.account, d.sats)
-                if _merged(picks) != _merged(standing):
-                    figures, _ = self._split(d, proceeds, standing, apply=False)
-                    alternative = (
-                        tuple(self._gift(a) for a in figures) if d.kind == "gift_out" else tuple(figures)
-                    )
-                    self._late.append(LateIdentification(d.id, d.identified_at, alternative))
+        picks, missing, standing = self._choose(d)
+        if standing is not None and d.identified_at is not None:
+            figures, _ = self._split(d, proceeds, standing, apply=False)
+            alternative = tuple(self._gift(a) for a in figures) if d.kind == "gift_out" else tuple(figures)
+            self._late.append(LateIdentification(d.id, d.identified_at, alternative))
         allocations, rest = self._split(d, proceeds, picks, apply=True)
         if d.kind == "gift_out":
             self._gifts.extend(self._gift(a) for a in allocations)
@@ -378,6 +456,119 @@ class _Engine:
             self._allocations.extend(allocations)
         if missing:  # the standing picks covered all but `missing` sats; `rest` is their proceeds
             self._blocking.append(MissingLots(d.id, missing, rest))
+
+    def _transfer(self, t: Transfer) -> None:
+        fee_value = _checked_transfer(t)
+        if t.picks is None and t.kind == "withdrawal":
+            _, short = self._standing(t.account, t.sats)
+            if short:
+                self._unrecorded(t, short)
+        picks, missing, standing = self._choose(t)
+        if standing is not None and t.identified_at is not None:
+            alternative = tuple(self._move(t, p.lot, p.sats, apply=False) for p in standing)
+            self._late.append(LateIdentification(t.id, t.identified_at, alternative))
+        if missing:
+            self._blocking.append(MissingLots(t.id, missing, ZERO))
+        if not picks:
+            return
+        # A shortfall is blocking anyway; the fee comes out of what is covered, leaving a sat to arrive.
+        covered = sum(p.sats for p in picks)
+        fees = _fee_shares(min(t.fee_sats, covered - 1), picks)
+        dispose = t.kind == "withdrawal" or self._fee_treatment == "dispose"
+        if dispose and t.fee_sats:
+            fee_picks = [Pick(p.lot, f) for p, f in zip(picks, fees, strict=True) if f]
+            disposal = Disposal(t.id, t.account, t.on, t.at, "spend", sum(fees), fee_value)
+            allocations, _ = self._split(disposal, fee_value, fee_picks, apply=True)
+            self._allocations.extend(allocations)
+        orphan, orphan_sats = ZERO, 0
+        last: Moved | None = None
+        for pick, fee in zip(picks, fees, strict=True):
+            moving = pick.sats - fee
+            if dispose:
+                if moving:
+                    last = self._move(t, pick.lot, moving, apply=True)
+                continue
+            if moving:  # carry: the whole part leaves the lot, its fee's basis with the sats that arrive
+                last = self._move(t, pick.lot, pick.sats, apply=True, arrive=moving)
+            else:  # a part that is all fee: its basis goes to the transfer's last moved part
+                orphan = add(orphan, self._take(pick.lot, pick.sats)[0])
+                orphan_sats += pick.sats
+        if orphan_sats and last is not None:  # a moved part always exists: fees leave a sat to arrive
+            self._carry(last, orphan, orphan_sats)
+
+    def _unrecorded(self, t: Transfer, sats: int) -> None:
+        """A lot, in the source account, for a withdrawal's sats the account holds no lots for (ADR 0009)."""
+        lot_id = f"{t.id}:unrecorded"
+        if t.missing_basis is None:
+            basis, unknown = ZERO, True
+            self._blocking.append(UnknownBasis(lot_id))
+        else:
+            basis, unknown = _usd(t.missing_basis, t.id), False
+        acquired = t.missing_acquired if t.missing_acquired is not None else t.on
+        if type(acquired) is not date or not GENESIS <= acquired <= t.on:
+            raise EngineError(
+                f"transfer {t.id!r}: unrecorded sats' date must be from genesis to the withdrawal"
+            )
+        lot = Lot(lot_id, t.account, acquired, sats, basis, False, None, None, unknown)
+        self._insert(t.account, _Open(lot, sats, basis, None, False))
+
+    def _take(self, lot_id: str, sats: int) -> tuple[Decimal, Decimal | None]:
+        """Take `sats` from a lot: their shares of its bases, the lot used up by them."""
+        o = self._lots[lot_id]
+        basis = share(o.basis, sats, o.sats)
+        loss = None if o.loss_basis is None else share(o.loss_basis, sats, o.sats)
+        rest = subtract(o.basis, basis)
+        loss_rest = None if o.loss_basis is None or loss is None else min(subtract(o.loss_basis, loss), rest)
+        o.sats, o.basis, o.loss_basis = o.sats - sats, rest, loss_rest
+        return basis, loss
+
+    def _move(self, t: Transfer, lot_id: str, sats: int, *, apply: bool, arrive: int | None = None) -> Moved:
+        """Move `sats` of a lot to `t.to` (`arrive` of them arrive: the rest was a carried fee)."""
+        o = self._lots[lot_id]
+        into = f"{lot_id}@{t.id}"
+        if not apply:
+            return Moved(t.id, lot_id, into, t.to, sats, share(o.basis, sats, o.sats), o.lot.acquired)
+        basis, loss = self._take(lot_id, sats)
+        arriving = sats if arrive is None else arrive
+        lot = Lot(
+            into,
+            t.to,
+            o.lot.acquired,
+            arriving,
+            basis,
+            o.lot.always_long,
+            loss,
+            o.lot.loss_from if loss is not None else None,
+            o.lot.unknown_basis,
+        )
+        self._insert(t.to, _Open(lot, arriving, basis, loss, o.gift))
+        moved = Moved(t.id, lot_id, into, t.to, arriving, basis, o.lot.acquired, sats - arriving)
+        self._moves.append(moved)
+        return moved
+
+    def _carry(self, moved: Moved, basis: Decimal, sats: int) -> None:
+        """Add the basis of fee parts (`sats` of them) to a moved part (the carry treatment's dust case)."""
+        entry = self._lots[moved.into]
+        entry.basis = add(entry.basis, basis)
+        i = self._moves.index(moved)
+        self._moves[i] = Moved(
+            moved.transfer,
+            moved.lot,
+            moved.into,
+            moved.to,
+            moved.sats,
+            entry.basis,
+            moved.acquired,
+            moved.carried_fee + sats,
+        )
+
+    def _insert(self, account: str, entry: _Open) -> None:
+        """Place a lot in an account's FIFO order by acquisition date (after lots of the same date)."""
+        lots = self._open.setdefault(account, [])
+        at = bisect_right([o.lot.acquired for o in lots], entry.lot.acquired)
+        lots.insert(at, entry)
+        self._first[account] = min(self._first.get(account, 0), at)
+        self._lots[entry.lot.id] = entry
 
     def _gift(self, a: Allocation) -> GiftGiven:
         lot = self._lots[a.lot].lot
@@ -446,7 +637,7 @@ class _Engine:
         lot_basis = None if used == basis else basis
         return Allocation(d.id, lot.id, sats, used, proceeds, acquired, d.on, term, rule, lot_basis, loss)
 
-    def _checked_picks(self, d: Disposal, chosen: tuple[Pick, ...]) -> list[Pick]:
+    def _checked_picks(self, d: Disposal | Transfer, chosen: tuple[Pick, ...]) -> list[Pick]:
         """The user's picks, checked, with repeats of a lot merged (first-seen order)."""
         wanted: dict[str, int] = {}
         for pick in chosen:
@@ -464,6 +655,40 @@ class _Engine:
         return [Pick(lot, sats) for lot, sats in wanted.items()]
 
 
+def _checked_transfer(t: Transfer) -> Decimal:
+    """Check a transfer's own fields; return its fee value."""
+    if t.kind not in TRANSFER_KINDS:
+        raise EngineError(f"transfer {t.id!r}: unknown kind {t.kind!r}")
+    if not isinstance(t.to, str) or not t.to or t.to == t.account:
+        raise EngineError(f"transfer {t.id!r}: it moves coins to another account")
+    if isinstance(t.fee_sats, bool) or not isinstance(t.fee_sats, int) or not 0 <= t.fee_sats < t.sats:
+        raise EngineError(f"transfer {t.id!r}: its fee is a whole number of sats below the sats it moves")
+    fee_value = _usd(t.fee_value, t.id)
+    if t.fee_sats == 0 and fee_value != 0:
+        raise EngineError(f"transfer {t.id!r}: a fee value needs fee sats")
+    if t.kind != "withdrawal" and (t.missing_basis is not None or t.missing_acquired is not None):
+        raise EngineError(f"transfer {t.id!r}: only a withdrawal names a basis for unrecorded sats")
+    return fee_value
+
+
+def _fee_shares(fee: int, picks: Sequence[Pick]) -> list[int]:
+    """The fee sats each pick pays: in proportion to its sats, rounded down, then the rest one pick at a
+    time in order while each part keeps at least one sat; any rest after that goes to the last picks."""
+    total = sum(p.sats for p in picks)
+    shares = [fee * p.sats // total for p in picks]
+    rest = fee - sum(shares)
+    for i, p in enumerate(picks):
+        room = min(rest, p.sats - 1 - shares[i])
+        if room > 0:
+            shares[i] += room
+            rest -= room
+    for i in reversed(range(len(picks))):
+        room = min(rest, picks[i].sats - shares[i])
+        shares[i] += room
+        rest -= room
+    return shares
+
+
 def _merged(picks: Sequence[Pick]) -> dict[str, int]:
     merged: dict[str, int] = {}
     for p in picks:
@@ -472,8 +697,8 @@ def _merged(picks: Sequence[Pick]) -> dict[str, int]:
 
 
 def _check_common(event: Event) -> None:
-    if not isinstance(event, Acquisition | Disposal):
-        raise EngineError("an event is an Acquisition or a Disposal")
+    if not isinstance(event, Acquisition | Disposal | Transfer):
+        raise EngineError("an event is an Acquisition, a Disposal or a Transfer")
     if not (isinstance(event.id, str) and event.id and isinstance(event.account, str) and event.account):
         raise EngineError("an event names its id and its account")
     if type(event.on) is not date:  # a datetime is a date too, but not a tax date
