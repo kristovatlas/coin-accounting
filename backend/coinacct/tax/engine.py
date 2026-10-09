@@ -36,11 +36,15 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
     (the owner's decision on #238): the events again, with every late choice disregarded and the
     standing method used instead, as the IRS might (ADR 0008 §4, T-508). So a choice is judged against
     what the standing method would have had left after the earlier late choices were disregarded, not
-    after they were applied. In the replay, an on-time choice naming lots the replay no longer holds
-    there also falls back to the standing method. If the replay can't follow an event at all (an
-    event that is valid only with the user's own earlier choices), it stops there:
-    `Result.replay_stopped` names the event, and later warnings use the lots as the user's choices
-    left them.
+    after they were applied. In the replay, an on-time choice naming lots the replay doesn't hold in
+    full there falls back, whole, to the standing method. The warning's lot ids are the replay's (a lot
+    moved in the replay has its own `lot@transfer` id), and each figure carries its own basis and dates.
+    The replay can fall short where the real run isn't (the two can disagree on whether an account
+    holds lots the user recorded, so only one creates a lot for a withdrawal): the warning then counts
+    the sats it couldn't cover (`missing`). If the replay can't apply an event at all (the same
+    disagreement, or a fee that would use up the last sats of a gift's part), it stops there:
+    `Result.replay_stopped` names the event, and every later warning is figured on the lots as the
+    user's choices left them, marked `replayed=False`.
 - **Splits are exact.** Bases and proceeds are split by sats with `domain.money.share`, always as a share
   of what remains, and the last part takes the remainder. So every split adds up to the whole, to the
   cent. All money arithmetic runs in the fixed `domain.money` context (T-502).
@@ -260,6 +264,7 @@ class LateIdentification:
     identified_at: datetime
     standing: tuple[Allocation, ...] | tuple[GiftGiven, ...] | tuple[Allocation | Moved, ...]
     missing: int = 0  # sats the standing method couldn't cover in the replay (its figures leave them out)
+    replayed: bool = True  # figured in the replay; False once it had stopped (Result.replay_stopped)
 
 
 @dataclass(frozen=True)
@@ -298,8 +303,9 @@ class _Late:
     the real run once the replay has stopped), the standing method's picks there, and its shortfall."""
 
     engine: _Engine
-    picks: list[Pick]
+    picks: tuple[Pick, ...]
     missing: int
+    replayed: bool
 
 
 @dataclass
@@ -419,7 +425,7 @@ class _Engine:
 
     def _follow(self, event: Event) -> None:
         """Apply `event` to the replay too, after the real run accepted it. An event the replay can't
-        apply (it is valid only after the user's own earlier choices) stops the replay there."""
+        apply stops the replay there (see the module docstring)."""
         if self._shadow is None:
             return
         try:
@@ -514,7 +520,7 @@ class _Engine:
             judge = self._shadow or self  # the replay, or these lots once it has stopped
             standing, short = judge._standing(e.account, e.sats)
             if short or _merged(picks) != _merged(standing):
-                return picks, 0, _Late(judge, standing, short)
+                return picks, 0, _Late(judge, tuple(standing), short, judge is not self)
         return picks, 0, None
 
     def _dispose(self, d: Disposal) -> None:
@@ -528,7 +534,9 @@ class _Engine:
             judge = late.engine
             figures, _ = judge._split(d, proceeds, late.picks, apply=False)
             alternative = tuple(judge._gift(a) for a in figures) if d.kind == "gift_out" else tuple(figures)
-            self._late.append(LateIdentification(d.id, d.identified_at, alternative, late.missing))
+            self._late.append(
+                LateIdentification(d.id, d.identified_at, alternative, late.missing, late.replayed)
+            )
         allocations, rest = self._split(d, proceeds, picks, apply=True)
         if d.kind == "gift_out":
             self._gifts.extend(self._gift(a) for a in allocations)
@@ -548,7 +556,9 @@ class _Engine:
         picks, missing, late = self._choose(t)
         if late is not None and t.identified_at is not None:
             alternative = late.engine._alternative(t, late.picks, fee_value) if late.picks else ()
-            self._late.append(LateIdentification(t.id, t.identified_at, alternative, late.missing))
+            self._late.append(
+                LateIdentification(t.id, t.identified_at, alternative, late.missing, late.replayed)
+            )
         # A shortfall is blocking anyway; the fee comes out of what is covered, leaving a sat to arrive,
         # and its value follows its sats: the uncovered part goes with the missing basis.
         picks = self._in_fifo_order(t.account, picks)
@@ -643,10 +653,11 @@ class _Engine:
         out: list[Allocation | Moved] = []
         orphans: list[tuple[_Open, Decimal, int]] = []
         charged = sum(fees)
-        if dispose and charged > 0:
-            disposal = Disposal(t.id, t.account, t.on, t.at, "spend", charged, fee_value)
+        if dispose and charged > 0:  # the fee's value follows its sats, as in the real run
+            value = share(fee_value, charged, t.fee_sats)
+            disposal = Disposal(t.id, t.account, t.on, t.at, "spend", charged, value)
             fee_picks = [Pick(p.lot, f) for p, f in zip(picks, fees, strict=True) if f]
-            out.extend(self._split(disposal, fee_value, fee_picks, apply=False)[0])
+            out.extend(self._split(disposal, value, fee_picks, apply=False)[0])
         for pick, fee in zip(picks, fees, strict=True):
             o = self._lots[pick.lot]
             moving = pick.sats - fee
