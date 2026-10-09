@@ -385,6 +385,9 @@ DUMP_TEXT_MAX: Final = 64 << 30  # the unzipped dump: several GB today, with roo
 OHLC_MAX: Final = 1 << 20  # one page of 1000 candles is about 150 kB
 ECB_MAX: Final = 16 << 20  # the zip is well under 1 MB
 ECB_CSV_MAX: Final = 64 << 20  # and its one file a few MB, unzipped
+# The only zip flag bits accepted: a data descriptor (0x08) and UTF-8 names (0x800). Encryption (0x01,
+# 0x40), patched data (0x20) and anything newer are refused before zipfile meets them.
+_ZIP_FLAGS_OK: Final = 0x08 | 0x800
 
 
 class _Hashed(io.RawIOBase):
@@ -462,13 +465,13 @@ def download_ohlc(
     out: list[DailyPrice] = []
     sha = hashlib.sha256()
     starts = ohlc_pages(complete_before)
-    for i, start in enumerate(starts):
+    for start in starts:
         url = OHLC_URL.format(currency=currency.lower(), start=start)
         with open_url(url, proxy, max_bytes=OHLC_MAX, cancelled=cancelled) as body:
             data = body.read()
         sha.update(f"{start}:{len(data)}\n".encode() + data)
         first = datetime.fromtimestamp(int(start), UTC).date()
-        end = datetime.fromtimestamp(int(starts[i + 1]), UTC).date() if i + 1 < len(starts) else None
+        end = date.fromordinal(first.toordinal() + OHLC_PAGE_DAYS)  # the grid's next start, last page too
         try:
             text = data.decode("ascii")
         except UnicodeDecodeError:
@@ -488,16 +491,29 @@ def download_ecb(proxy: Proxy | None, cancelled: Callable[[], bool]) -> tuple[Ra
             info = archive.getinfo(ECB_MEMBER)
             if len(archive.infolist()) != 1:
                 _fail("www.ecb.europa.eu: the zip isn't the one expected file")
-            if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or info.flag_bits & 0x1:
+            if (
+                info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+                or info.flag_bits & ~_ZIP_FLAGS_OK
+            ):
                 _fail("www.ecb.europa.eu: the zip's file is encrypted or packed an unexpected way")
             with archive.open(info) as member:  # bounded by what is read, not the header's claim
                 text = member.read(ECB_CSV_MAX + 1)
-    except (zipfile.BadZipFile, KeyError, OSError, EOFError, zlib.error) as e:
+    except (
+        zipfile.BadZipFile,
+        KeyError,
+        OSError,
+        EOFError,
+        zlib.error,
+        NotImplementedError,
+        ValueError,
+    ) as e:
         _fail(f"www.ecb.europa.eu: the rates aren't a valid zip ({type(e).__name__})")
     if len(text) > ECB_CSV_MAX:
         _fail("www.ecb.europa.eu: the rates file is larger than allowed")
+    if any(b < 0x20 and b not in (0x0A, 0x0D) for b in text) or b"\r" in text.replace(b"\r\n", b""):
+        _fail("www.ecb.europa.eu: the rates file holds a control character")  # in any column, used or not
     try:
-        lines = text.decode("ascii").split("\n")  # not splitlines: other control bytes stay errors
+        lines = text.decode("ascii").split("\n")
     except UnicodeDecodeError:
         _fail("www.ecb.europa.eu: the rates file isn't ASCII")
     return ecb_rates(lines), hashlib.sha256(data).hexdigest()

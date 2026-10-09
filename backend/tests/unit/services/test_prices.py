@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import threading
+import time
 import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -152,33 +153,47 @@ def test_a_cancel_during_a_download_also_returns_nothing(monkeypatch: pytest.Mon
     assert service.refresh(None, stop, today=lambda: TODAY) is None
 
 
-def test_an_ecb_line_ending_in_a_control_byte_is_refused_not_split_off(sources: dict[str, Any]) -> None:
+@pytest.mark.parametrize(
+    "row",
+    [
+        "2011-08-19,2.000000,1,1.000000,\x0c\n",  # splitlines() would split it off and accept the file
+        "2011-08-19,2.000000,\x0c1,1.000000,\n",  # in a column never parsed (JPY)
+        "2011-08-19,2.000000,1\r,1.000000,\n",  # a lone carriage return
+    ],
+)
+def test_a_control_character_anywhere_in_the_ecb_file_is_refused(sources: dict[str, Any], row: str) -> None:
     out = io.BytesIO()
-    with zipfile.ZipFile(out, "w") as z:  # splitlines() would split at the \x0c and accept the file
-        z.writestr("eurofxref-hist.csv", "Date,USD,GBP,\n2011-08-19,2.000000,1.000000,\x0c\n")
+    with zipfile.ZipFile(out, "w") as z:
+        z.writestr("eurofxref-hist.csv", "Date,USD,JPY,GBP,\r\n" + row)
     sources[fetch.ECB_URL] = out.getvalue()
-    with pytest.raises(PriceError, match="line 2: expected 3 fields"):
+    with pytest.raises(FetchError, match="holds a control character"):
         run()
 
 
-def test_a_cancelled_refresh_job_ends_cancelled(sources: dict[str, Any]) -> None:
+def test_a_refresh_cancelled_during_a_download_ends_cancelled_not_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     worker = JobWorker()
     worker.start()
-    started = threading.Event()
-    release = threading.Event()
+    inside = threading.Event()
 
-    def job(cancelled: threading.Event) -> object:
-        started.set()
-        release.wait(5)
-        return service.refresh(None, cancelled, today=lambda: TODAY)
+    def dump(complete_before: date, proxy: Any, cancelled: Any) -> Any:
+        inside.set()
+        while not cancelled():  # mid-download, until the user cancels
+            time.sleep(0.01)
+        raise fetch.Cancelled("api.bitcoincharts.com: the refresh was cancelled")
 
-    job_id = worker.submit("prices", job)
-    assert started.wait(5)
+    monkeypatch.setattr(fetch, "download_dump", dump)
+    job_id = worker.submit("prices", lambda cancelled: service.refresh(None, cancelled, today=lambda: TODAY))
+    assert inside.wait(5)
     worker.cancel(job_id)
-    release.set()
-    worker.stop()
-    done = worker.job(job_id)
+    for _ in range(500):  # the job's own end, before stop() would cancel everything anyway
+        done = worker.job(job_id)
+        if done is not None and done.state not in (State.QUEUED, State.RUNNING):
+            break
+        time.sleep(0.01)
     assert done is not None and done.state is State.CANCELLED
+    worker.stop()
 
 
 @pytest.mark.parametrize(
@@ -245,8 +260,15 @@ def test_ohlc_pages_join_at_their_boundary_and_a_page_answering_for_later_days_i
         f"{s}:{len(pages[u])}\n".encode() + pages[u] for s, u in zip((AUG18, second), pages, strict=True)
     )
     assert digest == hashlib.sha256(framed).hexdigest()
-    # a first page answering with the second page's days (a changed `start`) is refused, not trimmed
+    # a page answering with another page's days (a changed `start`) is refused, not trimmed, the
+    # last page included: its range ends on the grid too
     pages[fetch.OHLC_URL.format(currency="usd", start=AUG18)] = ohlc("BTC/USD", candle(1000, "2"))
+    with pytest.raises(PriceError, match="outside the requested page"):
+        fetch.download_ohlc("USD", until, None, lambda: False)
+    pages[fetch.OHLC_URL.format(currency="usd", start=AUG18)] = ohlc("BTC/USD", candle(999, "1"))
+    pages[fetch.OHLC_URL.format(currency="usd", start=second)] = ohlc(
+        "BTC/USD", candle(2000, "9", volume="0")
+    )
     with pytest.raises(PriceError, match="outside the requested page"):
         fetch.download_ohlc("USD", until, None, lambda: False)
 
@@ -285,28 +307,19 @@ def test_a_dump_that_unzips_past_its_limit_is_refused(
         run()
 
 
-@pytest.mark.parametrize("how", ["encrypted", "bzip2"])
+@pytest.mark.parametrize("how", ["encrypted", "bzip2", "patched", "strong"])
 def test_an_ecb_zip_packed_an_unexpected_way_is_refused(sources: dict[str, Any], how: str) -> None:
     out = io.BytesIO()
     method = zipfile.ZIP_BZIP2 if how == "bzip2" else zipfile.ZIP_DEFLATED
     with zipfile.ZipFile(out, "w", compression=method) as z:
         z.writestr("eurofxref-hist.csv", "Date,USD,GBP,\n")
     data = bytearray(out.getvalue())
-    if how == "encrypted":  # set the encrypted flag in the local and central headers
-        for sig in (b"PK\x03\x04", b"PK\x01\x02"):
-            at = data.index(sig) + (6 if sig == b"PK\x03\x04" else 8)
-            data[at] |= 0x1
+    flag = {"encrypted": 0x1, "patched": 0x20, "strong": 0x40}.get(how, 0)
+    for sig in (b"PK\x03\x04", b"PK\x01\x02"):  # the flag in the local and central headers
+        at = data.index(sig) + (6 if sig == b"PK\x03\x04" else 8)
+        data[at] |= flag
     sources[fetch.ECB_URL] = bytes(data)
     with pytest.raises(FetchError, match="encrypted or packed an unexpected way"):
-        run()
-
-
-def test_an_ecb_file_with_a_stray_control_byte_is_refused_not_split(sources: dict[str, Any]) -> None:
-    out = io.BytesIO()
-    with zipfile.ZipFile(out, "w") as z:
-        z.writestr("eurofxref-hist.csv", "Date,USD,GBP,\n2011-08-19,2.000000,\x0c1.000000,\n")
-    sources[fetch.ECB_URL] = out.getvalue()
-    with pytest.raises(PriceError, match="line 2"):
         run()
 
 
