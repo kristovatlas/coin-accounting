@@ -18,9 +18,9 @@ T-302, T-303, T-305).
   declared length is an error, not an end, and so is a TLS close without close_notify; the parsers
   still validate what they read (T-304).
 
-The sources' downloads (`download_ohlc`, `download_ecb`) are at the end. Their
-requests are fixed by the calendar alone: the same for every user (T-301). Fetching happens only when
-the user asks for a refresh (services). Nothing here runs on import.
+The sources' downloads (`download_ohlc`, `download_ecb`) are at the end. Their requests are fixed by
+the calendar alone: the same for every user (T-301). Fetching happens only when the user asks for a
+refresh (services). Nothing here runs on import.
 """
 
 from __future__ import annotations
@@ -88,9 +88,9 @@ class Proxy:
 
 
 class Body(io.RawIOBase):
-    """A response body as a raw binary stream (wrap it in `io.BufferedReader`, `gzip.GzipFile` or
-    `io.TextIOWrapper`). Every failure is a FetchError naming the host: more than `max_bytes`, fewer
-    bytes than the declared length (a cut-off download), the deadline passed, or a read that failed."""
+    """A response body as a raw binary stream (wrap it in `io.BufferedReader` or `io.TextIOWrapper`).
+    Every failure is a FetchError naming the host: more than `max_bytes`, fewer bytes than the declared
+    length (a cut-off download), the deadline passed, or a read that failed."""
 
     def __init__(
         self,

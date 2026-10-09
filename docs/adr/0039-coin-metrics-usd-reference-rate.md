@@ -3,7 +3,7 @@ status: proposed
 date: 2026-10-09
 deciders: repository owner (human), drafted by Claude Code
 supersedes: 0007
-architecture_sha256: 34de4533df17d271f51261f206c0de073f5435789cb47720f33f7672fbbb0a88
+architecture_sha256: 507e531d879d313ec54cfe4bc2e69ecb5c22775875bb3a98ca8c025438d55490
 ---
 
 # 0039: USD prices from Coin Metrics' daily reference rate
@@ -37,9 +37,9 @@ Chosen option: 1, because Coin Metrics publishes the weighted price itself, by a
   - **Bounds:** the number of pages is capped (the days since 2010-07-18 divided by the page size, plus a margin). Each page's dates must be later than the last page's. One deadline and one byte limit cover the whole download. Breaking any of these fails the refresh (T-304).
   - **Parsing:** each value is a decimal string parsed exactly (no floats, architecture §2); each row's asset is `btc`; dates strictly increase within and across pages. Anything else fails the refresh (T-304).
   - **No user data:** nothing in any request depends on the user's records (T-301).
-  - **Rate limit:** Coin Metrics documents a per-IP limit for the community API (10 requests per 6 seconds). The downloader stays well below it. An HTTP 429 is honoured, not dodged: the downloader keeps the same circuit, waits as `Retry-After` says (bounded) or backs off, retries a bounded number of times, and then fails the refresh (T-304). It never switches Tor circuits to get a new IP past the limit.
+  - **Rate limit:** Coin Metrics documents a per-IP limit for the community API (10 requests per 6 seconds). The downloader stays well below it. An HTTP 429 is honoured, not dodged: the downloader waits as `Retry-After` says (bounded, and shorter than Tor's usual circuit lifetime) or backs off, retries a bounded number of times, and then fails the refresh (T-304). It never deliberately asks Tor for a new circuit or identity, or isolates the retry differently, to get past the limit. Tor may still rotate circuits on its own.
 - **Bitstamp stays as the second source.** Its daily typical price is still fetched and compared with Coin Metrics' rate day by day (`prices.mismatches`). The comparison is a review flag, never a refusal, and it covers every day both have. On a day Coin Metrics has no value for, the typical price fills in, recorded with method `typical`, as today.
-- **bitcoincharts is dropped, now.** `api.bitcoincharts.com` leaves the F3 hosts, and the dump download and parser are removed, in the same PR as this ADR, so the code never allows a host the binding decision has dropped. A neglected domain that lapsed could be taken over and serve a well-formed dump with a valid certificate, and its prices would win (T-303). Until the Coin Metrics downloader lands, USD days use Bitstamp's typical price, and the cross-check and freshness flag come with the downloader. This doesn't wait for the terms check below: the archive is already unreachable, so removing it loses nothing.
+- **bitcoincharts is dropped, now.** `api.bitcoincharts.com` leaves the F3 hosts, and the dump download and parser are removed, in the same PR as this ADR, so the code never allows a host the binding decision has dropped. A neglected domain that lapsed could be taken over and serve a well-formed dump with a valid certificate, and its prices would win (T-303). Until the Coin Metrics downloader lands, USD days use Bitstamp's typical price, flagged stale if its last day is more than 7 days back; the cross-check comes with the downloader. This doesn't wait for the terms check below: the archive is already unreachable, so removing it loses nothing.
 - **Freshness.** The refresh reports the reference rate's last priced day and flags it stale if that day is more than 7 days back (replacing the dump's flag, #246). M5 still checks that every F3 source is reachable.
 - **Display currencies are unchanged:** Bitstamp's EUR and GBP pairs, or USD × ECB rates. Every pair is always fetched.
 - **The F3 hosts** are now:
@@ -63,7 +63,7 @@ Chosen option: 1, because Coin Metrics publishes the weighted price itself, by a
 
 - Good: USD prices no longer depend on an archive that may be gone, and the weighting is done by a specialist, by a published method, across several exchanges, not by the app.
 - Good: history starts in July 2010, about a year earlier than Bitstamp.
-- Good: the comparison with Bitstamp keeps two independent sources for every day they share.
+- Good: the comparison with Bitstamp keeps two separately served sources for every day they share. Bitstamp may be one of the exchanges behind Coin Metrics' rate, so the comparison catches a broken or tampered feed, not a distorted Bitstamp market.
 - Bad: one price at midnight UTC is not a whole-day average. On a volatile day it can differ from one by a few percent. Per-event overrides cover a day where that matters, such as income received at a known price.
 - Bad: one more third party sees the app's requests (directly, or through Tor). The request set stays fixed and independent of the user's records.
 - Bad: the licence is non-commercial.

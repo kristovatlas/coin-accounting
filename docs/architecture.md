@@ -246,7 +246,7 @@ flowchart LR
   C --> G["Graph in the SPA<br/>(via api → services → chain)"]
   G --> T["Tagging<br/>owner entity · tax account · clients ·<br/>mixing flag · accepted suggestions"]
   T --> E["Events<br/>buy · income · deposit · withdrawal ·<br/>sell (identified_at) · spend · gift …"]
-  PF["prices: bulk fetch<br/>or CSV upload"] --> P[("Prices<br/>daily reference rate · overrides")]
+  PF["prices: bulk fetch<br/>or CSV upload"] --> P[("Prices<br/>daily USD price · overrides")]
   P --> L
   E --> L["tax engine (pure)<br/>lots · fragments · identification ·<br/>fees by role · blocking conditions"]
   C --> X
@@ -421,4 +421,4 @@ flowchart LR
 | 2026-10-06 | 0.2.5 | §1, §2: the launcher reads the built frontend into memory at start-up; `api/` serves it from memory (ADR 0034) |
 | 2026-10-08 | 0.2.6 | M1 as built (ADR 0035): §2 module tree (`chain/txs.py`; the chain cache's tables in `storage/`); §3 a stuck job keeps the DB open at shutdown; §8.2 the scan target, the cancel check before each range, a subject that waits instead of failing the job, a refused budget that waits for the user; §8.4 two tips (the scan target and the last-seen tip) and the review queue |
 | 2026-10-08 | 0.2.7 | M2 as built (ADR 0036): §2 module tree (`chain/descriptors.py`, `storage/accounts.py` and `datadir.py`, the M2 services; no `models.py`); §3 the request workers, and an import's node calls on them through the API's node client, imports and grown windows request a same-tip sync, the writer lock's 5 s wait ends in 503, readers per request, the node clients and their caps; §6 uploads aren't spooled; §7 subjects and window growth in `services/`, the history views; §8.2 scan subjects and window growth; §8.4 window growth after a sync |
-| 2026-10-09 | 0.2.8 | USD prices from Coin Metrics' daily reference rate (ADR 0039): §7's data-flow label reads "daily reference rate". §5's F3 row names no hosts, so it is unchanged |
+| 2026-10-09 | 0.2.8 | USD prices from Coin Metrics' daily reference rate (ADR 0039): §7's data-flow label reads "daily USD price", not "daily VWAP": the source is decided by ADR 0039, not by the diagram. §5's F3 row names no hosts, so it is unchanged |

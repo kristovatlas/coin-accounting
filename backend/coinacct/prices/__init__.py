@@ -96,8 +96,10 @@ class Outlier:
 
 @dataclass(frozen=True)
 class Mismatch:
-    """A day on which the trade VWAP and the typical price differ by more than MISMATCH_FACTOR. The
-    VWAP is the one used (`combine`); the typical price is the second opinion (T-303)."""
+    """A day on which the main daily series and Bitstamp's typical price differ by more than
+    MISMATCH_FACTOR. The main series is the one used (`combine`); the typical price is the second
+    opinion (T-303). Its field is still named for the trade VWAP that was the main series until ADR
+    0039; the Coin Metrics downloader adapts it and `_pair` to its `reference` rows."""
 
     day: date
     vwap: Decimal
@@ -110,7 +112,8 @@ def content_hash(data: bytes) -> str:
 
 
 def combine(vwap: Iterable[DailyPrice], typical: Iterable[DailyPrice]) -> list[DailyPrice]:
-    """One series by day: the trade VWAP where there is one, otherwise the typical price (ADR 0039).
+    """One series by day: the main daily series where it has a day, otherwise the typical price. The
+    main series was the trade VWAP until ADR 0039; it is the reference rate once that downloader lands.
     Both series must be in the same currency, and neither may price a day twice."""
     best, fill = _pair(vwap, typical)
     for p in fill.values():

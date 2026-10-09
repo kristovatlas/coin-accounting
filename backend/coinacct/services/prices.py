@@ -12,12 +12,18 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from typing import Final
 
 from coinacct.prices import DailyPrice, Gap, Outlier, check, fetch
 from coinacct.prices.bitstamp import OHLC_SOURCE
 from coinacct.prices.fetch import Cancelled, Proxy
 from coinacct.prices.fx import DISPLAY, ECB_SOURCE, to_display
+
+# The USD series' last priced day may be at most this far before the refresh's first incomplete day;
+# further back, or no USD day at all, is flagged stale: a source that stopped early, or came back
+# empty, must not pass unnoticed (T-303, T-304). A review flag, not a refusal.
+STALE_USD: Final = timedelta(days=7)
 
 
 @dataclass(frozen=True)
@@ -26,13 +32,17 @@ class Refreshed:
     Bitstamp's own pair where it traded and the ECB conversion of USD elsewhere. `hashes` maps each
     source to the SHA-256 of what was fetched (T-303). Until the Coin Metrics downloader lands (ADR
     0039), the USD series is Bitstamp's typical price alone: the reference rate, its cross-check
-    against Bitstamp (`prices.mismatches`) and its freshness flag come with it."""
+    against Bitstamp (`prices.mismatches`) come with it. `usd_through` is the USD series' last priced
+    day (None if there is none), and `usd_stale` says it is more than STALE_USD before the refresh's
+    first incomplete day."""
 
     usd: list[DailyPrice]
     display: dict[str, list[DailyPrice]]
     gaps: dict[str, list[Gap]]
     outliers: dict[str, list[Outlier]]
     hashes: dict[str, str]
+    usd_through: date | None
+    usd_stale: bool
 
 
 def refresh(
@@ -65,7 +75,9 @@ def _refresh(proxy: Proxy | None, stop: Callable[[], bool], complete_before: dat
     outliers: dict[str, list[Outlier]] = {}
     for currency, series in (("USD", usd), *display.items()):
         gaps[currency], outliers[currency] = check(series)
-    return Refreshed(usd, display, gaps, outliers, hashes)
+    through = usd[-1].day if usd else None
+    stale = through is None or complete_before - through > STALE_USD
+    return Refreshed(usd, display, gaps, outliers, hashes, through, stale)
 
 
 def _prefer(market: Sequence[DailyPrice], converted: Sequence[DailyPrice]) -> list[DailyPrice]:

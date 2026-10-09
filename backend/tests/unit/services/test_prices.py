@@ -85,6 +85,26 @@ def test_until_the_reference_rate_lands_usd_is_bitstamps_typical_price(sources: 
     ]
 
 
+def test_a_current_usd_series_is_not_stale(sources: dict[str, Any]) -> None:
+    got = run()  # the last USD day is Aug 21; the refresh's first incomplete day is Aug 22
+    assert (got.usd_through, got.usd_stale) == (date(2011, 8, 21), False)
+
+
+@pytest.mark.parametrize(("today", "stale"), [(date(2011, 8, 28), False), (date(2011, 8, 29), True)])
+def test_a_usd_series_that_stops_early_is_flagged_stale(
+    sources: dict[str, Any], today: date, stale: bool
+) -> None:
+    # the last USD day stays Aug 21: 7 days before the 28th is fine, 8 before the 29th is stale
+    got = service.refresh(None, threading.Event(), today=lambda: today)
+    assert got is not None and (got.usd_through, got.usd_stale) == (date(2011, 8, 21), stale)
+
+
+def test_an_empty_usd_series_is_flagged_stale(sources: dict[str, Any]) -> None:
+    sources[fetch.OHLC_URL.format(currency="usd", start=AUG18)] = ohlc("BTC/USD")  # every page empty
+    got = run()
+    assert (got.usd, got.usd_through, got.usd_stale) == ([], None, True)
+
+
 def test_the_retired_archive_is_no_longer_an_allowed_host() -> None:
     assert "api.bitcoincharts.com" not in fetch.HOSTS
     assert fetch.HOSTS == {"www.bitstamp.net", "www.ecb.europa.eu"}
