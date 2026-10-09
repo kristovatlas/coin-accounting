@@ -104,7 +104,7 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
 - `entity`: id, name, kind (`self | exchange | employer | merchant | person | unknown`), **`knows_identity`** flag (default true for exchanges and employers), notes.
 - `tax_account`: the unit for per-wallet/account basis (Rev. Proc. 2024-28).
   - kind: `self_custody | custodial`; name
-  - **standing identification method** (`fifo | specific | …`): what the user or broker has on file. For a self-custody wallet, a history of method records (oldest first, a recorded method, or whole-wallet FIFO), each with its effective-from and recorded-at times (ADR 0041)
+  - **standing identification method** (`fifo | specific | …`): what the user or broker has on file
   - For a custodial account: the entity (exchange) and 1099-DA flags.
 - `wallet_client`: software/hardware clients (`hardware | mobile | desktop | web | paper | other`). **Labels only**, many-to-many with addresses. An address can live in several clients, e.g. generated on a hardware wallet and imported into a mobile wallet.
 - `address`: keyed by **scripthash**, so P2PK and bare multisig work. Fields:
@@ -135,14 +135,12 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
   - Gifts additionally store donor basis, donor date, FMV at gift, and gift date (dual basis).
   - Inheritance stores FMV at death.
 - `lot_fragment`: (holder = outpoint *or* tax_account, lot_id, sats). The engine can recompute it as of any date.
-- `lot_link` (ADR 0041): an arrival event (an acquisition, or a withdrawal's moved lots) → an output of the same account it arrived in, with sats, a recorded-at time set by the app, and its source (proposed from a record, or the user's). Append-only: an edit or removal is a superseding record. An event's links never exceed the sats it delivered.
-- Opening-allocation assignments of allocated lots to coins (ADR 0041): append-only, with a recorded-at time; a choice, late-flagged like a method record.
-- Placeholder lots of unknown basis on a coin its lots and pool can't cover, with the user's resolution (date and basis, or a link) (ADR 0041).
-- `identification`: disposal/withdrawal (or a coin's pool draw, ADR 0041; append-only, the first result kept and later ones superseding it) → lot choices, `identified_at` timestamp, method (`specific | standing_order | fifo_default`), and a `late` flag (warning only).
+- `lot_link` (ADR 0041): an arrival event (an acquisition, or a withdrawal's moved lots) → a wallet output of the same account it arrived in, with sats, an app-set time and its source (proposed from a record, or the user's).
+- `identification`: disposal/withdrawal → lot choices, `identified_at` timestamp, method (`specific | standing_order | fifo_default`), and a `late` flag (warning only).
 - `disposal_allocation`: disposal → lot_id, sats, basis, proceeds share (net of disposal costs), holding period, and the 8949 box plus the reason it was chosen.
 - `doxx_tag`: outpoint or scripthash, entity_id, **confidence** (`certain | inferred`), reason (`paid_to | change_of | co_spent_with | address_reuse | cluster_backward | received_from | manual`), source txid, `manual_override`.
 - `price`: UTC date, currency, price, source, method, content hash.
-- `change_log`: append-only record of every edit to events, tags, identifications, overrides, lot links, wallet method records, opening-allocation assignments and placeholder resolutions.
+- `change_log`: append-only record of every edit to events, tags, identifications, overrides, lot links and the whole-wallet FIFO setting.
 - `settings`: fee treatment, time zone, proxy, confirmation threshold, etc.
 
 ### 3. Import, discovery, clustering (`services/discovery.py`, `services/tagging.py`)
@@ -215,17 +213,16 @@ A pure, deterministic function of events, recomputed on every change. It can com
 - **Identification timing:**
   - Specific ID counts only if recorded **no later than the sale**. For exchanges, it goes to the broker; through 12/31/2026, the taxpayer's own books and records are also accepted (Notice 2025-7, extended by Notice 2026-20).
   - `identified_at` is stored for every lot choice: exchange sales **and exchange withdrawals**. **Warn only** (user decision, 2026-09-27): a choice made after the sale or withdrawal is flagged `late`. The app shows a warning that the IRS may apply the account's standing order, or FIFO if there is none, together with the result under that method. It notes the flag in the audit trail and on reports, but it **uses the user's choice** and does not block reports.
-  - **Automatic mode** (ADR 0021): an account can use its standing method (FIFO by default) automatically. The lot picker is then skipped, the lots used are shown, and nothing is ever `late`, except under a self-custody wallet method record made after the transaction it changes (ADR 0041). In manual mode, the late warning appears only when the chosen lots **differ** from what the standing method (or FIFO) would give.
+  - **Automatic mode** (ADR 0021): an account can use its standing method (FIFO by default) automatically. The lot picker is then skipped, the lots used are shown, and nothing is ever `late`. In manual mode, the late warning appears only when the chosen lots **differ** from what the standing method (or FIFO) would give.
   - For 2027+ sales the UI warns that the identification must be communicated to the broker.
-  - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet. How (ADR 0041, proposed): each arrival event (an acquisition, or a withdrawal's moved lots) names the outputs it arrived in (facts, change-logged); a transaction's roles take the identification order in a fixed order (disposals, gifts, deposits and transfers to another own account, then change), each role's outputs filled one after another in a canonical order (largest first, then script; identical outputs hold their lots as a group), so output position never decides; change takes no fee share; a sale's proceeds are what was received; a coin short of lots draws from the wallet's pool of lots that had entered it by then, and if that is short too gets a placeholder lot of unknown basis (blocking); the first computed result is kept and later changes shown; a wallet's method records have effective-from and recorded-at times.
+  - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet. How (ADR 0041, proposed): purchases and withdrawals into a wallet are linked to the output they arrived in; when a wallet transaction spends coins, what leaves the wallet takes their lots oldest first, then the fee, then the change, whatever the output order; lots on no coin form a pool that short coins draw from, and a coin still short gets a placeholder lot of unknown basis (blocking); shared (PayJoin/CoinJoin), multi-account and identical-output transactions aren't supported yet and block the report.
 - **Fees by role:**
   - acquisition fees add to basis
-  - disposal fees reduce proceeds; proceeds are net of costs, matching 1099-DA (exchange and custodial; self-custody network fees: see ADR 0041 below)
+  - disposal fees reduce proceeds; proceeds are net of costs, matching 1099-DA
   - network fees on self-transfers/deposits: the default carries the fee's basis over to the remaining sats; a setting instead treats it as a small disposal. The law here isn't settled, so this is a stated tax position (ADR 0009) shown on every report
-  - network fees on `spend` from an exchange or custodial account: they reduce proceeds. From a self-custody wallet, the fee sats are in the disposal at no proceeds and are not subtracted again (ADR 0041)
+  - network fees on `spend`: they reduce proceeds (exchange and custodial accounts). From a self-custody wallet the fee's sats are part of the disposal and are not subtracted again (ADR 0041); a gift's fee is a small disposal
   - BTC withdrawal fees charged by an exchange: handled as a small disposal (default)
   - A tx mixing owned and third-party outputs splits the fee by role
-  - Self-custody (ADR 0041, proposed): a transaction's fee splits across roles in proportion to each role's sats (remainder to the earlier role); a transfer's carried fee basis goes to the first destination output holding the same lot, then that lot's change, then the first arriving fragment; a gift's fee is a small disposal at FMV (owner choice); change never takes a fee share, and a consolidation's fee is handled as a self-transfer's; a sale's proceeds are the consideration received and a spend's the FMV of what was received (else of the BTC paid), the network fee not subtracted again
 - **Blocking conditions:** unknown basis or unconfirmed txs (below the confirmation threshold) block report generation. Late identifications only produce a warning. Each needs an explicit user resolution, which is recorded in the change log.
 - **Dates:** events use UTC timestamps. The tax date is converted to the user's configured time zone. Block timestamps can be off by about ±2h, so the user can override them with exchange-recorded times.
 - **Short/long-term:** held for more than one year counts as long-term.
@@ -243,7 +240,7 @@ A pure, deterministic function of events, recomputed on every change. It can com
 - **Ordinary income summary** per year: income events with their USD FMV and source.
 - **Year summary + holdings:** realized short/long-term gains per year; lots held as of any date, with basis, holding period and unrealized gain.
 - **Audit trail:** for each lot, the chain from acquisition event → every tx hop (txids) → identification → disposal. Exported as CSV and JSON.
-- Every report embeds the app version, rule-set version, settings, and a hash of its inputs. Under coin tracing (ADR 0041) the inputs include lot links, wallet method records, opening-allocation assignments, placeholder resolutions and identification rows, with their supersession state.
+- Every report embeds the app version, rule-set version, settings, and a hash of its inputs.
 - **CSV exports are type-aware:** numeric columns are written as numbers, and only free-text columns are escaped against formula injection.
 
 ## Repo layout
