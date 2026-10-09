@@ -357,18 +357,26 @@ def _fifo(held: list[Lot], sats: int) -> dict[str, int]:
     return picks
 
 
-def _choice(data: st.DataObject, id: str, account: str, on: date, held: list[Lot]) -> tuple[Disposal, bool]:
+def _choice(  # noqa: PLR0913 - the draw, the event's id, account and day, and both runs' lots
+    data: st.DataObject, id: str, account: str, on: date, held: list[Lot], *, replayed: list[Lot]
+) -> tuple[Disposal, bool, Disposal]:
     """A user's choice: newest lots first (so it often differs from FIFO), some partly, made up to two
-    days before or after the sale; and whether ADR 0021 makes it late."""
+    days before or after the sale; whether ADR 0021 makes it late, judged against the replay's lots
+    (`replayed`, #238); and the event as the replay has it: by FIFO if late, or if it names lots the
+    replay doesn't hold in full."""
     picks = [
         Pick(h.id, data.draw(st.integers(1, h.sats))) for h in reversed(held) if data.draw(st.booleans())
     ]
     picks = picks or [Pick(held[-1].id, held[-1].sats)]
     chosen = at(on) + timedelta(hours=data.draw(st.integers(-48, 48)))
     total = sum(p.sats for p in picks)
-    late = chosen > at(on) and {p.lot: p.sats for p in picks} != _fifo(held, total)
+    late = chosen > at(on) and {p.lot: p.sats for p in picks} != _fifo(replayed, total)
     amount = D(data.draw(st.integers(0, 10**9))).scaleb(-2)
-    return Disposal(id, account, on, at(on), "sell", total, amount, tuple(picks), chosen), late
+    real = Disposal(id, account, on, at(on), "sell", total, amount, tuple(picks), chosen)
+    room = {h.id: h.sats for h in replayed}
+    follows = chosen <= at(on) and all(room.get(p.lot, 0) >= p.sats for p in picks)
+    replay = real if follows else Disposal(id, account, on, at(on), "sell", total, amount)
+    return real, late, replay
 
 
 def _assert_conserved(events: list[Event], result: Result) -> None:
@@ -402,6 +410,7 @@ def _assert_conserved(events: list[Event], result: Result) -> None:
 @given(st.data())
 def test_any_history_conserves_sats_basis_and_proceeds(data: st.DataObject) -> None:
     events: list[Event] = []
+    replay: list[Event] = []  # the same history with the late choices disregarded (#238)
     expect_late: set[str] = set()
     start = date(2020, 1, 1).toordinal()
     for i in range(data.draw(st.integers(0, 20))):
@@ -410,8 +419,10 @@ def test_any_history_conserves_sats_basis_and_proceeds(data: st.DataObject) -> N
         kind = data.draw(st.sampled_from(["buy", "auto", "choice"]))
         held = [h for h in run(events).holdings if h.account == account]
         if kind == "choice" and held:
-            disposal, late = _choice(data, f"e{i}", account, on, held)
+            replayed = [h for h in run(replay).holdings if h.account == account]
+            disposal, late, as_replayed = _choice(data, f"e{i}", account, on, held, replayed=replayed)
             events.append(disposal)
+            replay.append(as_replayed)
             if late:
                 expect_late.add(disposal.id)
             continue
@@ -421,7 +432,15 @@ def test_any_history_conserves_sats_basis_and_proceeds(data: st.DataObject) -> N
             events.append(Acquisition(f"e{i}", account, on, "buy", sats, amount))
         else:
             events.append(Disposal(f"e{i}", account, on, at(on), "sell", sats, amount))
+        replay.append(events[-1])
     result = run(events)
     _assert_conserved(events, result)
     assert {late.disposal for late in result.late} == expect_late
+    # the warnings' figures are the replay's own allocations for that disposal (#238): no transfers
+    # here, so the replay never stops
+    replay_allocations = run(replay).allocations
+    assert result.replay_stopped is None
+    for warning in result.late:
+        assert warning.replayed
+        assert warning.standing == tuple(a for a in replay_allocations if a.disposal == warning.disposal)
     assert run(events) == result  # deterministic
