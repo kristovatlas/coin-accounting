@@ -3,12 +3,12 @@ fees by role (PLAN §7; ADRs 0008, 0009; T-501, T-502, T-508, T-509). Every figu
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from coinacct.tax.engine import (
@@ -147,12 +147,12 @@ def test_a_withdrawal_from_an_account_without_lots_uses_the_users_basis_and_date
     )
     result = run([wd])
     assert result.blocking == ()
-    assert result.holdings == (Lot("wd:unrecorded@wd", "w", date(2023, 5, 1), BTC, D("5000.00"), False),)
+    assert result.holdings == (Lot("wd@@unrecorded@wd", "w", date(2023, 5, 1), BTC, D("5000.00"), False),)
 
 
 def test_a_withdrawal_without_lots_or_a_basis_is_unknown_basis_t509() -> None:
     result = run([move("wd", "x", "w", BTC, kind="withdrawal")])
-    assert result.blocking == (UnknownBasis("wd:unrecorded"),)
+    assert result.blocking == (UnknownBasis("wd@@unrecorded"),)
     (lot,) = result.holdings
     assert (lot.account, lot.unknown_basis, lot.acquired) == ("w", True, DAY)
 
@@ -177,7 +177,7 @@ def test_a_created_lot_is_listed_and_named_by_the_engine() -> None:
     wd = move(
         "wd", "x", "w", BTC, kind="withdrawal", missing_basis=D("5000.00"), missing_acquired=date(2023, 5, 1)
     )
-    assert run([wd]).created == (Lot("wd:unrecorded", "x", date(2023, 5, 1), BTC, D("5000.00"), False),)
+    assert run([wd]).created == (Lot("wd@@unrecorded", "x", date(2023, 5, 1), BTC, D("5000.00"), False),)
 
 
 def test_a_deposit_the_wallet_cant_cover_is_missing_basis() -> None:
@@ -295,7 +295,11 @@ def test_any_mix_of_transfers_conserves_sats_and_basis(data: st.DataObject) -> N
             fee = data.draw(st.integers(0, sats - 1))
             value = D(data.draw(st.integers(0, 10**4))).scaleb(-2) if fee else None
             events.append(move(f"e{i}", src, dst, sats, on=on, kind=kind, fee_sats=fee, fee_value=value))
-    result = run(events, fee_treatment=treatment)
+    try:
+        result = run(events, fee_treatment=treatment)
+    except EngineError as e:  # the one documented refusal: dust of an unknown-basis lot under carry
+        assume("can't carry its basis" not in str(e))
+        raise
     bought = [e for e in events if isinstance(e, Acquisition)]
     created = sum(lot.sats for lot in result.created)  # lots created for withdrawals, ADR 0009
     sold = sum(a.sats for a in result.allocations)
@@ -310,10 +314,16 @@ def test_any_mix_of_transfers_conserves_sats_and_basis(data: st.DataObject) -> N
     assert run(events, fee_treatment=treatment) == result  # deterministic
 
 
-@pytest.mark.parametrize("bad", ["a@b", "x:unrecorded", "c:d"])
-def test_event_ids_cant_use_the_engines_separators(bad: str) -> None:
+@pytest.mark.parametrize("bad", ["a@b", "x@@unrecorded", "@"])
+def test_event_ids_cant_use_the_engines_separator(bad: str) -> None:
     with pytest.raises(EngineError, match="can't contain"):
         run([Acquisition(bad, "w", DAY, "buy", 1, D("1.00"))])
+
+
+def test_outpoint_style_ids_are_allowed() -> None:
+    # Callers may name events by outpoint (txid:vout): only "@" is the engine's.
+    (lot,) = run([Acquisition("ab" * 32 + ":0", "w", DAY, "buy", 1, D("1.00"))]).holdings
+    assert lot.id.endswith(":0")
 
 
 def test_a_fee_that_is_disposed_needs_its_value() -> None:
@@ -419,12 +429,88 @@ def test_a_late_deposits_warning_under_carry_shows_the_fee_basis_arriving() -> N
     assert late.standing == (Moved("d", "b1", "b1@d", "x", 8, D("1.00"), date(2024, 1, 1), 2),)
 
 
-def test_a_late_alternatives_all_fee_dust_part_is_left_out() -> None:
-    # FIFO would take three 1-sat lots with a 2-sat fee: two parts are all fee, so only one moves.
+def test_a_late_alternative_carries_dust_basis_as_the_real_run_would() -> None:
+    # FIFO would take three 1-sat lots (1.00 each) with a 2-sat fee: b1 and b2 are all fee, and their
+    # basis goes to b3's sat, exactly as when the transfer itself runs.
     events: list[Event] = [
         Acquisition(f"b{i}", "w", date(2024, 1, i), "buy", 1, D("1.00")) for i in (1, 2, 3)
     ]
     events.append(Acquisition("b9", "w", date(2024, 2, 1), "buy", 3, D("9.00")))
     late_choice = move("d", "w", "x", 3, fee_sats=2, picks=(Pick("b9", 3),), identified_at=at(DAY, 18))
     (late,) = run([*events, late_choice]).late
-    assert [(m.lot, m.sats) for m in late.standing if isinstance(m, Moved)] == [("b3", 1)]
+    assert late.standing == (Moved("d", "b3", "b3@d", "x", 1, D("3.00"), date(2024, 1, 3), 2, ("b1", "b2")),)
+    real = run([*events, move("d", "w", "x", 3, fee_sats=2)])  # FIFO itself: the same figures
+    assert real.moves == late.standing
+
+
+def test_fee_remainders_go_one_sat_per_pick_by_largest_remainder() -> None:
+    # 100 equal 10-sat lots, a 199-sat fee: 1.99 each, so 1 by floor and the 99 left one each, in FIFO
+    # order (equal remainders): 99 lots pay 2 sats and the last pays 1, never 100 on one lot.
+    events: list[Event] = [
+        Acquisition(f"b{i:03}", "w", date(2024, 1, 1) + timedelta(days=i), "buy", 10, D("1.00"))
+        for i in range(100)
+    ]
+    result = run([*events, move("d", "w", "x", 1000, fee_sats=199)])
+    assert [m.carried_fee for m in result.moves] == [2] * 99 + [1]
+
+
+def test_a_late_choice_of_fifos_lots_in_another_order_gets_the_same_fee_roles() -> None:
+    # Two 2-sat lots and a 1-sat fee: the fee falls on the same lot whichever order the
+    # user names them in, so a late choice of FIFO's own lots needs no warning.
+    events: list[Event] = [
+        Acquisition("e1", "x", date(2024, 1, 1), "buy", 2, D("2.00")),
+        Acquisition("e2", "x", date(2024, 2, 1), "buy", 2, D("4.00")),
+    ]
+    fifo = run([*events, move("wd", "x", "w", 4, kind="withdrawal", fee_sats=1, fee_value=D("1.00"))])
+    picked = move(
+        "wd",
+        "x",
+        "w",
+        4,
+        kind="withdrawal",
+        fee_sats=1,
+        fee_value=D("1.00"),
+        picks=(Pick("e2", 2), Pick("e1", 2)),
+        identified_at=at(DAY, 18),
+    )
+    result = run([*events, picked])
+    assert result.late == ()
+    assert result.allocations == fifo.allocations and result.moves == fifo.moves
+
+
+def test_a_second_withdrawal_from_an_account_without_recorded_buys_also_takes_a_basis_adr0009() -> None:
+    first = move(
+        "wd1", "x", "w", 10, kind="withdrawal", missing_basis=D("1.00"), missing_acquired=date(2023, 1, 1)
+    )
+    second = move(
+        "wd2",
+        "x",
+        "w",
+        20,
+        kind="withdrawal",
+        on=date(2025, 2, 1),
+        missing_basis=D("3.00"),
+        missing_acquired=date(2023, 6, 1),
+    )
+    result = run([first, second])
+    assert [lot.id for lot in result.created] == ["wd1@@unrecorded", "wd2@@unrecorded"]
+    assert result.blocking == ()
+
+
+def test_a_carried_fees_value_plays_no_part() -> None:
+    b = Acquisition("b", "w", date(2024, 1, 1), "buy", 5, D("5.00"))
+    priced = run([b, move("d", "w", "x", 10, fee_sats=8, fee_value=D("1.00"))])  # carry, short
+    unpriced = run([b, move("d", "w", "x", 10, fee_sats=8)])
+    assert priced == unpriced
+    assert priced.blocking == (MissingLots("d", 5, D("0.00")),)
+
+
+def test_dust_of_a_gift_lot_cant_carry_its_basis_into_another_lot() -> None:
+    gift = Acquisition("g", "w", date(2024, 1, 1), "gift_in", 1, D("10.00"), D("5.00"), date(2020, 1, 1))
+    events: list[Event] = [gift, Acquisition("b", "w", date(2024, 1, 2), "buy", 1, D("1.00"))]
+    with pytest.raises(EngineError, match="can't carry its basis"):
+        run([*events, move("d", "w", "x", 2, fee_sats=1)])
+    # Under the disposal treatment the gift's sat is simply the fee disposal, with its dual basis.
+    result = run([*events, move("d", "w", "x", 2, fee_sats=1, fee_value=D("0.50"))], fee_treatment="dispose")
+    (fee,) = result.allocations
+    assert (fee.lot, fee.rule, fee.basis) == ("g", "fmv_at_gift", D("5.00"))
