@@ -9,7 +9,14 @@ from decimal import Context, Decimal, Inexact, Rounded, localcontext
 import pytest
 
 from coinacct.prices import DailyPrice, PriceError, csv_import
-from coinacct.prices.csv_import import HEADER, parse
+from coinacct.prices.csv_import import HEADER
+from coinacct.prices.fx import to_display
+
+TODAY = date(2026, 10, 8)  # the caller's UTC date
+
+
+def parse(data: bytes, today: date = TODAY) -> dict[str, list[DailyPrice]]:
+    return csv_import.parse(data, today)
 
 
 def row(day: str, currency: str, price: str) -> DailyPrice:
@@ -54,12 +61,20 @@ def test_the_prices_are_exact_whatever_the_callers_decimal_context() -> None:
         (f"{HEADER}\n2024-01-02,USD, 1\n", "line 2: the price must be a plain amount"),
         (f"{HEADER}\n2024-01-02,USD,1.\n", "line 2: the price must be a plain amount"),
         (f"{HEADER}\n2024-01-02,USD,1000000000000000\n", "line 2: the price must be a plain amount"),
-        (f"{HEADER}\n2024-01-02,USD,0\n", "line 2: 2024-01-02: a price must be a positive whole number"),
-        (f"{HEADER}\n2024-01-02,USD,0.00\n", "line 2: 2024-01-02: a price must be a positive"),
+        (f"{HEADER}\n2024-01-02,USD,0\n", "line 2: the price must be more than zero"),
+        (f"{HEADER}\n2024-01-02,USD,0.00\n", "line 2: the price must be more than zero"),
+        (f"{HEADER}\n2024-01-02,USD,000.0\n", "line 2: the price must be more than zero"),
+        (f"{HEADER}\n2024-01-02,USD,1,2,3,4\n", "line 2: expected date,currency,price"),
+        (f"{HEADER}\n2008-12-31,USD,1\n", "line 2: 2008-12-31 is not a past day from 2009-01-03 on"),
+        (f"{HEADER}\n0024-01-02,USD,1\n", "line 2: 0024-01-02 is not a past day"),  # a typo in the year
+        (f"{HEADER}\n2026-10-08,USD,1\n", "line 2: 2026-10-08 is not a past day"),  # today isn't over
+        (f"{HEADER}\n2204-01-02,USD,1\n", "line 2: 2204-01-02 is not a past day"),
         (f"{HEADER}\n2024-01-02,USD,1\n2024-01-02,USD,2\n", "line 3: USD on 2024-01-02 is priced twice"),
         (f"{HEADER}\n2024-01-02,USD,1\r\n2024-01-03,USD,2\r", "carriage return that doesn't end a line"),
         (f"{HEADER}\n2024-01-02,USD,1\t\n", "isn't printable ASCII"),
         (f"{HEADER}\n2024-01-02,USD,1\x0c\n", "isn't printable ASCII"),
+        (f"{HEADER}\n2024-01-02,USD,1\x1f\n", "isn't printable ASCII"),  # the last control byte
+        (f"{HEADER}\n2024-01-02,USD,1\x7f\n", "isn't printable ASCII"),  # DEL, just past the range
         (f"{HEADER}\n2024-01-02,USD,{chr(0x661)}\n", "isn't printable ASCII"),
         (f"{chr(0xFEFF)}{HEADER}\n", "isn't printable ASCII"),  # a byte-order mark: say it, don't guess
         (HEADER, "the last line has no line break"),
@@ -95,6 +110,34 @@ def test_a_file_exactly_at_the_limits_is_accepted(monkeypatch: pytest.MonkeyPatc
 def test_a_bad_row_after_good_ones_still_refuses_the_whole_file() -> None:
     with pytest.raises(PriceError, match="line 4"):
         parse(f"{HEADER}\n2024-01-01,USD,1\n2024-01-02,USD,2\njunk\n".encode())
+
+
+def test_the_first_and_last_allowed_days_and_the_largest_price_are_accepted() -> None:
+    body = (
+        f"{HEADER}\n2009-01-03,USD,0.01\n2026-10-07,USD,999999999999999.99\n2026-10-06,USD,999999999999999\n"
+    )
+    assert parse(body.encode()) == {
+        "USD": [
+            row("2009-01-03", "USD", "0.01"),
+            row("2026-10-06", "USD", "999999999999999.00"),
+            row("2026-10-07", "USD", "999999999999999.99"),
+        ]
+    }
+
+
+def test_the_currencies_come_back_in_alphabetical_order() -> None:
+    got = parse(f"{HEADER}\n2024-01-02,USD,1\n2024-01-02,GBP,1\n2024-01-02,EUR,1\n".encode())
+    assert list(got) == ["EUR", "GBP", "USD"]
+
+
+def test_a_display_price_converted_from_an_import_stays_identifiable() -> None:
+    (usd,) = parse(f"{HEADER}\n2024-01-02,USD,2\n".encode())["USD"]
+    shown = to_display([usd], {date(2024, 1, 2): {"USD": 2_000_000, "GBP": 1_000_000}})
+    assert [(p.currency, p.price, p.method) for p in shown] == [
+        ("EUR", Decimal("1.00"), "fx"),
+        ("GBP", Decimal("1.00"), "fx"),
+    ]
+    assert all(p.source.endswith("*" + csv_import.SOURCE) for p in shown)
 
 
 def test_imported_prices_are_marked_as_imported_for_every_currency() -> None:

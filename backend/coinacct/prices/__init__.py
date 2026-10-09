@@ -41,8 +41,9 @@ class PriceError(ValueError):
 class DailyPrice:
     """The price of one BTC in `currency` on UTC day `day`, in whole cents, and how it was made. Only a
     positive, whole number of cents up to MAX_PRICE can be built, so a zero or rounded-away price never
-    reaches a tax figure, whatever path made it (T-303). A USD price is always a market price: "fx"
-    is only for display currencies (ADR 0007: tax figures are USD)."""
+    reaches a tax figure, whatever path made it (T-303). A USD price is a market price or the user's
+    own import ("import"), never a conversion: "fx" is only for display currencies (ADR 0007: tax
+    figures are USD)."""
 
     day: date
     currency: str

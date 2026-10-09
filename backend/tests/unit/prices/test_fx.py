@@ -78,9 +78,9 @@ def test_a_display_price_that_rounds_below_a_cent_is_a_gap_like_a_missing_rate()
     assert to_display([usd(date(2024, 1, 2), "0.01")], rates) == [shown(date(2024, 1, 2), "GBP", "0.03")]
 
 
-def test_only_usd_market_prices_are_converted() -> None:
+def test_only_usd_prices_are_converted() -> None:
     eur = DailyPrice(date(2024, 1, 2), "EUR", Decimal("1.00"), "typical", "bitstamp")
-    with pytest.raises(PriceError, match="expected a USD market price"):
+    with pytest.raises(PriceError, match="expected a USD price, got EUR"):
         to_display([eur], {})
 
 
