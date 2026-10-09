@@ -6,6 +6,6 @@ It produces estimates and records, not tax advice.
 
 ## Price data
 
-USD prices are to come from [Coin Metrics](https://coinmetrics.io/)' daily reference rate ([ADR 0039](docs/adr/0039-coin-metrics-usd-reference-rate.md)). Until that downloader lands, USD is Bitstamp's daily typical price, (high + low + close) ÷ 3. Coin Metrics' community data is licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/): it may be used **only for non-commercial purposes**, with attribution. Using this app commercially needs a different price source or a licence from Coin Metrics.
+USD prices come from [Coin Metrics](https://coinmetrics.io/)' daily reference rate, `PriceUSD` ([ADR 0039](docs/adr/0039-coin-metrics-usd-reference-rate.md)). Coin Metrics' community data is licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/): it may be used **only for non-commercial purposes**, with attribution. Using this app commercially needs a different price source or a licence from Coin Metrics.
 
-Once it does, Bitstamp's daily prices become the cross-check. The European Central Bank's reference rates convert prices into other currencies for display.
+Bitstamp's daily typical price, (high + low + close) ÷ 3, is the cross-check, and fills any day the rate lacks. The European Central Bank's reference rates convert prices into other currencies for display.
