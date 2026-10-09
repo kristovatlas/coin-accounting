@@ -12,12 +12,18 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from typing import Final
 
 from coinacct.prices import DailyPrice, Gap, Mismatch, Outlier, check, combine, fetch, mismatches
 from coinacct.prices.bitstamp import DUMP_SOURCE, OHLC_SOURCE
 from coinacct.prices.fetch import Cancelled, Proxy
 from coinacct.prices.fx import DISPLAY, ECB_SOURCE, to_display
+
+# The trade dump is an archive a third party keeps up. If its last complete day is more than a week
+# before the refresh's, it has likely stopped, and the recent USD days rest on Bitstamp's typical price
+# alone, with no second source to compare (ADR 0007's source check, #246). A review flag, not a refusal.
+STALE_DUMP: Final = timedelta(days=7)
 
 
 @dataclass(frozen=True)
@@ -25,7 +31,9 @@ class Refreshed:
     """One refresh's result. `usd` is the tax series; `display` holds each display currency's series,
     Bitstamp's own pair where it traded and the ECB conversion of USD elsewhere. `hashes` maps each
     source to the SHA-256 of what was fetched (T-303). `mismatches` are the USD days on which the
-    trade VWAP and Bitstamp's typical price disagree: review flags, like gaps and outliers."""
+    trade VWAP and Bitstamp's typical price disagree: review flags, like gaps and outliers.
+    `dump_through` is the trade dump's last priced day (None if it priced none), and `dump_stale` says
+    it ends more than STALE_DUMP before the refresh's first incomplete day."""
 
     usd: list[DailyPrice]
     display: dict[str, list[DailyPrice]]
@@ -33,6 +41,8 @@ class Refreshed:
     outliers: dict[str, list[Outlier]]
     mismatches: list[Mismatch]
     hashes: dict[str, str]
+    dump_through: date | None
+    dump_stale: bool
 
 
 def refresh(
@@ -66,7 +76,9 @@ def _refresh(proxy: Proxy | None, stop: Callable[[], bool], complete_before: dat
     outliers: dict[str, list[Outlier]] = {}
     for currency, series in (("USD", usd), *display.items()):
         gaps[currency], outliers[currency] = check(series)
-    return Refreshed(usd, display, gaps, outliers, mismatches(vwap, typical["USD"]), hashes)
+    through = vwap[-1].day if vwap else None
+    stale = through is None or complete_before - through > STALE_DUMP
+    return Refreshed(usd, display, gaps, outliers, mismatches(vwap, typical["USD"]), hashes, through, stale)
 
 
 def _prefer(market: Sequence[DailyPrice], converted: Sequence[DailyPrice]) -> list[DailyPrice]:
