@@ -181,10 +181,11 @@ The doxx set of a coin is the set of **identity-knowing entities** (`knows_ident
 - **Sell planner:** lists UTXOs by doxx set, with basis, holding period and certainty.
 
 ### 6. Prices (`prices/`)
-- **USD:** bulk-download Bitstamp history and compute a **daily volume-weighted average price per UTC day**.
-  - Planned source: the full bitstampUSD trade dump (bitcoincharts archive) for history, plus Bitstamp's paginated daily OHLCV for recent days.
-  - Where there is no trade-level data, fall back to the daily typical price, (H+L+C)/3. The `method` column records which was used.
-  - The M5 step checks that these sources are still up.
+- **USD:** each UTC day's price is **Coin Metrics' daily reference rate** (`PriceUSD`, ADR 0039): a volume-weighted price across vetted exchanges, published for every day since July 2010 and downloaded in bulk from its free community API.
+  - Bitstamp's paginated daily OHLCV is the second source. Its typical price, (H+L+C)/3, is compared with the reference rate every day (a review flag), and fills any day the rate lacks. The `method` column records which was used.
+  - The bitcoincharts trade archive is no longer used: it was unreachable in October 2026 (ADR 0039).
+  - The refresh flags a reference rate that has stopped updating, and M5 checks that every source is still reachable.
+  - Coin Metrics' data is CC BY-NC 4.0: non-commercial use only, and the app credits Coin Metrics wherever it shows or exports these prices.
 - **Other fiat (display only):** Bitstamp EUR/GBP pairs, or USD × ECB historical FX. **All supported pairs are fetched every time**, so the download doesn't reveal the user's currency or residency.
 - **Requests:** made only when the user clicks refresh. They don't depend on user records (events, addresses, tags); only the start of the incremental range depends on what is already cached. An httpx client with an optional SOCKS5/Tor proxy (remote DNS) sends a common browser User-Agent and nothing else.
 - **Overrides:** the user can override the valuation per event, e.g. an exchange fill price, the W-2/payroll value for salary, or a timestamped rate for income on a volatile day.
@@ -371,7 +372,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
    What M2 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues #184, #186, #188, #190, #192, #194, #196, #198 and #200.
 4. **M3 graph UI:** backward/forward expansion, the tagging side panel, the mixing flag.
 5. **M4 clustering suggestions + doxx propagation:** certain and inferred links, plus the sell planner view.
-6. **M5 prices:** bulk USD VWAP, display FX for all pairs, proxy support.
+6. **M5 prices:** USD from Coin Metrics' daily reference rate with Bitstamp as the cross-check (ADR 0039), display FX for all pairs, proxy support.
 7. **M6 lot engine:**
    - events, per-account basis
    - identification timing
@@ -383,7 +384,6 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
 9. Later:
    - exchange CSV import
    - in-app lock (see threat model open questions)
-   - a second price source for cross-checking (needs an ADR, since it adds an outbound flow)
    - lost/stolen and airdrop events
    - **an app-managed Bitcoin Core node,** if the app ever starts the node itself. Today the user runs it, and the app starts no child processes (architecture §2 and §3). So this needs an ADR, an architecture update (§2 `subprocess`, §3 child processes, §5 the node's P2P traffic becoming app-started, §6 the datadir no longer user-managed) and a threat-model update (T-201–T-203, T-209). Requirement (owner, 2026-10-06): the user chooses where the node keeps its data, `-datadir`, and optionally `-blocksdir` for the block files. The full chain doesn't fit on many laptop disks, and pruning isn't an option, because the app needs an unpruned node with its indexes. `-blocksdir` moves only the block files: the chainstate and the indexes stay under `-datadir`, so the app checks free space on both locations before starting the node, and checks their file systems (#111). It never silently defaults to the home directory. The ADR also decides whether the app warns when the datadir isn't on an encrypted volume (T-209: `debug.log` and the RPC credentials live there).
    - **hard-fork coins (next after v1):** e.g. BCH from BTC, BSV from BCH.
