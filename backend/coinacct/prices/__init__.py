@@ -1,4 +1,4 @@
-"""Fiat prices: daily values, how each was made, and sanity checks (PLAN §6, ADR 0007; THREAT_MODEL T-303,
+"""Fiat prices: daily values, how each was made, and sanity checks (PLAN §6, ADR 0039; THREAT_MODEL T-303,
 T-304).
 
 Pure: values in, values out. Fetching (F3) and storage live elsewhere; nothing here uses the network,
@@ -15,11 +15,12 @@ from decimal import Context, Decimal, Inexact, InvalidOperation, Overflow, local
 from itertools import pairwise
 from typing import Final, Literal
 
-# ADR 0007: the trade VWAP; (H+L+C)/3 where there are no trades; for display, USD at the ECB rate; or
-# a value the user imported from a CSV (the fallback when a source disappears, T-304)
+# ADR 0039: a volume-weighted price ("vwap", from no source now; Coin Metrics' reference rate gets its
+# own method with its downloader); (H+L+C)/3; for display, USD at the ECB rate; or a value the user
+# imported from a CSV (the fallback when a source disappears, T-304)
 Method = Literal["vwap", "typical", "fx", "import"]
 METHODS: Final = ("vwap", "typical", "fx", "import")
-CURRENCIES: Final = ("USD", "EUR", "GBP")  # USD for tax figures; the others for display (ADR 0007)
+CURRENCIES: Final = ("USD", "EUR", "GBP")  # USD for tax figures; the others for display (ADR 0039)
 CENT: Final = Decimal("0.01")
 # Our own context for the little arithmetic here, whatever the caller's: exact, or an error.
 _EXACT: Final = Context(prec=60, traps=[Inexact, InvalidOperation, Overflow])
@@ -35,6 +36,8 @@ OUTLIER_FACTOR: Final = Decimal("1.5")
 # day's extremes, so the two part on a volatile or thin day, but rarely by more than a quarter, so a
 # broken or changed source is the likelier cause. Flagged for review, never refused (T-303, T-304).
 # It catches gross errors and format changes, not a subtle shift of a few percent (#262).
+# (Reasoned for a whole-day VWAP; ADR 0039's close-time reference rate may sit further from the typical
+# price on a volatile day, so the downloader's PR reviews the threshold, #262.)
 MISMATCH_FACTOR: Final = Decimal("1.25")
 
 
@@ -48,7 +51,7 @@ class DailyPrice:
     """The price of one BTC in `currency` on UTC day `day`, in whole cents, and how it was made. Only a
     positive, whole number of cents up to MAX_PRICE can be built, so a zero or rounded-away price never
     reaches a tax figure, whatever path made it (T-303). A USD price is a market price or the user's
-    own import ("import"), never a conversion: "fx" is only for display currencies (ADR 0007: tax
+    own import ("import"), never a conversion: "fx" is only for display currencies (ADR 0039: tax
     figures are USD)."""
 
     day: date
@@ -95,8 +98,10 @@ class Outlier:
 
 @dataclass(frozen=True)
 class Mismatch:
-    """A day on which the trade VWAP and the typical price differ by more than MISMATCH_FACTOR. The
-    VWAP is the one used (`combine`); the typical price is the second opinion (T-303)."""
+    """A day on which the main daily series and Bitstamp's typical price differ by more than
+    MISMATCH_FACTOR. The main series is the one used (`combine`); the typical price is the second
+    opinion (T-303). Its field is still named for the trade VWAP that was the main series until ADR
+    0039; the Coin Metrics downloader adapts it and `_pair` to its `reference` rows."""
 
     day: date
     vwap: Decimal
@@ -109,7 +114,8 @@ def content_hash(data: bytes) -> str:
 
 
 def combine(vwap: Iterable[DailyPrice], typical: Iterable[DailyPrice]) -> list[DailyPrice]:
-    """One series by day: the trade VWAP where there is one, otherwise the typical price (ADR 0007).
+    """One series by day: the main daily series where it has a day, otherwise the typical price. The
+    main series was the trade VWAP until ADR 0039; it is the reference rate once that downloader lands.
     Both series must be in the same currency, and neither may price a day twice."""
     best, fill = _pair(vwap, typical)
     for p in fill.values():

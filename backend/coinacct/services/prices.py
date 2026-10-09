@@ -1,4 +1,4 @@
-"""A price refresh: every source downloaded, parsed, combined and checked (PLAN §6, ADR 0007; THREAT_MODEL
+"""A price refresh: every source downloaded, parsed and checked (PLAN §6, ADR 0039; THREAT_MODEL
 T-301, T-303, T-304).
 
 The user starts it (manual trigger); it runs as a job on the job worker (architecture §3). Every
@@ -15,34 +15,36 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Final
 
-from coinacct.prices import DailyPrice, Gap, Mismatch, Outlier, check, combine, fetch, mismatches
-from coinacct.prices.bitstamp import DUMP_SOURCE, OHLC_SOURCE
+from coinacct.prices import DailyPrice, Gap, Outlier, check, fetch
+from coinacct.prices.bitstamp import OHLC_SOURCE
 from coinacct.prices.fetch import Cancelled, Proxy
 from coinacct.prices.fx import DISPLAY, ECB_SOURCE, to_display
 
-# The trade dump is an archive a third party keeps up. If its last complete day is more than a week
-# before the refresh's, it has likely stopped, and the recent USD days rest on Bitstamp's typical price
-# alone, with no second source to compare (ADR 0007's source check, #246). A review flag, not a refusal.
-STALE_DUMP: Final = timedelta(days=7)
+# The USD series' last priced day may be at most this far before the refresh's first incomplete day;
+# further back, or no USD day at all, is flagged stale: a source that stopped early, or came back
+# empty, must not pass unnoticed (T-303, T-304). A review flag, not a refusal. This is the interim rule
+# (ADR 0039): once the reference rate lands, the flag is computed on that series before Bitstamp's
+# price fills its gaps, so a stopped rate can't hide behind the fill.
+STALE_USD: Final = timedelta(days=7)
 
 
 @dataclass(frozen=True)
 class Refreshed:
     """One refresh's result. `usd` is the tax series; `display` holds each display currency's series,
     Bitstamp's own pair where it traded and the ECB conversion of USD elsewhere. `hashes` maps each
-    source to the SHA-256 of what was fetched (T-303). `mismatches` are the USD days on which the
-    trade VWAP and Bitstamp's typical price disagree: review flags, like gaps and outliers.
-    `dump_through` is the trade dump's last priced day (None if it priced none), and `dump_stale` says
-    it ends more than STALE_DUMP before the refresh's first incomplete day."""
+    source to the SHA-256 of what was fetched (T-303). Until the Coin Metrics downloader lands (ADR
+    0039), the USD series is Bitstamp's typical price alone: the reference rate and its cross-check
+    against Bitstamp (`prices.mismatches`) come with it. `usd_through` is the USD series' last priced
+    day (None if there is none), and `usd_stale` says it is more than STALE_USD before the refresh's
+    first incomplete day."""
 
     usd: list[DailyPrice]
     display: dict[str, list[DailyPrice]]
     gaps: dict[str, list[Gap]]
     outliers: dict[str, list[Outlier]]
-    mismatches: list[Mismatch]
     hashes: dict[str, str]
-    dump_through: date | None
-    dump_stale: bool
+    usd_through: date | None
+    usd_stale: bool
 
 
 def refresh(
@@ -61,24 +63,23 @@ def refresh(
 
 
 def _refresh(proxy: Proxy | None, stop: Callable[[], bool], complete_before: date) -> Refreshed:
-    vwap, dump_hash = fetch.download_dump(complete_before, proxy, stop)
     typical: dict[str, list[DailyPrice]] = {}
-    hashes = {DUMP_SOURCE: dump_hash}
+    hashes: dict[str, str] = {}
     for currency in ("USD", *DISPLAY):
         typical[currency], hashes[f"{OHLC_SOURCE}:btc{currency.lower()}"] = fetch.download_ohlc(
             currency, complete_before, proxy, stop
         )
     rates, hashes[ECB_SOURCE] = fetch.download_ecb(proxy, stop)
-    usd = combine(vwap, typical["USD"])
+    usd = typical["USD"]
     converted = to_display(usd, rates)
     display = {c: _prefer(typical[c], [p for p in converted if p.currency == c]) for c in DISPLAY}
     gaps: dict[str, list[Gap]] = {}
     outliers: dict[str, list[Outlier]] = {}
     for currency, series in (("USD", usd), *display.items()):
         gaps[currency], outliers[currency] = check(series)
-    through = vwap[-1].day if vwap else None
-    stale = through is None or complete_before - through > STALE_DUMP
-    return Refreshed(usd, display, gaps, outliers, mismatches(vwap, typical["USD"]), hashes, through, stale)
+    through = usd[-1].day if usd else None
+    stale = through is None or complete_before - through > STALE_USD
+    return Refreshed(usd, display, gaps, outliers, hashes, through, stale)
 
 
 def _prefer(market: Sequence[DailyPrice], converted: Sequence[DailyPrice]) -> list[DailyPrice]:

@@ -1,9 +1,8 @@
-"""A price refresh: every source downloaded, parsed, combined and checked (PLAN §6, ADR 0007; THREAT_MODEL
+"""A price refresh: every source downloaded, parsed and checked (PLAN §6, ADR 0039; THREAT_MODEL
 T-301, T-303, T-304). The downloads are fakes in memory: no test reaches the network."""
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import io
 import json
@@ -44,15 +43,9 @@ def ecb(*rows: str) -> bytes:
     return out.getvalue()
 
 
-DUMP = gzip.compress(
-    f"{AUG18},10,1\n{AUG18 + 60},12,1\n{AUG18 + DAY},20,1\n{AUG18 + 3 * DAY},40,1\n".encode()
-)  # VWAPs: Aug 18 = 11.00, Aug 19 = 20.00; Aug 21 is the dump's last day, dropped as partial
-
-
 @pytest.fixture
 def sources(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, bytes]]:
     files = {
-        fetch.DUMP_URL: DUMP,
         fetch.OHLC_URL.format(currency="usd", start=AUG18): ohlc(
             "BTC/USD", candle(0, "99"), candle(1, "99"), candle(2, "30"), candle(3, "33")
         ),
@@ -82,14 +75,39 @@ def usd(day: int, price: str, method: str, source: str) -> DailyPrice:
     return DailyPrice(date(2011, 8, 18 + day), "USD", Decimal(price), method, source)  # type: ignore[arg-type]
 
 
-def test_a_refresh_combines_the_trade_average_with_the_typical_price(sources: dict[str, Any]) -> None:
-    got = run()
-    assert got.usd == [
-        usd(0, "11.00", "vwap", "bitcoincharts:bitstampUSD"),  # (10 + 12) / 2: VWAP wins the day
-        usd(1, "20.00", "vwap", "bitcoincharts:bitstampUSD"),
-        usd(2, "30.00", "typical", "bitstamp:ohlc:btcusd"),  # no trades in the dump: the typical price
-        usd(3, "33.00", "typical", "bitstamp:ohlc:btcusd"),  # the dump's partial last day is dropped
+def test_until_the_reference_rate_lands_usd_is_bitstamps_typical_price(sources: dict[str, Any]) -> None:
+    # ADR 0039: the bitcoincharts dump is gone; the Coin Metrics rate comes with its downloader
+    assert run().usd == [
+        usd(0, "99.00", "typical", "bitstamp:ohlc:btcusd"),
+        usd(1, "99.00", "typical", "bitstamp:ohlc:btcusd"),
+        usd(2, "30.00", "typical", "bitstamp:ohlc:btcusd"),
+        usd(3, "33.00", "typical", "bitstamp:ohlc:btcusd"),
     ]
+
+
+def test_a_current_usd_series_is_not_stale(sources: dict[str, Any]) -> None:
+    got = run()  # the last USD day is Aug 21; the refresh's first incomplete day is Aug 22
+    assert (got.usd_through, got.usd_stale) == (date(2011, 8, 21), False)
+
+
+@pytest.mark.parametrize(("today", "stale"), [(date(2011, 8, 28), False), (date(2011, 8, 29), True)])
+def test_a_usd_series_that_stops_early_is_flagged_stale(
+    sources: dict[str, Any], today: date, stale: bool
+) -> None:
+    # the last USD day stays Aug 21: 7 days before the 28th is fine, 8 before the 29th is stale
+    got = service.refresh(None, threading.Event(), today=lambda: today)
+    assert got is not None and (got.usd_through, got.usd_stale) == (date(2011, 8, 21), stale)
+
+
+def test_an_empty_usd_series_is_flagged_stale(sources: dict[str, Any]) -> None:
+    sources[fetch.OHLC_URL.format(currency="usd", start=AUG18)] = ohlc("BTC/USD")  # every page empty
+    got = run()
+    assert (got.usd, got.usd_through, got.usd_stale) == ([], None, True)
+
+
+def test_the_retired_archive_is_no_longer_an_allowed_host() -> None:
+    assert "api.bitcoincharts.com" not in fetch.HOSTS
+    assert fetch.HOSTS == {"www.bitstamp.net", "www.ecb.europa.eu"}
 
 
 def test_display_prefers_the_pairs_own_market_then_the_ecb_conversion(sources: dict[str, Any]) -> None:
@@ -97,7 +115,7 @@ def test_display_prefers_the_pairs_own_market_then_the_ecb_conversion(sources: d
     # Aug 19: Bitstamp's BTC/EUR traded; the 18th from USD / 2 (ECB); the 20th and 21st use the
     # 19th's rate, the latest within a week
     assert eur == {
-        18: (Decimal("5.50"), "fx"),
+        18: (Decimal("49.50"), "fx"),
         19: (Decimal("18.00"), "typical"),
         20: (Decimal("15.00"), "fx"),
         21: (Decimal("16.50"), "fx"),
@@ -108,7 +126,6 @@ def test_display_prefers_the_pairs_own_market_then_the_ecb_conversion(sources: d
 def test_every_source_and_pair_is_fetched_the_same_way_every_time(sources: dict[str, Any]) -> None:
     run()
     assert sources["__asked__"] == [
-        fetch.DUMP_URL,
         fetch.OHLC_URL.format(currency="usd", start=AUG18),
         fetch.OHLC_URL.format(currency="eur", start=AUG18),
         fetch.OHLC_URL.format(currency="gbp", start=AUG18),
@@ -118,7 +135,12 @@ def test_every_source_and_pair_is_fetched_the_same_way_every_time(sources: dict[
 
 def test_each_source_has_its_content_hash(sources: dict[str, Any]) -> None:
     hashes = run().hashes
-    assert hashes["bitcoincharts:bitstampUSD"] == hashlib.sha256(DUMP).hexdigest()
+    assert set(hashes) == {
+        "bitstamp:ohlc:btcusd",
+        "bitstamp:ohlc:btceur",
+        "bitstamp:ohlc:btcgbp",
+        "ecb:eurofxref-hist",
+    }
     assert hashes["ecb:eurofxref-hist"] == hashlib.sha256(sources[fetch.ECB_URL]).hexdigest()
     page = sources[fetch.OHLC_URL.format(currency="usd", start=AUG18)]
     framed = f"{AUG18}:{len(page)}\n".encode() + page  # each page framed by its start and length
@@ -128,40 +150,9 @@ def test_each_source_has_its_content_hash(sources: dict[str, Any]) -> None:
 def test_gaps_and_outliers_are_reported_per_series(sources: dict[str, Any]) -> None:
     got = run()
     assert got.gaps == {"USD": [], "EUR": [], "GBP": []}
-    # USD 11 -> 20 is a rise over half; EUR 5.50 -> 18.00 too, but 18.00 -> 15.00 falls only a sixth
-    assert [o.day.day for o in got.outliers["USD"]] == [19]
+    # USD 99 -> 30 falls by more than a third; EUR 49.50 -> 18.00 too, but 18.00 -> 15.00 only a sixth
+    assert [o.day.day for o in got.outliers["USD"]] == [20]
     assert [o.day.day for o in got.outliers["EUR"]] == [19]
-
-
-def test_a_current_dump_is_not_stale(sources: dict[str, Any]) -> None:
-    got = run()  # the dump's last priced day is Aug 19; the refresh's first incomplete day is Aug 22
-    assert (got.dump_through, got.dump_stale) == (date(2011, 8, 19), False)
-
-
-@pytest.mark.parametrize(
-    ("last", "stale"),
-    [(TODAY - timedelta(days=7), False), (TODAY - timedelta(days=8), True), (None, True)],
-)
-def test_a_dump_that_ends_more_than_a_week_back_is_flagged_stale(
-    sources: dict[str, Any], monkeypatch: pytest.MonkeyPatch, last: date | None, stale: bool
-) -> None:
-    vwap = (
-        []
-        if last is None
-        else [DailyPrice(last, "USD", Decimal("1.00"), "vwap", "bitcoincharts:bitstampUSD")]
-    )
-    monkeypatch.setattr(fetch, "download_dump", lambda *args: (vwap, "hash"))
-    got = run()
-    assert (got.dump_through, got.dump_stale) == (last, stale)
-
-
-def test_days_where_the_two_usd_sources_disagree_are_flagged(sources: dict[str, Any]) -> None:
-    # the VWAPs are 11 and 20; Bitstamp's typical price is 99 on both days. Aug 20 and 21 have no VWAP.
-    got = run().mismatches
-    assert [(m.day.day, m.vwap, m.typical) for m in got] == [
-        (18, Decimal("11.00"), Decimal("99.00")),
-        (19, Decimal("20.00"), Decimal("99.00")),
-    ]
 
 
 def test_a_cancelled_refresh_returns_nothing_so_the_job_is_cancelled_not_failed(
@@ -176,11 +167,11 @@ def test_a_cancelled_refresh_returns_nothing_so_the_job_is_cancelled_not_failed(
 def test_a_cancel_during_a_download_also_returns_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     stop = threading.Event()
 
-    def dump(*args: Any) -> Any:
+    def ohlc(*args: Any) -> Any:
         stop.set()
-        raise fetch.Cancelled("api.bitcoincharts.com: the refresh was cancelled")
+        raise fetch.Cancelled("www.bitstamp.net: the refresh was cancelled")
 
-    monkeypatch.setattr(fetch, "download_dump", dump)
+    monkeypatch.setattr(fetch, "download_ohlc", ohlc)
     assert service.refresh(None, stop, today=lambda: TODAY) is None
 
 
@@ -208,13 +199,13 @@ def test_a_refresh_cancelled_during_a_download_ends_cancelled_not_failed(
     worker.start()
     inside = threading.Event()
 
-    def dump(complete_before: date, proxy: Any, cancelled: Any) -> Any:
+    def ohlc(currency: str, complete_before: date, proxy: Any, cancelled: Any) -> Any:
         inside.set()
         while not cancelled():  # mid-download, until the user cancels
             time.sleep(0.01)
-        raise fetch.Cancelled("api.bitcoincharts.com: the refresh was cancelled")
+        raise fetch.Cancelled("www.bitstamp.net: the refresh was cancelled")
 
-    monkeypatch.setattr(fetch, "download_dump", dump)
+    monkeypatch.setattr(fetch, "download_ohlc", ohlc)
     job_id = worker.submit("prices", lambda cancelled: service.refresh(None, cancelled, today=lambda: TODAY))
     assert inside.wait(5)
     worker.cancel(job_id)
@@ -230,10 +221,6 @@ def test_a_refresh_cancelled_during_a_download_ends_cancelled_not_failed(
 @pytest.mark.parametrize(
     ("url", "data", "error", "message"),
     [
-        (fetch.DUMP_URL, b"not gzip", FetchError, "isn't a valid gzip"),
-        (fetch.DUMP_URL, gzip.compress(b"\xff\n"), FetchError, "line 1 of the dump isn't ASCII"),
-        (fetch.DUMP_URL, gzip.compress(b"1" * 300), FetchError, "longer than any trade"),  # no newline
-        (fetch.DUMP_URL, gzip.compress(b"junk\n"), PriceError, "line 1"),
         (fetch.ECB_URL, b"not a zip", FetchError, "valid zip"),
         (fetch.ECB_URL, b"PK\x05\x06" + b"\x00" * 18, FetchError, "valid zip"),  # empty: no member
         (fetch.OHLC_URL.format(currency="usd", start=AUG18), b"\xff", FetchError, "isn't ASCII"),
@@ -319,23 +306,15 @@ def test_the_refresh_uses_the_utc_date_by_default(monkeypatch: pytest.MonkeyPatc
         def now(cls, tz: Any = None) -> Clock:
             return cls(2026, 10, 8, 23, 59, 59, tzinfo=tz)  # a fixed instant: no race with midnight
 
-    def dump(complete_before: date, *args: Any) -> Any:
+    def ohlc(currency: str, complete_before: date, *args: Any) -> Any:
         seen.append(complete_before)
         raise FetchError("stop here")
 
     monkeypatch.setattr(service, "datetime", Clock)
-    monkeypatch.setattr(fetch, "download_dump", dump)
+    monkeypatch.setattr(fetch, "download_ohlc", ohlc)
     with pytest.raises(FetchError):
         service.refresh(None, threading.Event())
     assert seen == [date(2026, 10, 8)]
-
-
-def test_a_dump_that_unzips_past_its_limit_is_refused(
-    sources: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(fetch, "DUMP_TEXT_MAX", 20)
-    with pytest.raises(FetchError, match="unzips to more than allowed"):
-        run()
 
 
 @pytest.mark.parametrize("how", ["encrypted", "bzip2", "patched", "strong"])
@@ -359,8 +338,6 @@ def test_the_downloads_stop_once_cancelled_and_refuse_an_unknown_pair() -> None:
         fetch.download_ohlc("USD", TODAY, None, lambda: True)
     with pytest.raises(fetch.Cancelled, match=r"www\.ecb\.europa\.eu: the refresh was cancelled"):
         fetch.download_ecb(None, lambda: True)
-    with pytest.raises(fetch.Cancelled, match=r"api\.bitcoincharts\.com: the refresh was cancelled"):
-        fetch.download_dump(TODAY, None, lambda: True)
     with pytest.raises(FetchError, match="unsupported currency"):
         fetch.download_ohlc("JPY", TODAY, None, lambda: False)
 

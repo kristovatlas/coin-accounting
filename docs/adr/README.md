@@ -45,5 +45,6 @@ MADR-format records of significant decisions (see [ADR 0001](0001-record-decisio
 | [0036](0036-m2-import-and-discovery-as-built.md) | The architecture text follows M2's import and discovery as built |
 | [0037](0037-graph-libraries.md) | Cytoscape.js and @dagrejs/dagre draw the transaction graph |
 | [0038](0038-schema-changes-within-the-data-model.md) | A migration that implements PLAN §2's data model needs no ADR of its own |
+| [0039](0039-coin-metrics-usd-reference-rate.md) | USD prices from Coin Metrics' daily reference rate |
 
 Template: [0000-template.md](0000-template.md).
