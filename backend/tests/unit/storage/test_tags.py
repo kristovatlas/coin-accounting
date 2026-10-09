@@ -174,7 +174,8 @@ def test_no_change_log_id_is_below_1_so_appends_keep_working_t408(
 ) -> None:
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         conn.execute(
-            "INSERT INTO change_log (id, at, kind, subject, after) VALUES (?, ?, 'tx_flag', 'ab', '{}')",
+            "INSERT INTO change_log (id, at, kind, subject, after, origin)"
+            " VALUES (?, ?, 'tx_flag', 'ab', '{}', 'user')",
             (bad_id, AT),
         )
     tags.tag_address(
@@ -189,10 +190,10 @@ def test_no_change_log_id_is_below_1_so_appends_keep_working_t408(
         "UPDATE change_log SET kind = 'tx_flag'",
         "DELETE FROM change_log",
         # REPLACE deletes the old row without firing delete triggers (recursive_triggers is off)
-        "INSERT OR REPLACE INTO change_log (id, at, kind, subject, after)"
-        " VALUES (1, '2026-10-08T12:00:00+00:00', 'tx_flag', 'ab', '{}')",
-        "REPLACE INTO change_log (id, at, kind, subject, after)"
-        " VALUES (1, '2026-10-08T12:00:00+00:00', 'tx_flag', 'ab', '{}')",
+        "INSERT OR REPLACE INTO change_log (id, at, kind, subject, after, origin)"
+        " VALUES (1, '2026-10-08T12:00:00+00:00', 'tx_flag', 'ab', '{}', 'user')",
+        "REPLACE INTO change_log (id, at, kind, subject, after, origin)"
+        " VALUES (1, '2026-10-08T12:00:00+00:00', 'tx_flag', 'ab', '{}', 'user')",
     ],
 )
 def test_the_change_log_is_append_only_t408(conn: sqlite3.Connection, exchange: int, statement: str) -> None:
@@ -315,7 +316,12 @@ def test_a_db_from_schema_7_upgrades_and_keeps_appending_t408(tmp_path: Path) ->
     old = open_db(data, steps=list(STEPS[:7]))
     try:
         record_chain(old, "regtest")
-        tags.set_mixing(old, TXID, True, at=AT)
+        # what the app of schema 7 wrote: a flag and its log row, which had no origin then
+        old.execute("INSERT INTO tx_flag (txid, mixing, source) VALUES (?, 1, 'user')", (TXID,))
+        old.execute(
+            "INSERT INTO change_log (at, kind, subject, after) VALUES (?, 'tx_flag', ?, ?)",
+            (AT, TXID, '{"mixing": true, "source": "user"}'),
+        )
     finally:
         old.close()
     conn = open_db(data)
@@ -324,8 +330,8 @@ def test_a_db_from_schema_7_upgrades_and_keeps_appending_t408(tmp_path: Path) ->
         assert [c.id for c in tags.changes(conn, ("tx_flag", TXID))] == [1, 2]
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):  # replacing a row: still refused
             conn.execute(
-                "INSERT OR REPLACE INTO change_log (id, at, kind, subject, after)"
-                " VALUES (1, ?, 'tx_flag', 'ab', '{}')",
+                "INSERT OR REPLACE INTO change_log (id, at, kind, subject, after, origin)"
+                " VALUES (1, ?, 'tx_flag', 'ab', '{}', 'user')",
                 (AT,),
             )
     finally:
