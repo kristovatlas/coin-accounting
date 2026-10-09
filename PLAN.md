@@ -219,9 +219,9 @@ A pure, deterministic function of events, recomputed on every change. It can com
   - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet. How (ADR 0041, proposed): each arrival event (an acquisition, or a withdrawal's moved lots) names the outputs it arrived in (facts, change-logged); a transaction's roles take the identification order in a fixed order (disposals, gifts, deposits and transfers to another own account, then change), each role's outputs filled one after another in a canonical order (largest first, then script; identical outputs hold their lots as a group), so output position never decides; change takes no fee share; a sale's proceeds are what was received; a coin short of lots draws from the wallet's pool of lots that had entered it by then, and if that is short too gets a placeholder lot of unknown basis (blocking); the first computed result is kept and later changes shown; a wallet's method records have effective-from and recorded-at times.
 - **Fees by role:**
   - acquisition fees add to basis
-  - disposal fees reduce proceeds; proceeds are net of costs, matching 1099-DA
+  - disposal fees reduce proceeds; proceeds are net of costs, matching 1099-DA (exchange and custodial; self-custody network fees: see ADR 0041 below)
   - network fees on self-transfers/deposits: the default carries the fee's basis over to the remaining sats; a setting instead treats it as a small disposal. The law here isn't settled, so this is a stated tax position (ADR 0009) shown on every report
-  - network fees on `spend`: they reduce proceeds
+  - network fees on `spend` from an exchange or custodial account: they reduce proceeds. From a self-custody wallet, the fee sats are in the disposal at no proceeds and are not subtracted again (ADR 0041)
   - BTC withdrawal fees charged by an exchange: handled as a small disposal (default)
   - A tx mixing owned and third-party outputs splits the fee by role
   - Self-custody (ADR 0041, proposed): a transaction's fee splits across roles in proportion to each role's sats (remainder to the earlier role); a transfer's carried fee basis goes to the first destination output holding the same lot, then that lot's change, then the first arriving fragment; a gift's fee is a small disposal at FMV (owner choice); change never takes a fee share, and a consolidation's fee is handled as a self-transfer's; a sale's proceeds are the consideration received and a spend's the FMV of what was received (else of the BTC paid), the network fee not subtracted again
@@ -242,7 +242,7 @@ A pure, deterministic function of events, recomputed on every change. It can com
 - **Ordinary income summary** per year: income events with their USD FMV and source.
 - **Year summary + holdings:** realized short/long-term gains per year; lots held as of any date, with basis, holding period and unrealized gain.
 - **Audit trail:** for each lot, the chain from acquisition event → every tx hop (txids) → identification → disposal. Exported as CSV and JSON.
-- Every report embeds the app version, rule-set version, settings, and a hash of its inputs.
+- Every report embeds the app version, rule-set version, settings, and a hash of its inputs. Under coin tracing (ADR 0041) the inputs include lot links, wallet method records, opening-allocation assignments, placeholder resolutions and identification rows, with their supersession state.
 - **CSV exports are type-aware:** numeric columns are written as numbers, and only free-text columns are escaped against formula injection.
 
 ## Repo layout
