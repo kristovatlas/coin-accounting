@@ -13,7 +13,7 @@ T-302, T-303, T-305).
 - **Tor stream isolation:** each download offers the proxy a fresh random username and password, so
   Tor puts it on its own circuit, apart from the user's other Tor traffic (Tor's IsolateSOCKSAuth, on
   by default; Bitcoin Core's -proxyrandomize does the same). Coin Metrics' pages and retries share one
-  pair, so a rate limit is waited out on one circuit, never dodged on another (ADR 0039).
+  pair, so a rate limit is waited out, never dodged by asking for another circuit (ADR 0039).
 - **Bounded:** each response is a stream of at most `max_bytes`. Every blocking step waits at most
   `timeout`, and at most the time left before the download's deadline. A body shorter than its
   declared length is an error, not an end, and so is a TLS close without close_notify; the parsers
@@ -517,12 +517,13 @@ REFERENCE_URL: Final = (
     f"&frequency=1d&paging_from=start&page_size=10000&start_time={FIRST_DAY.isoformat()}&end_time={{end}}"
 )
 REFERENCE_HOST: Final = "community-api.coinmetrics.io"
-REFERENCE_PAGE_DAYS: Final = 10_000  # the API's largest page_size: the whole history fits in one page
+REFERENCE_PAGE_DAYS: Final = 10_000  # the API's largest page_size: one page holds the history until 2037
 REFERENCE_MAX: Final = 8 << 20  # every page together: 10,000 rows are about 800 kB
 # A 429 is honoured, never dodged (ADR 0039): wait as Retry-After says, or back off 10, 20, then 40 s,
-# at most RETRIES times, on the same Tor circuit (one Isolation per download). A wait longer than
-# RETRY_WAIT_MAX, or one named as a date, fails the refresh: it stays well under Tor's usual 10-minute
-# circuit lifetime (MaxCircuitDirtiness), so the retry leaves from the same exit.
+# at most RETRIES times, offering the same isolation pair (one Isolation per download), so Tor reuses
+# the circuit while it is fresh (MaxCircuitDirtiness, 10 minutes by default): the app never asks for a
+# new one. A wait longer than RETRY_WAIT_MAX, or one not given as a short delay in seconds (a date),
+# fails the refresh.
 RETRIES: Final = 3
 RETRY_WAIT: Final = 10
 RETRY_WAIT_MAX: Final = 60
@@ -544,7 +545,7 @@ def download_reference(
     # One circuit for the whole download, retries included: a 429 is waited out from the same exit, not
     # dodged from another (ADR 0039). Still apart from the user's other Tor traffic.
     isolation = Isolation.fresh()
-    pages = max(0, (complete_before - FIRST_DAY).days) // REFERENCE_PAGE_DAYS + 2
+    pages = (complete_before - FIRST_DAY).days // REFERENCE_PAGE_DAYS + 2
     until = time.monotonic() + DEADLINE
     left = REFERENCE_MAX
     sha = hashlib.sha256()
@@ -598,6 +599,10 @@ def _reference_page(  # noqa: PLR0913 - the URL, the proxy, and the download's s
             if attempt == RETRIES:
                 _fail(f"{REFERENCE_HOST}: still rate-limited after {RETRIES} retries")
             wait = RETRY_WAIT << attempt if e.retry_after is None else e.retry_after
+            if wait == UNKNOWN_WAIT:
+                _fail(
+                    f"{REFERENCE_HOST}: rate-limited, with a Retry-After that isn't a short delay in seconds"
+                )
             if wait > RETRY_WAIT_MAX:
                 _fail(f"{REFERENCE_HOST}: rate-limited, asking for a wait longer than {RETRY_WAIT_MAX} s")
             if wait >= _time_left(until):

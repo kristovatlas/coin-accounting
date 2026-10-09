@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from coinacct.prices import DailyPrice, PriceError, fetch
+from coinacct.prices import check as prices_check
 from coinacct.prices.fetch import FetchError
 from coinacct.services import prices as service
 from coinacct.services.jobs import JobWorker, State
@@ -441,3 +442,19 @@ def test_an_ecb_file_too_large_or_not_ascii_is_refused(
     sources[fetch.ECB_URL] = out.getvalue()
     with pytest.raises(FetchError, match="isn't ASCII"):
         run()
+
+
+@pytest.mark.parametrize(
+    ("days", "expected"),
+    [
+        ((18, 19, 20, 21), []),  # from the first requested day to the last: no gap at either end
+        ((19, 20, 21), [(18, 18)]),  # one day late: a one-day head gap
+        ((18, 19, 20), [(21, 21)]),  # one day short: a one-day tail gap
+        ((18, 21), [(19, 20)]),  # only between
+    ],
+)
+def test_covering_gaps_are_exact_at_both_ends(days: tuple[int, ...], expected: list[tuple[int, int]]) -> None:
+    series = [usd(d - 18, "1.00", "reference", "coinmetrics:PriceUSD") for d in days]
+    inner, _ = prices_check(series)
+    got = service._covering(inner, series, date(2011, 8, 18), date(2011, 8, 21))
+    assert [(g.first.day, g.last.day) for g in got] == expected

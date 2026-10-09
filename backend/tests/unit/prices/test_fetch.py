@@ -806,7 +806,7 @@ def test_a_429_asking_for_too_long_a_wait_fails_at_once(cm: dict[str, Any]) -> N
         download(cm)
     assert cm["slept"] == []
     cm["answers"] = [limited(fetch.UNKNOWN_WAIT)]  # a date: never retried early on a guess
-    with pytest.raises(FetchError, match="asking for a wait longer than 60 s"):
+    with pytest.raises(FetchError, match="a Retry-After that isn't a short delay"):
         download(cm)
     assert cm["slept"] == []
     cm["answers"], cm["asked"] = [limited(60), cm_page(1)], []
@@ -898,22 +898,12 @@ def test_the_cancel_reaches_every_page_download(cm: dict[str, Any]) -> None:
 def test_the_byte_limit_is_shared_so_a_later_page_can_run_out(
     cm: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # the second page may read only what the first left: open_url enforces max_bytes itself (its own
+    # tests: "larger than allowed"); here, that the download hands it the shrinking budget
     first = cm_page(1, token="0.a")
     monkeypatch.setattr(fetch, "REFERENCE_MAX", len(first) + 5)
     cm["answers"] = [first, cm_page(2)]
-    real = fetch.open_url
-
-    @contextmanager
-    def bounded(url: str, proxy: Any = None, **limits: Any) -> Iterator[Any]:
-        with real(url, proxy, **limits) as body:  # the fake underneath; the size check is open_url's own
-            data = body.read()
-        if len(data) > limits["max_bytes"]:
-            raise FetchError("community-api.coinmetrics.io: the response is larger than allowed")
-        yield io.BytesIO(data)
-
-    monkeypatch.setattr(fetch, "open_url", bounded)
-    with pytest.raises(FetchError, match="larger than allowed"):
-        download(cm)
+    download(cm)
     assert [limits["max_bytes"] for limits in cm["limits"]] == [len(first) + 5, 5]
 
 
