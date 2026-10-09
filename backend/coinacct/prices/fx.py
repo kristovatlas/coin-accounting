@@ -93,14 +93,16 @@ def _header(fields: list[str], n: int) -> list[str]:
 def to_display(usd: Sequence[DailyPrice], rates: Rates) -> list[DailyPrice]:
     """Every USD price in every display currency, by the latest ECB rate on or before its day and at
     most MAX_RATE_AGE older. EUR is USD divided by the USD rate; another currency is that times its
-    own rate. The result keeps the USD price's day and gets method "fx". Every rate in `rates` is
+    own rate. The result keeps the USD price's day and gets method "fx", with the USD price's source
+    after the `*` in its own, so a price converted from an import stays identifiable (T-303). Every
+    rate in `rates` is
     checked, used or not, since they may come from anywhere (a cache, an upload)."""
     for day, row in rates.items():
         if not all(type(v) is int and v > 0 for v in row.values()):
             _fail(f"{day}: a rate must be a positive integer scaled by 10^6")
     for before, p in zip((None, *usd), usd, strict=False):
         if p.currency != "USD":  # DailyPrice already refuses a USD price made by "fx"
-            _fail(f"{p.day}: expected a USD market price, got {p.currency}")
+            _fail(f"{p.day}: expected a USD price, got {p.currency}")
         if before is not None and p.day <= before.day:
             _fail(f"{p.day}: the USD series isn't sorted by day, or prices a day twice")
     days = sorted(rates)
