@@ -30,6 +30,9 @@ def p(day: int, price: str, method: Method = "vwap", currency: str = "USD") -> D
         {"price": "1.00"},
         {"currency": "JPY"},
         {"method": "close"},
+        {"method": "fx"},  # an FX-derived price is never a USD (tax) price
+        {"price": Decimal("1000000000000000.00")},  # 16 integer digits
+        {"price": Decimal("1E+60")},
         {"source": ""},
         {"day": datetime(2024, 1, 1, tzinfo=UTC)},
     ],
@@ -45,6 +48,12 @@ def test_only_a_positive_whole_number_of_cents_is_a_price(fields: dict[str, Any]
     DailyPrice(**good)
     with pytest.raises(PriceError):
         DailyPrice(**{**good, **fields})
+
+
+def test_the_largest_price_is_accepted_and_checked_without_a_decimal_error() -> None:
+    top = DailyPrice(date(2024, 1, 2), "USD", Decimal("999999999999999.99"), "vwap", "test")
+    assert check([p(1, "1.00"), top])[1] == [Outlier(date(2024, 1, 2), Decimal("1.00"), top.price)]
+    DailyPrice(date(2024, 1, 2), "EUR", Decimal("1.00"), "fx", "test")
 
 
 def test_the_trade_average_wins_and_the_typical_price_fills_the_other_days() -> None:
@@ -85,7 +94,7 @@ def test_gaps_are_reported_with_their_missing_days() -> None:
     assert check([]) == ([], []) and check([p(1, "10")]) == ([], [])
 
 
-def test_a_move_by_more_than_half_either_way_is_flagged_for_review() -> None:
+def test_a_rise_over_half_or_a_fall_over_a_third_is_flagged_for_review() -> None:
     series = [p(1, "100"), p(2, "150"), p(3, "100"), p(4, "150.01"), p(5, "100.00")]
     assert check(series)[1] == [
         Outlier(date(2024, 1, 4), Decimal("100"), Decimal("150.01")),

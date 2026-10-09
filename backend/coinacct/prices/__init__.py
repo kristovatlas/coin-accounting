@@ -21,7 +21,8 @@ METHODS: Final = ("vwap", "typical", "fx")
 CURRENCIES: Final = ("USD", "EUR", "GBP")  # USD for tax figures; the others for display (ADR 0007)
 CENT: Final = Decimal("0.01")
 # Our own context for the little arithmetic here, whatever the caller's: exact, or an error.
-EXACT: Final = Context(prec=60, traps=[Inexact, InvalidOperation, Overflow])
+_EXACT: Final = Context(prec=60, traps=[Inexact, InvalidOperation, Overflow])
+MAX_PRICE: Final = Decimal("999999999999999.99")  # 15 integer digits, as the parsers read them
 # A day-over-day rise of more than 50 %, or a fall of more than a third, is flagged for review, never
 # refused: such moves are rare enough that bad data is the likelier cause, and the user can override.
 OUTLIER_FACTOR: Final = Decimal("1.5")
@@ -35,8 +36,9 @@ class PriceError(ValueError):
 @dataclass(frozen=True)
 class DailyPrice:
     """The price of one BTC in `currency` on UTC day `day`, in whole cents, and how it was made. Only a
-    positive, whole number of cents can be built, so a zero or rounded-away price never reaches a tax
-    figure, whatever path made it (T-303)."""
+    positive, whole number of cents up to MAX_PRICE can be built, so a zero or rounded-away price never
+    reaches a tax figure, whatever path made it (T-303). A USD price is always a market price: "fx"
+    is only for display currencies (ADR 0007: tax figures are USD)."""
 
     day: date
     currency: str
@@ -47,14 +49,16 @@ class DailyPrice:
     def __post_init__(self) -> None:
         if type(self.day) is not date:  # a datetime is a date too, but not a UTC day
             raise PriceError("a price's day must be a date")
-        if self.currency not in CURRENCIES or self.method not in METHODS:
-            raise PriceError(f"{self.day}: unsupported currency or method")
+        if self.currency not in CURRENCIES:
+            raise PriceError(f"{self.day}: unsupported currency {self.currency!r}")
+        if self.method not in METHODS or (self.method == "fx" and self.currency == "USD"):
+            raise PriceError(f"{self.day}: unsupported method {self.method!r} for {self.currency}")
         if not isinstance(self.source, str) or not self.source:
             raise PriceError(f"{self.day}: a price needs its source")
         if (
             type(self.price) is not Decimal
             or not self.price.is_finite()
-            or self.price < CENT
+            or not CENT <= self.price <= MAX_PRICE
             or self.price.as_tuple().exponent != -2  # exactly two decimals, as every parser makes them
         ):
             raise PriceError(f"{self.day}: a price must be a positive whole number of cents")
@@ -104,7 +108,7 @@ def check(series: Sequence[DailyPrice]) -> tuple[list[Gap], list[Outlier]]:
             raise PriceError(f"{p.day}: the series isn't sorted by day, or prices a day twice")
         if p.day - before.day > timedelta(days=1):
             gaps.append(Gap(before.day + timedelta(days=1), p.day - timedelta(days=1)))
-        with localcontext(EXACT):
+        with localcontext(_EXACT):
             moved = max(p.price, before.price) > OUTLIER_FACTOR * min(p.price, before.price)
         if moved:
             outliers.append(Outlier(p.day, before.price, p.price))
