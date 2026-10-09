@@ -31,11 +31,12 @@ MAX_CENTS: Final = 99_999_999_999_999_999
 # A day-over-day rise of more than 50 %, or a fall of more than a third, is flagged for review, never
 # refused: such moves are rare enough that bad data is the likelier cause, and the user can override.
 OUTLIER_FACTOR: Final = Decimal("1.5")
-# Where a day has both a reference rate and a typical price, they should be close. The rate is the
-# day's close and (H+L+C)/3 lies between its low and high, so both sit inside the day's range: they can
-# part by at most high/low, which passes a quarter only on a rare, violent day. A wider gap is more
-# likely a broken or changed source. Flagged for review, never refused (T-303, T-304). It catches gross
-# errors and format changes, not a subtle shift of a few percent (#262).
+# Where a day has both a reference rate and a typical price, they should be close. The rate is a
+# cross-exchange price near the day's close, and (H+L+C)/3 lies between Bitstamp's low and high, so the
+# two usually part by about Bitstamp's high/low at most, which passes a quarter only on a rare, violent
+# day (or a thin early Bitstamp market, or one trading at a premium: not a guarantee, #262). A wider gap
+# is more likely a broken or changed source. Flagged for review, never refused (T-303, T-304). It
+# catches gross errors and format changes, not a subtle shift of a few percent (#262).
 MISMATCH_FACTOR: Final = Decimal("1.25")
 
 

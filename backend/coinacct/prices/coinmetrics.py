@@ -10,7 +10,9 @@ the day's close, not a whole-day average. Coin Metrics published its reference-r
 doesn't document which exchanges its earlier days come from; its trade data begins with Mt. Gox in
 July 2010. Rounding to whole cents is coarse on the earliest days (BTC traded around $0.05 to $0.30
 from July 2010 into early 2011). A per-event override values any such event exactly. Attribution: the
-data is Coin Metrics' under CC BY-NC 4.0, credited wherever it is shown or exported.
+data is Coin Metrics' under CC BY-NC 4.0, credited wherever it is shown or exported. The owner checked
+and accepted the community API's terms for this use (automated, possibly through Tor) on 2026-10-09,
+as ADR 0039 requires before this downloader lands.
 
 A pure parser: text in, values out. Each value is a decimal string, converted with exact integer
 arithmetic and rounded once, half to even, to whole cents. A day with no value (`null`), or one that

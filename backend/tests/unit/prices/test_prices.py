@@ -79,7 +79,7 @@ def test_fx_is_a_method_for_display_currencies() -> None:
         assert DailyPrice(date(2024, 1, 2), currency, Decimal("1.00"), "fx", "test").method == "fx"
 
 
-def test_the_trade_average_wins_and_the_typical_price_fills_the_other_days() -> None:
+def test_the_reference_rate_wins_and_the_typical_price_fills_the_other_days() -> None:
     typical = [p(1, "1", "typical"), p(2, "2", "typical"), p(3, "3", "typical")]
     got = combine([p(2, "20"), p(4, "40")], typical)
     assert got == [p(1, "1", "typical"), p(2, "20"), p(3, "3", "typical"), p(4, "40")]

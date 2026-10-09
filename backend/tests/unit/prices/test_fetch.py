@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 
 from coinacct.prices import PriceError, fetch
+from coinacct.prices.coinmetrics import FIRST_DAY
 from coinacct.prices.fetch import HEADERS, USER_AGENT, FetchError, Proxy, open_url, socks5_connect
 
 URL = "https://www.bitstamp.net/api/v2/ohlc/btcusd/?step=86400&limit=1000"
@@ -661,9 +662,12 @@ def test_the_tls_layer_refuses_a_close_without_close_notify(monkeypatch: pytest.
         (b"Retry-After: 5\r\n", 5),
         (b"Retry-After:  7\t\r\n", 7),
         (b"Retry-After: 0\r\n", 0),
-        (b"Retry-After: Wed, 21 Oct 2015 07:28:00 GMT\r\n", None),  # a date isn't read: back off
-        (b"Retry-After: -1\r\n", None),
-        (b"Retry-After: 1234567\r\n", None),  # more than six digits
+        # a date, a malformed value or one too long to read can't be shown to be a short wait
+        (b"Retry-After: Wed, 21 Oct 2015 07:28:00 GMT\r\n", fetch.UNKNOWN_WAIT),
+        (b"Retry-After: -1\r\n", fetch.UNKNOWN_WAIT),
+        (b"Retry-After: 1234567\r\n", fetch.UNKNOWN_WAIT),  # more than six digits
+        (b"Retry-After: " + b"9" * 5000 + b"\r\n", fetch.UNKNOWN_WAIT),
+        (b"Retry-After: \r\n", None),  # empty: as if none was named
         (b"", None),
     ],
 )
@@ -798,7 +802,11 @@ def test_a_429_that_persists_fails_the_refresh(cm: dict[str, Any]) -> None:
 
 def test_a_429_asking_for_too_long_a_wait_fails_at_once(cm: dict[str, Any]) -> None:
     cm["answers"] = [limited(61)]
-    with pytest.raises(FetchError, match="rate-limited for longer than 60 s"):
+    with pytest.raises(FetchError, match="rate-limited, asking for a wait longer than 60 s"):
+        download(cm)
+    assert cm["slept"] == []
+    cm["answers"] = [limited(fetch.UNKNOWN_WAIT)]  # a date: never retried early on a guess
+    with pytest.raises(FetchError, match="asking for a wait longer than 60 s"):
         download(cm)
     assert cm["slept"] == []
     cm["answers"], cm["asked"] = [limited(60), cm_page(1)], []
@@ -824,3 +832,87 @@ def test_a_cancel_during_a_wait_stops_within_a_second(cm: dict[str, Any]) -> Non
     with pytest.raises(fetch.Cancelled, match=r"community-api\.coinmetrics\.io: the refresh was cancelled"):
         download(cm, cancelled)
     assert len(cm["slept"]) == 3
+
+
+def test_given_isolation_credentials_are_offered_to_the_proxy_as_they_are() -> None:
+    pair = fetch.Isolation(b"u" * 16, b"p" * 16)
+    for _ in range(2):  # the same pair each time: Tor may keep both connections on one circuit
+        server = FakeServer(b"", socks=socks_ok(), http=False, auth=b"\x01\x00")
+        with socket.create_connection(("127.0.0.1", server.port), timeout=5) as sock:
+            socks5_connect(sock, "community-api.coinmetrics.io", 443, None, pair)
+        server.close()
+        assert server.credentials == b"\x01\x10" + b"u" * 16 + b"\x10" + b"p" * 16
+
+
+def test_a_download_through_the_proxy_offers_its_isolation_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = FakeServer(ok(b"rates"), socks=socks_ok(), auth=b"\x01\x00")
+
+    def wrap(self: Any, sock: socket.socket) -> socket.socket:
+        plain = fetch._DeadlineIO(fileno=sock.detach())
+        plain.deadline, plain.host = self._deadline, self.host
+        return plain
+
+    monkeypatch.setattr(fetch._Connection, "_wrap", wrap)
+    pair = fetch.Isolation(b"a" * 16, b"b" * 16)
+    with open_url(
+        "https://www.ecb.europa.eu/x", Proxy("127.0.0.1", server.port), max_bytes=10, isolation=pair
+    ) as body:
+        assert body.read() == b"rates"
+    server.close()
+    assert server.credentials == b"\x01\x10" + b"a" * 16 + b"\x10" + b"b" * 16
+
+
+def test_one_download_uses_one_isolation_pair_for_every_page_and_retry(cm: dict[str, Any]) -> None:
+    cm["answers"] = [limited(), cm_page(1, token="0.a"), limited(1), cm_page(2)]
+    download(cm)
+    pairs = [limits["isolation"] for limits in cm["limits"]]
+    assert len(pairs) == 4 and all(p is pairs[0] for p in pairs)  # a 429 is waited out on one circuit
+    assert isinstance(pairs[0], fetch.Isolation) and len(pairs[0].user) == len(pairs[0].password) == 16
+    first = pairs[0]
+    cm["answers"], cm["limits"] = [cm_page(1)], []
+    download(cm)
+    assert cm["limits"][0]["isolation"] != first  # the next refresh gets a circuit of its own
+
+
+def test_a_429_asking_for_no_wait_is_retried_at_once(cm: dict[str, Any]) -> None:
+    cm["answers"] = [limited(0), cm_page(1)]
+    assert [p.day.day for p in download(cm)[0]] == [1]
+    assert cm["slept"] == [] and len(cm["asked"]) == 2
+
+
+def test_the_cancel_reaches_every_page_download(cm: dict[str, Any]) -> None:
+    def cancelled() -> bool:
+        return False
+
+    cm["answers"] = [cm_page(1, token="0.a"), cm_page(2)]
+    download(cm, cancelled)
+    assert [limits["cancelled"] for limits in cm["limits"]] == [cancelled, cancelled]
+
+
+def test_the_byte_limit_is_shared_so_a_later_page_can_run_out(
+    cm: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = cm_page(1, token="0.a")
+    monkeypatch.setattr(fetch, "REFERENCE_MAX", len(first) + 5)
+    cm["answers"] = [first, cm_page(2)]
+    real = fetch.open_url
+
+    @contextmanager
+    def bounded(url: str, proxy: Any = None, **limits: Any) -> Iterator[Any]:
+        with real(url, proxy, **limits) as body:  # the fake underneath; the size check is open_url's own
+            data = body.read()
+        if len(data) > limits["max_bytes"]:
+            raise FetchError("community-api.coinmetrics.io: the response is larger than allowed")
+        yield io.BytesIO(data)
+
+    monkeypatch.setattr(fetch, "open_url", bounded)
+    with pytest.raises(FetchError, match="larger than allowed"):
+        download(cm)
+    assert [limits["max_bytes"] for limits in cm["limits"]] == [len(first) + 5, 5]
+
+
+def test_the_reference_url_starts_on_coin_metrics_first_day() -> None:
+    assert f"start_time={FIRST_DAY.isoformat()}&" in fetch.REFERENCE_URL
+    assert FIRST_DAY == date(2010, 7, 18)

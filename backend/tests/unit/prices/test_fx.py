@@ -18,11 +18,11 @@ from coinacct.prices.fx import DISPLAY, MAX_RATE, ecb_rates, to_display
 HEADER = "Date,USD,JPY,GBP,CYP,\n"  # the real file's shape: a trailing comma, retired currencies
 
 
-def usd(day: date, price: str, source: str = "bitstamp") -> DailyPrice:
+def usd(day: date, price: str, source: str = "coinmetrics:PriceUSD") -> DailyPrice:
     return DailyPrice(day, "USD", Decimal(price), "reference", source)
 
 
-def shown(day: date, currency: str, price: str, source: str = "bitstamp") -> DailyPrice:
+def shown(day: date, currency: str, price: str, source: str = "coinmetrics:PriceUSD") -> DailyPrice:
     return DailyPrice(day, currency, Decimal(price), "fx", f"ecb:eurofxref-hist*{source}")
 
 
