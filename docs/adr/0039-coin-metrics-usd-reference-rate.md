@@ -30,15 +30,16 @@ Chosen option: 1, because Coin Metrics publishes the weighted price itself, by a
   - **Which day it prices:** the value dated D is "the price as of the end of the day in UTC time" ([PriceUSD](https://gitbook-docs.coinmetrics.io/network-data/network-data-overview/market/price)). It prices day D at its close, midnight UTC at the end of D, the same moment that ends Bitstamp's daily candle for D. The downloader's PR pins this with a test.
   - **Recording:** each row has method `reference` and source `coinmetrics:PriceUSD`.
   - **Not a whole-day average:** it is a robust price at one moment, the day's close.
-  - **Rounding:** the value is rounded half-even to whole cents. A day that rounds below one cent is a gap.
+  - **Rounding:** the value is rounded half-even to whole cents, as every stored price is (`DailyPrice`). A day that rounds below one cent is a gap. On the earliest days this is coarse: from July 2010 into early 2011 BTC traded around $0.05 to $0.30, so a rounded price can be off by up to about 10%. That loss is part of the stated tax position below; an event acquired on those days can be valued exactly by a per-event override.
   - **Tax position:** valuing each day at this rate is a stated tax position (ADR 0009), printed with the reports.
 - **The request** is the fixed URL `https://community-api.coinmetrics.io/v4/timeseries/asset-metrics?assets=btc&metrics=PriceUSD&frequency=1d&paging_from=start&page_size=…`.
   - **Pages:** each next page's URL is rebuilt from the fixed URL plus only the response's `next_page_token`, which must match a strict pattern and length. The server's `next_page_url` is never followed as given, so it can't send the app elsewhere.
   - **Bounds:** the number of pages is capped (the days since 2010-07-18 divided by the page size, plus a margin). Each page's dates must be later than the last page's. One deadline and one byte limit cover the whole download. Breaking any of these fails the refresh (T-304).
+  - **Parsing:** each value is a decimal string parsed exactly (no floats, architecture §2); each row's asset is `btc`; dates strictly increase within and across pages. Anything else fails the refresh (T-304).
   - **No user data:** nothing in any request depends on the user's records (T-301).
-  - **Rate limit:** Coin Metrics documents a per-IP limit for the community API (10 requests per 6 seconds). The downloader stays well below it. Through Tor, a shared exit may still be refused (HTTP 429): the downloader retries a bounded number of times, with backoff, on a fresh circuit (new SOCKS credentials, T-302), so a Tor user isn't pushed to go direct.
+  - **Rate limit:** Coin Metrics documents a per-IP limit for the community API (10 requests per 6 seconds). The downloader stays well below it. An HTTP 429 is honoured, not dodged: the downloader keeps the same circuit, waits as `Retry-After` says (bounded) or backs off, retries a bounded number of times, and then fails the refresh (T-304). It never switches Tor circuits to get a new IP past the limit.
 - **Bitstamp stays as the second source.** Its daily typical price is still fetched and compared with Coin Metrics' rate day by day (`prices.mismatches`). The comparison is a review flag, never a refusal, and it covers every day both have. On a day Coin Metrics has no value for, the typical price fills in, recorded with method `typical`, as today.
-- **bitcoincharts is dropped, first.** `api.bitcoincharts.com` leaves the F3 hosts, and the dump download and parser are removed, in the first PR after this ADR is accepted, before the Coin Metrics downloader lands. A neglected domain that lapsed could be taken over and serve a well-formed dump with a valid certificate, and its prices would win (T-303). Until the downloader lands, USD days use Bitstamp's typical price.
+- **bitcoincharts is dropped, now.** `api.bitcoincharts.com` leaves the F3 hosts, and the dump download and parser are removed, in the same PR as this ADR, so the code never allows a host the binding decision has dropped. A neglected domain that lapsed could be taken over and serve a well-formed dump with a valid certificate, and its prices would win (T-303). Until the Coin Metrics downloader lands, USD days use Bitstamp's typical price, and the cross-check and freshness flag come with the downloader. This doesn't wait for the terms check below: the archive is already unreachable, so removing it loses nothing.
 - **Freshness.** The refresh reports the reference rate's last priced day and flags it stale if that day is more than 7 days back (replacing the dump's flag, #246). M5 still checks that every F3 source is reachable.
 - **Display currencies are unchanged:** Bitstamp's EUR and GBP pairs, or USD × ECB rates. Every pair is always fetched.
 - **The F3 hosts** are now:
@@ -49,14 +50,14 @@ Chosen option: 1, because Coin Metrics publishes the weighted price itself, by a
   Adding or changing one still needs an ADR and a threat-model update.
 - **Unchanged from ADR 0007:**
   - prices are fetched only when the user clicks refresh, never from user records
-  - TLS with certificate checks, and the optional local SOCKS5/Tor proxy (T-302)
+  - TLS with certificate checks, and the optional local SOCKS5/Tor proxy (T-302); the first run asks the user to choose proxy or direct
   - the CSV upload as the fallback when a source disappears (T-304, TB6)
   - a per-event override for any valuation
   - all tax figures in USD
 - **Licence.** Coin Metrics' community data is under [CC BY-NC 4.0](https://github.com/coinmetrics/data): free for non-commercial use, with attribution.
   - **Attribution:** the app credits Coin Metrics wherever it shows or exports these prices.
-  - **Commercial use:** using the app commercially would need a different source or a licence. The README says so.
-  - **The API's own terms:** before the downloader lands, its PR checks that Coin Metrics' terms for the community API allow this use: automated access, possibly through Tor.
+  - **Commercial use:** using the app commercially would need a different source or a licence. The README says so (added with this ADR).
+  - **The API's own terms:** the downloader can't land until its PR has checked, and the owner has confirmed, that Coin Metrics' terms for the community API allow this use: automated access, possibly through Tor. (On 2026-10-09 Coin Metrics' API-terms URL redirected to Talos's data pages, so the current terms weren't found.) If the terms forbid automated or Tor access, the downloader doesn't land, and a new ADR decides the source. The same check confirms what the methodology says about the earliest days (2010 to 2013), and the stated tax position mentions any difference.
 
 ### Consequences
 
@@ -72,6 +73,6 @@ Chosen option: 1, because Coin Metrics publishes the weighted price itself, by a
 
 - PLAN §6; ADR 0007 (superseded); ADR 0009; ADR 0014; THREAT_MODEL T-301–T-304, F3, §10 question 3; architecture §5 (F3: "price/FX hosts") and §7
 - Coin Metrics, PriceUSD (daily value as of the end of the UTC day): https://gitbook-docs.coinmetrics.io/network-data/network-data-overview/market/price
-- Coin Metrics, Reference Rate methodology: https://gitbook-docs.coinmetrics.io/market-data/reference-rates-overview/reference_rate
+- Coin Metrics, Reference Rate methodology (accessed 2026-10-09): https://gitbook-docs.coinmetrics.io/coin-metrics-prices/coin-metrics-prices/reference-rate-metrics
 - Coin Metrics community data and licence: https://github.com/coinmetrics/data, https://gitbook-docs.coinmetrics.io/packages/coin-metrics-community-data
 - Kraken OHLC API (720 entries): https://docs.kraken.com/api/docs/rest-api/get-ohlc-data/

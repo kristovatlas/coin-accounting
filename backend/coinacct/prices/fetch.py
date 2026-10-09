@@ -1,8 +1,8 @@
-"""Bulk price downloads: the app's only internet traffic (flow F3; PLAN §6, ADR 0007; THREAT_MODEL T-301,
+"""Bulk price downloads: the app's only internet traffic (flow F3; PLAN §6, ADR 0039; THREAT_MODEL T-301,
 T-302, T-303, T-305).
 
 - **HTTPS only,** with certificate and host-name checks and TLS 1.2 or later. There is no opt-out.
-- **Only the hosts in HOSTS,** ADR 0007's F3 destinations, on port 443. A redirect is refused, not
+- **Only the hosts in HOSTS,** the F3 destinations (ADR 0039), on port 443. A redirect is refused, not
   followed, so a source can't send the request anywhere else.
 - **Optionally through a SOCKS5 proxy on loopback** (Tor), with remote DNS: the host name goes to the
   proxy, never to a local resolver, so no lookup leaves the machine either (T-302).
@@ -18,19 +18,17 @@ T-302, T-303, T-305).
   declared length is an error, not an end, and so is a TLS close without close_notify; the parsers
   still validate what they read (T-304).
 
-The three sources' downloads (`download_dump`, `download_ohlc`, `download_ecb`) are at the end. Their
+The sources' downloads (`download_ohlc`, `download_ecb`) are at the end. Their
 requests are fixed by the calendar alone: the same for every user (T-301). Fetching happens only when
 the user asks for a refresh (services). Nothing here runs on import.
 """
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import http.client
 import io
 import ipaddress
-import itertools
 import secrets
 import socket
 import ssl
@@ -45,10 +43,12 @@ from typing import Any, Final, NoReturn, cast
 from urllib.parse import urlsplit
 
 from coinacct.prices import CURRENCIES, DailyPrice
-from coinacct.prices.bitstamp import typical_by_day, vwap_by_day
+from coinacct.prices.bitstamp import typical_by_day
 from coinacct.prices.fx import Rates, ecb_rates
 
-HOSTS: Final = frozenset({"api.bitcoincharts.com", "www.bitstamp.net", "www.ecb.europa.eu"})  # ADR 0007
+# ADR 0039: the bitcoincharts archive is gone (unreachable, and a lapsed domain could be taken over);
+# Coin Metrics joins when its downloader lands.
+HOSTS: Final = frozenset({"www.bitstamp.net", "www.ecb.europa.eu"})
 # Tor Browser's User-Agent (Firefox 140 ESR): a common browser's, not a library's or this app's. Review
 # it at each Tor Browser major release.
 USER_AGENT: Final = "Mozilla/5.0 (Windows NT 10.0; rv:140.0) Gecko/20100101 Firefox/140.0"
@@ -242,7 +242,7 @@ def _check_url(url: str) -> tuple[str, str]:
     if parts.scheme != "https" or parts.username or parts.password or parts.fragment:
         _fail("only plain https URLs are fetched")
     if parts.hostname not in HOSTS or parts.netloc != parts.hostname:  # so no port, not even :443
-        _fail(f"{parts.hostname!r} is not a price source (ADR 0007)")
+        _fail(f"{parts.hostname!r} is not a price source (ADR 0039)")
     target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
     if not target.isascii() or any(c in target for c in " \r\n\t"):
         _fail("not a valid URL")
@@ -370,77 +370,19 @@ def _fail(message: str) -> NoReturn:
     raise FetchError(message)
 
 
-# --- the three sources (ADR 0007). Every URL is a constant or built from the calendar alone.
+# --- the sources (ADR 0039). Every URL is a constant or built from the calendar alone.
 
-DUMP_URL: Final = "https://api.bitcoincharts.com/v1/csv/bitstampUSD.csv.gz"
 OHLC_URL: Final = "https://www.bitstamp.net/api/v2/ohlc/btc{currency}/?step=86400&limit=1000&start={start}"
 ECB_URL: Final = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.zip"
 ECB_MEMBER: Final = "eurofxref-hist.csv"
 OHLC_FIRST: Final = date(2011, 8, 18)  # Bitstamp's first trading day: every page starts on this grid
 OHLC_PAGE_DAYS: Final = 1000  # Bitstamp's largest `limit`
-DUMP_MAX: Final = 4 << 30  # the whole trade history, compressed: a few hundred MB today
-DUMP_DEADLINE: Final = 6 * 3600.0  # seconds: a slow Tor circuit can need hours for it
-DUMP_LINE_MAX: Final = 256  # bytes: a trade line ("time,price,amount") is under 64
-DUMP_TEXT_MAX: Final = 64 << 30  # the unzipped dump: several GB today, with room to grow
 OHLC_MAX: Final = 1 << 20  # one page of 1000 candles is about 150 kB
 ECB_MAX: Final = 16 << 20  # the zip is well under 1 MB
 ECB_CSV_MAX: Final = 64 << 20  # and its one file a few MB, unzipped
 # The only zip flag bits accepted: a data descriptor (0x08) and UTF-8 names (0x800). Encryption (0x01,
 # 0x40), patched data (0x20) and anything newer are refused before zipfile meets them.
 _ZIP_FLAGS_OK: Final = 0x08 | 0x800
-
-
-class _Hashed(io.RawIOBase):
-    """A raw stream that hashes what passes through it (the content hash, T-303)."""
-
-    def __init__(self, raw: Body) -> None:
-        super().__init__()
-        self._raw, self.sha256 = raw, hashlib.sha256()
-
-    def readable(self) -> bool:
-        return True
-
-    def readinto(self, buffer: Buffer) -> int:
-        n = self._raw.readinto(buffer)
-        self.sha256.update(memoryview(buffer)[:n])
-        return n
-
-
-def download_dump(
-    complete_before: date, proxy: Proxy | None, cancelled: Callable[[], bool]
-) -> tuple[list[DailyPrice], str]:
-    """The trade dump's daily VWAPs, streamed (it is large), and the SHA-256 of the file as fetched. The
-    unzipped text is bounded too: each line by DUMP_LINE_MAX and the whole by DUMP_TEXT_MAX, so a
-    small gzip that expands without end (a decompression bomb) is refused, not followed (T-304)."""
-    with open_url(DUMP_URL, proxy, max_bytes=DUMP_MAX, deadline=DUMP_DEADLINE, cancelled=cancelled) as body:
-        hashed = _Hashed(body)
-        with gzip.GzipFile(fileobj=io.BufferedReader(hashed)) as unzipped:
-            try:
-                prices = vwap_by_day(_dump_lines(unzipped, cancelled), complete_before)
-            except (OSError, EOFError, zlib.error) as e:
-                _fail(f"api.bitcoincharts.com: the dump isn't a valid gzip ({type(e).__name__})")
-        return prices, hashed.sha256.hexdigest()
-
-
-def _dump_lines(unzipped: gzip.GzipFile, cancelled: Callable[[], bool]) -> Iterator[str]:
-    """The dump's lines, each read with a length limit (a line with no end can't fill memory) and the
-    total bounded; ASCII only. Cancellation is asked every so often between lines."""
-    total = 0
-    for n in itertools.count(1):
-        if n % 100_000 == 0 and cancelled():
-            raise Cancelled("api.bitcoincharts.com: the refresh was cancelled")
-        raw = unzipped.readline(DUMP_LINE_MAX + 1)
-        if not raw:
-            return
-        total += len(raw)
-        if len(raw) > DUMP_LINE_MAX:
-            _fail(f"api.bitcoincharts.com: line {n} of the dump is longer than any trade")
-        if total > DUMP_TEXT_MAX:
-            _fail("api.bitcoincharts.com: the dump unzips to more than allowed")
-        try:
-            yield raw.decode("ascii")
-        except UnicodeDecodeError:
-            _fail(f"api.bitcoincharts.com: line {n} of the dump isn't ASCII")
 
 
 def ohlc_pages(complete_before: date) -> list[str]:

@@ -1,4 +1,4 @@
-"""Combining and checking daily price series (PLAN §6, ADR 0007; THREAT_MODEL T-303, T-304)."""
+"""Combining and checking daily price series (PLAN §6, ADR 0039; THREAT_MODEL T-303, T-304)."""
 
 from __future__ import annotations
 

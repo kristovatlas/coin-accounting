@@ -1,4 +1,4 @@
-"""The price download layer (F3; ADR 0007; THREAT_MODEL T-301, T-302, T-303, T-305).
+"""The price download layer (F3; ADR 0039; THREAT_MODEL T-301, T-302, T-303, T-305).
 
 No test reaches the internet (the socket guard would fail it). A fake server on loopback stands in for
 the price host, and for the SOCKS5 proxy in front of it. TLS itself is the standard library's; the tests

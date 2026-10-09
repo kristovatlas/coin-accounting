@@ -1,11 +1,8 @@
-"""Bitstamp price data into daily prices (PLAN §6, ADR 0007; THREAT_MODEL T-303, T-304).
+"""Bitstamp price data into daily prices (PLAN §6, ADR 0039; THREAT_MODEL T-303, T-304).
 
-- **Trade dump** (bitcoincharts' `bitstampUSD.csv`): one trade per line, `unix time,price,amount`, in
-  time order. Each UTC day's price is its volume-weighted average. The dump's last day is always
-  dropped: the archive may have stopped mid-day, and a partial average would replace that day's full
-  typical price. Blank lines and a byte-order mark are refused like any other malformed line.
-- **Daily OHLC** (Bitstamp's `/api/v2/ohlc/<pair>/` with `step=86400`): JSON candles. Each day's price
-  is the typical price (H+L+C)/3, used where the dump has no trades (`prices.combine`).
+**Daily OHLC** (Bitstamp's `/api/v2/ohlc/<pair>/` with `step=86400`): JSON candles. Each day's price is
+the typical price (H+L+C)/3: until the Coin Metrics downloader lands it is the USD price, and after that
+the cross-check and the fill for any day the reference rate lacks (ADR 0039).
 
 Pure parsers: text in, values out. All arithmetic is exact integers (values scaled by 10^12), rounded
 once, half to even, to whole cents. Anything malformed raises `PriceError` naming the line or candle,
@@ -17,52 +14,20 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final, NoReturn
 
 from coinacct.prices import CURRENCIES, MAX_CENTS, DailyPrice, PriceError
 
-DUMP_SOURCE: Final = "bitcoincharts:bitstampUSD"
 OHLC_SOURCE: Final = "bitstamp:ohlc"
 DAY_SECONDS: Final = 86_400
-_SCALE: Final = 10**12  # the dump's values have at most 12 decimals
+_SCALE: Final = 10**12  # a candle's values have at most 12 decimals
 _NUMBER: Final = re.compile(r"([0-9]{1,15})(?:\.([0-9]{1,12}))?")
 _TIME: Final = re.compile(r"[0-9]{1,12}")
 # 2009-01-03 (the genesis block) to 9999-12-31: a timestamp outside this is not a trade's.
 _FIRST: Final = 1_230_940_800
 _LAST: Final = 253_402_300_799
-
-
-def vwap_by_day(lines: Iterable[str], complete_before: date) -> list[DailyPrice]:
-    """Each complete UTC day's volume-weighted average USD price from the trade dump's lines, all but the
-    dump's last day. A day whose trades have no volume gets no price (a gap, for `prices.check`)."""
-    out: list[DailyPrice] = []
-    day: date | None = None
-    value = volume = 0  # sum of price * amount (scale 10^24), sum of amounts (scale 10^12)
-    last = _FIRST
-    for n, raw in enumerate(lines, 1):
-        fields = raw.removesuffix("\n").removesuffix("\r").split(",")
-        if len(fields) != 3:
-            _fail(f"line {n}: expected time,price,amount")
-        when = _time(fields[0], f"line {n}")
-        if when < last:
-            _fail(f"line {n}: out of time order")
-        last = when
-        price, amount = _number(fields[1], f"line {n}"), _number(fields[2], f"line {n}")
-        if price == 0:
-            _fail(f"line {n}: a price must be positive")
-        on = datetime.fromtimestamp(when, UTC).date()
-        if on != day:
-            if day is not None and volume:
-                vwap = _cents(value, volume * _SCALE, f"the day ending at line {n - 1}")
-                out.append(DailyPrice(day, "USD", vwap, "vwap", DUMP_SOURCE))
-            day, value, volume = on, 0, 0
-        value += price * amount
-        volume += amount
-    # the last day (`day`, still open) is never appended: the dump may end part-way through it
-    return [p for p in out if p.day < complete_before]
 
 
 def typical_by_day(

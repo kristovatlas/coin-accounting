@@ -185,6 +185,7 @@ The doxx set of a coin is the set of **identity-knowing entities** (`knows_ident
   - Bitstamp's paginated daily OHLCV is the second source. Its typical price, (H+L+C)/3, is compared with the reference rate every day (a review flag), and fills any day the rate lacks. The `method` column records which was used.
   - The bitcoincharts trade archive is no longer used: it was unreachable in October 2026 (ADR 0039).
   - The refresh flags a reference rate that has stopped updating, and M5 checks that every source is still reachable.
+  - Coin Metrics' data is CC BY-NC 4.0: non-commercial use only, and the app credits Coin Metrics wherever it shows or exports these prices.
 - **Other fiat (display only):** Bitstamp EUR/GBP pairs, or USD × ECB historical FX. **All supported pairs are fetched every time**, so the download doesn't reveal the user's currency or residency.
 - **Requests:** made only when the user clicks refresh. They don't depend on user records (events, addresses, tags); only the start of the incremental range depends on what is already cached. An httpx client with an optional SOCKS5/Tor proxy (remote DNS) sends a common browser User-Agent and nothing else.
 - **Overrides:** the user can override the valuation per event, e.g. an exchange fill price, the W-2/payroll value for salary, or a timestamped rate for income on a volatile day.
