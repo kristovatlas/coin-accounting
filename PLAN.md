@@ -104,7 +104,7 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
 - `entity`: id, name, kind (`self | exchange | employer | merchant | person | unknown`), **`knows_identity`** flag (default true for exchanges and employers), notes.
 - `tax_account`: the unit for per-wallet/account basis (Rev. Proc. 2024-28).
   - kind: `self_custody | custodial`; name
-  - **standing identification method** (`fifo | specific | …`): what the user or broker has on file
+  - **standing identification method** (`fifo | specific | …`): what the user or broker has on file. For a self-custody wallet, a history of method records (oldest first, a recorded method, or whole-wallet FIFO), each with its effective-from and recorded-at times (ADR 0041)
   - For a custodial account: the entity (exchange) and 1099-DA flags.
 - `wallet_client`: software/hardware clients (`hardware | mobile | desktop | web | paper | other`). **Labels only**, many-to-many with addresses. An address can live in several clients, e.g. generated on a hardware wallet and imported into a mobile wallet.
 - `address`: keyed by **scripthash**, so P2PK and bare multisig work. Fields:
@@ -135,11 +135,13 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
   - Gifts additionally store donor basis, donor date, FMV at gift, and gift date (dual basis).
   - Inheritance stores FMV at death.
 - `lot_fragment`: (holder = outpoint *or* tax_account, lot_id, sats). The engine can recompute it as of any date.
-- `identification`: disposal/withdrawal → lot choices, `identified_at` timestamp, method (`specific | standing_order | fifo_default`), and a `late` flag (warning only).
+- `lot_link` (ADR 0041): a lot (or some of its sats) → an output of the same account it arrived in, with sats, `made_at`, and its source (proposed from a record, or the user's). A lot's linked sats never exceed the lot.
+- Placeholder lots of unknown basis on a coin its lots and pool can't cover, with the user's resolution (date and basis, or a link) (ADR 0041).
+- `identification`: disposal/withdrawal (or a coin's pool draw, ADR 0041) → lot choices, `identified_at` timestamp, method (`specific | standing_order | fifo_default`), and a `late` flag (warning only).
 - `disposal_allocation`: disposal → lot_id, sats, basis, proceeds share (net of disposal costs), holding period, and the 8949 box plus the reason it was chosen.
 - `doxx_tag`: outpoint or scripthash, entity_id, **confidence** (`certain | inferred`), reason (`paid_to | change_of | co_spent_with | address_reuse | cluster_backward | received_from | manual`), source txid, `manual_override`.
 - `price`: UTC date, currency, price, source, method, content hash.
-- `change_log`: append-only record of every edit to events, tags, identifications and overrides.
+- `change_log`: append-only record of every edit to events, tags, identifications, overrides, lot links, wallet method records and placeholder resolutions.
 - `settings`: fee treatment, time zone, proxy, confirmation threshold, etc.
 
 ### 3. Import, discovery, clustering (`services/discovery.py`, `services/tagging.py`)
@@ -213,7 +215,7 @@ A pure, deterministic function of events, recomputed on every change. It can com
   - `identified_at` is stored for every lot choice: exchange sales **and exchange withdrawals**. **Warn only** (user decision, 2026-09-27): a choice made after the sale or withdrawal is flagged `late`. The app shows a warning that the IRS may apply the account's standing order, or FIFO if there is none, together with the result under that method. It notes the flag in the audit trail and on reports, but it **uses the user's choice** and does not block reports.
   - **Automatic mode** (ADR 0021): an account can use its standing method (FIFO by default) automatically. The lot picker is then skipped, the lots used are shown, and nothing is ever `late`. In manual mode, the late warning appears only when the chosen lots **differ** from what the standing method (or FIFO) would give.
   - For 2027+ sales the UI warns that the identification must be communicated to the broker.
-  - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet. How (ADR 0041, proposed): acquisitions and withdrawals into a wallet name the outputs they arrived in; a transaction's owned inputs are one merged set, whose lots go first to the outputs leaving the wallet, then the fee, then the change, whatever the output order; a coin short of lots draws from the wallet's unattached pool, and if that is short too gets a placeholder lot of unknown basis (blocking); a wallet's method has an effective-from time.
+  - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet. How (ADR 0041, proposed): acquisitions and withdrawals into a wallet name the outputs they arrived in (facts, change-logged); a transaction's leaving roles take the identification order first (disposals, then gifts, then deposits), and same-role and change outputs share proportionally, so output order never decides; a coin short of lots draws from the wallet's pool of lots that had entered it by then, and if that is short too gets a placeholder lot of unknown basis (blocking); a wallet's method records have effective-from and recorded-at times.
 - **Fees by role:**
   - acquisition fees add to basis
   - disposal fees reduce proceeds; proceeds are net of costs, matching 1099-DA
