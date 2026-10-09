@@ -8,7 +8,6 @@ check the context it is given and where the TLS layer is applied.
 from __future__ import annotations
 
 import gzip
-import http.client
 import io
 import socket
 import ssl
@@ -48,11 +47,13 @@ class FakeServer:
         auth: bytes | None = None,
         then_close: bool = False,
         drip: float = 0.0,
+        hold: bool = False,
+        socks_drip: float = 0.0,
     ) -> None:
         self.listener = socket.create_server(("127.0.0.1", 0))
         self.port = self.listener.getsockname()[1]
         self.response, self.socks_reply, self.http, self.auth = response, socks, http, auth
-        self.then_close, self.drip = then_close, drip
+        self.then_close, self.drip, self.hold, self.socks_drip = then_close, drip, hold, socks_drip
         self.greeting = b""
         self.credentials = b""
         self.socks_request = b""
@@ -65,25 +66,8 @@ class FakeServer:
         with conn:
             conn.settimeout(5)
             try:
-                if self.socks_reply is not None:
-                    head = recv_exactly(conn, 2)
-                    self.greeting = head + recv_exactly(conn, head[1])
-                    if self.auth is None:
-                        conn.sendall(b"\x05\x00")
-                    else:
-                        conn.sendall(b"\x05\x02")
-                        user = recv_exactly(conn, 2)
-                        user += recv_exactly(conn, user[1])
-                        password = recv_exactly(conn, 1)
-                        self.credentials = user + password + recv_exactly(conn, password[0])
-                        conn.sendall(self.auth)
-                        if self.auth != b"\x01\x00":
-                            return
-                    head = recv_exactly(conn, 5)
-                    self.socks_request = head + recv_exactly(conn, head[4] + 2)
-                    conn.sendall(self.socks_reply)
-                    if not self.http:
-                        return
+                if self.socks_reply is not None and not self._socks(conn):
+                    return
                 while b"\r\n\r\n" not in self.request:
                     chunk = conn.recv(4096)
                     if not chunk:
@@ -100,6 +84,36 @@ class FakeServer:
             except (ConnectionError, TimeoutError):
                 return
 
+    def _socks(self, conn: socket.socket) -> bool:
+        """The proxy's side of the handshake; whether HTTP follows."""
+        assert self.socks_reply is not None
+        head = recv_exactly(conn, 2)
+        self.greeting = head + recv_exactly(conn, head[1])
+        if self.auth is None:
+            conn.sendall(b"\x05\x00")
+        else:
+            conn.sendall(b"\x05\x02")
+            user = recv_exactly(conn, 2)
+            user += recv_exactly(conn, user[1])
+            password = recv_exactly(conn, 1)
+            self.credentials = user + password + recv_exactly(conn, password[0])
+            conn.sendall(self.auth)
+            if self.auth != b"\x01\x00":
+                return False
+        head = recv_exactly(conn, 5)
+        self.socks_request = head + recv_exactly(conn, head[4] + 2)
+        if self.socks_drip:
+            for i in range(len(self.socks_reply)):
+                conn.sendall(self.socks_reply[i : i + 1])
+                time.sleep(self.socks_drip)
+        else:
+            conn.sendall(self.socks_reply)
+        if not self.http:
+            while self.hold and conn.recv(4096):  # silent: read whatever comes, answer nothing
+                pass
+            return False
+        return True
+
     def close(self) -> None:
         self.thread.join(5)
         self.listener.close()
@@ -112,25 +126,30 @@ def ok(body: bytes, length: bool = True) -> bytes:
 
 @pytest.fixture
 def direct(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[FakeServer]]:
-    """Point the direct HTTPS connection at a fake loopback server, without TLS."""
+    """Point the connection at a fake loopback server, without the encryption: the same deadline-bound
+    socket class (`_DeadlineIO`) that TLS uses, over plain TCP. Everything else is the real path."""
     servers: list[FakeServer] = []
+    contexts: list[ssl.SSLContext] = []
 
-    class Plain(http.client.HTTPConnection):
-        def __init__(self, host: str, port: int, *, timeout: float, context: ssl.SSLContext) -> None:
-            assert (port, context.verify_mode, context.check_hostname) == (443, ssl.CERT_REQUIRED, True)
-            super().__init__("127.0.0.1", servers[-1].port, timeout=timeout)
-            self.real_host = host
+    def tcp(self: Any) -> socket.socket:
+        contexts.append(self._tls)
+        return socket.create_connection(
+            ("127.0.0.1", servers[-1].port), timeout=self._deadline.left(self.host)
+        )
 
-        def putheader(self, header: str | bytes, *values: Any) -> None:
-            # http.client sends Host from the connection; the real class would send the source's name
-            if header == "Host":
-                values = (self.real_host,)
-            super().putheader(header, *values)
+    def wrap(self: Any, sock: socket.socket) -> socket.socket:
+        plain = fetch._DeadlineIO(fileno=sock.detach())
+        plain.deadline, plain.host = self._deadline, self.host
+        return plain
 
-    monkeypatch.setattr(http.client, "HTTPSConnection", Plain)
+    monkeypatch.setattr(fetch._Connection, "_tcp", tcp)
+    monkeypatch.setattr(fetch._Connection, "_wrap", wrap)
     yield servers
     for s in servers:
         s.close()
+    for ctx in contexts:  # the context the real _wrap would use
+        assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+        assert ctx.sslsocket_class is fetch._DeadlineSocket
 
 
 def test_a_download_sends_one_fixed_request_and_streams_the_body(direct: list[FakeServer]) -> None:
@@ -312,32 +331,54 @@ def test_a_download_through_the_proxy_wraps_tls_around_the_tunnel(monkeypatch: p
     server = FakeServer(ok(b"rates"), socks=socks_ok())
     wrapped: list[str] = []
 
-    class NoTLS:
-        def wrap_socket(self, sock: socket.socket, server_hostname: str) -> socket.socket:
-            wrapped.append(server_hostname)  # TLS starts after the tunnel, for the source's own name
-            return sock
-
-    real = fetch._SocksHTTPSConnection.__init__
-    contexts: list[ssl.SSLContext] = []
-
-    def init(self: Any, host: str, proxy: Proxy, timeout: float) -> None:
-        real(self, host, proxy, timeout)
-        contexts.append(self._tls)  # the real context, checked below, before it is swapped out
+    def wrap(self: Any, sock: socket.socket) -> socket.socket:
+        wrapped.append(self.host)  # TLS starts after the tunnel, for the source's own name
+        assert self._tls.verify_mode == ssl.CERT_REQUIRED and self._tls.check_hostname
         assert self._context is self._tls  # one context: the one the tunnel is wrapped in
-        self._tls = NoTLS()
+        plain = fetch._DeadlineIO(fileno=sock.detach())
+        plain.deadline, plain.host = self._deadline, self.host
+        return plain
 
-    monkeypatch.setattr(fetch._SocksHTTPSConnection, "__init__", init)
+    monkeypatch.setattr(fetch._Connection, "_wrap", wrap)
     with open_url(
         "https://www.ecb.europa.eu/stats/x.zip", Proxy("127.0.0.1", server.port), max_bytes=10
     ) as body:
         assert body.read() == b"rates"
     server.close()
     assert wrapped == ["www.ecb.europa.eu"]
-    (ctx,) = contexts
-    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
-    assert ctx.minimum_version == ssl.TLSVersion.TLSv1_2
     assert b"\x03\x11www.ecb.europa.eu\x01\xbb" in server.socks_request
     assert server.request.startswith(b"GET /stats/x.zip HTTP/1.1\r\n")
+
+
+def test_a_tls_handshake_that_stalls_is_cut_off_at_the_deadline() -> None:
+    # the real TLS path: after the tunnel, the "source" never answers the ClientHello
+    server = FakeServer(b"", socks=socks_ok(), http=False, hold=True)
+    started = time.monotonic()
+    with pytest.raises(FetchError, match=r"www\.ecb\.europa\.eu: the download took too long"):
+        with open_url(
+            "https://www.ecb.europa.eu/",
+            Proxy("127.0.0.1", server.port),
+            max_bytes=1,
+            timeout=5,
+            deadline=0.4,
+        ):
+            pass
+    assert time.monotonic() - started < 2.5
+    server.close()
+
+
+def test_the_tcp_connect_waits_at_most_the_time_left(monkeypatch: pytest.MonkeyPatch) -> None:
+    waits: list[float] = []
+
+    def stalled(address: Any, timeout: float) -> socket.socket:
+        waits.append(timeout)
+        raise TimeoutError
+
+    monkeypatch.setattr(socket, "create_connection", stalled)
+    with pytest.raises(FetchError, match="the download failed"):
+        with open_url(URL, max_bytes=1, timeout=60, deadline=0.5):
+            pass
+    assert len(waits) == 1 and 0 < waits[0] <= 0.5
 
 
 def test_a_proxy_that_is_not_listening_is_a_fetch_error() -> None:
@@ -408,9 +449,11 @@ def test_headers_that_drip_past_the_deadline_are_cut_off(direct: list[FakeServer
     assert time.monotonic() - started < 2.5
 
 
-def test_a_body_that_drips_past_the_deadline_is_cut_off(direct: list[FakeServer]) -> None:
-    head = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n"
-    direct.append(FakeServer(head + b"a" * 100, drip=0.01))
+@pytest.mark.parametrize("length", [True, False])
+def test_a_body_that_drips_past_the_deadline_is_cut_off(direct: list[FakeServer], length: bool) -> None:
+    # ok() sends "Connection: close" (and here, maybe no length): http.client hands the socket to the
+    # response, and the drip is still cut
+    direct.append(FakeServer(ok(b"a" * 100, length=length), drip=0.01))
     started = time.monotonic()
     with pytest.raises(FetchError, match="took too long"):
         with open_url(URL, max_bytes=100, timeout=5, deadline=0.6) as body:
@@ -428,6 +471,8 @@ def test_a_body_that_drips_past_the_deadline_is_cut_off(direct: list[FakeServer]
         ("deadline", True),
         ("timeout", "1"),
         ("timeout", 0),
+        ("timeout", 1e300),
+        ("deadline", 86_401),
     ],
 )
 def test_the_timeout_and_deadline_must_be_positive_finite_seconds(name: str, value: object) -> None:
@@ -464,6 +509,12 @@ def test_a_huge_declared_length_is_too_large_not_a_crash(direct: list[FakeServer
             pass
 
 
+def test_leading_zeros_in_a_declared_length_are_read_as_the_number(direct: list[FakeServer]) -> None:
+    direct.append(FakeServer(b"HTTP/1.1 200 OK\r\nContent-Length: " + b"0" * 5000 + b"3\r\n\r\nabc"))
+    with open_url(URL, max_bytes=10) as body:  # 5000 digits would be past int()'s limit
+        assert body.read() == b"abc"
+
+
 def test_an_empty_body_fits_a_zero_limit(direct: list[FakeServer]) -> None:
     direct.append(FakeServer(ok(b"")))
     with open_url(URL, max_bytes=0) as body:
@@ -471,7 +522,8 @@ def test_an_empty_body_fits_a_zero_limit(direct: list[FakeServer]) -> None:
 
 
 def test_a_body_without_a_declared_length_ends_where_the_connection_does(direct: list[FakeServer]) -> None:
-    # nothing at this layer can tell a cut from an end here: the parsers validate what they read (T-304)
+    # over plain TCP a cut looks like an end; under TLS, a close without close_notify is an error
+    # (suppress_ragged_eofs=False), and the parsers validate what they read anyway (T-304)
     direct.append(FakeServer(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabc", then_close=True))
     with open_url(URL, max_bytes=10) as body:
         assert body.read() == b"abc"
@@ -481,7 +533,7 @@ def test_a_body_is_closed_when_the_download_ends(direct: list[FakeServer]) -> No
     direct.append(FakeServer(ok(b"abc")))
     with open_url(URL, max_bytes=10) as body:
         pass
-    assert body.closed
+    assert body.closed and body._response.isclosed()  # the response, which may own the socket, too
     with pytest.raises(ValueError, match="closed"):
         body.read()
 
@@ -503,25 +555,6 @@ def test_a_malformed_declared_length_is_refused(direct: list[FakeServer], length
             pass
 
 
-def test_the_watchdog_catches_a_socket_made_after_the_deadline_and_tolerates_a_closed_one() -> None:
-    class Conn:
-        sock: Any = None
-
-    conn = Conn()
-    dog = fetch._Watchdog(conn, 0.01)  # type: ignore[arg-type]  # only .sock is read
-    time.sleep(0.1)  # fired with no socket yet: nothing to shut down, keeps watching
-    a, b = socket.socketpair()
-    conn.sock = a
-    time.sleep(1.2)  # the next pass shuts the new socket down
-    assert a.recv(1) == b""  # shut down for reading: end of stream at once
-    a.close()  # shutting down a closed socket fails; the watchdog shrugs that off
-    time.sleep(1.1)
-    dog.stop()
-    b.close()
-    with pytest.raises(FetchError, match="x: the download took too long"):
-        dog.check("x")
-
-
 def test_a_proxy_that_stalls_its_handshake_is_cut_off_at_the_deadline() -> None:
     silent = socket.create_server(("127.0.0.1", 0))  # accepts (through the backlog), never answers
     started = time.monotonic()
@@ -535,3 +568,71 @@ def test_a_proxy_that_stalls_its_handshake_is_cut_off_at_the_deadline() -> None:
         ):
             pass
     assert time.monotonic() - started < 2.5
+
+
+def test_an_unexpected_error_in_the_socks_handshake_still_closes_the_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = FakeServer(b"", socks=socks_ok(), http=False)
+    closed: list[bool] = []
+    real_close = socket.socket.close
+
+    def boom(sock: socket.socket, *args: Any) -> None:
+        raise RuntimeError("unexpected")
+
+    def close(self: socket.socket) -> None:
+        closed.append(True)
+        real_close(self)
+
+    monkeypatch.setattr(fetch, "socks5_connect", boom)
+    monkeypatch.setattr(socket.socket, "close", close)
+    with pytest.raises(RuntimeError, match="unexpected"):
+        with open_url("https://www.ecb.europa.eu/", Proxy("127.0.0.1", server.port), max_bytes=1):
+            pass
+    assert closed
+    monkeypatch.undo()
+    server.close()
+
+
+def test_a_body_closed_twice_closes_the_response_once(direct: list[FakeServer]) -> None:
+    direct.append(FakeServer(ok(b"abc")))
+    with open_url(URL, max_bytes=10) as body:
+        body.close()
+        body.close()
+        assert body.closed
+
+
+def test_a_socks_reply_that_drips_is_cut_at_the_deadline_not_after_it() -> None:
+    # each byte comes well within the timeout; only the time left, rechecked per read, stops it
+    server = FakeServer(b"", socks=socks_ok(), http=False, socks_drip=0.2)
+    started = time.monotonic()
+    with pytest.raises(FetchError, match="took too long"):
+        with open_url(
+            "https://www.ecb.europa.eu/",
+            Proxy("127.0.0.1", server.port),
+            max_bytes=1,
+            timeout=5,
+            deadline=0.35,
+        ):
+            pass
+    assert time.monotonic() - started < 1.2  # the reply alone takes 2 s
+    server.close()
+
+
+def test_the_tls_layer_refuses_a_close_without_close_notify(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+    real = ssl.SSLContext.wrap_socket
+
+    def spy(self: ssl.SSLContext, sock: socket.socket, **kwargs: Any) -> ssl.SSLSocket:
+        calls.append(kwargs)
+        return real(self, sock, **kwargs)
+
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", spy)
+    server = FakeServer(b"", socks=socks_ok(), http=False)  # closes after the tunnel: an abrupt end
+    with pytest.raises(FetchError, match="the download failed"):
+        with open_url("https://www.ecb.europa.eu/", Proxy("127.0.0.1", server.port), max_bytes=1):
+            pass
+    server.close()
+    (kwargs,) = calls
+    assert kwargs["suppress_ragged_eofs"] is False and kwargs["do_handshake_on_connect"] is False
+    assert kwargs["server_hostname"] == "www.ecb.europa.eu"
