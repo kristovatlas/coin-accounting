@@ -25,7 +25,7 @@ _This ADR amends ADR 0039's licence section, "The API's own terms"._
 
 Chosen option: 1, the owner's decision (2026-10-11).
 
-- **No landing condition:** ADR 0039's "the downloader can't land until … the owner has confirmed" condition is removed.
+- **No landing condition:** ADR 0039's "The API's own terms" bullet is replaced, except its early-years check (below). That includes "the downloader can't land until … the owner has confirmed" and "if the terms forbid automated or Tor access, the downloader doesn't land, and a new ADR decides the source". A source's terms are the user's to accept, so terms that turn up later don't stop the downloader or need a new ADR.
 - **The early-years check stays, as a follow-up:** ADR 0039 also asked to confirm what Coin Metrics' methodology says about 2010 to 2013, and to mention any difference in the stated tax position. That is a tax-accuracy check, separate from the terms. It is kept, but no longer holds up the downloader: #283 tracks it.
 - **The README states it:** using the app means the user agrees to the terms of the data sources it downloads from:
   - Coin Metrics (community API and data licence)
@@ -33,12 +33,13 @@ Chosen option: 1, the owner's decision (2026-10-11).
   - the European Central Bank
 
   It links each source's site. Coin Metrics' community-API terms couldn't be found (2026-10-09), so the README links its community data licence and says so.
-- **If a source refuses Tor:** the README says to wait or retry over Tor, or use the CSV price upload once it lands (T-304), rather than switch to a direct connection, which would show the source the user's IP (T-302).
+- **If a source refuses Tor:** the README says to wait and retry over Tor, or use the CSV price upload once it lands (T-304), rather than switch to a direct connection, which would show the source the user's IP (T-302).
 - **Nothing in the app:** no prompt, setting or check. The download flow is unchanged.
 - **Unchanged from ADR 0039:**
   - the CC BY-NC 4.0 licence and its non-commercial limit (already in the README)
   - attribution wherever Coin Metrics' prices are shown or exported (#272)
   - the F3 hosts and the fixed, record-independent requests
+  - the rate-limit rule: honour HTTP 429 and `Retry-After`, and never rotate the Tor circuit or identity to get past a limit
 
 ### Consequences
 
