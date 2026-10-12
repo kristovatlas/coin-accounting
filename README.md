@@ -10,4 +10,7 @@ USD prices are to come from [Coin Metrics](https://coinmetrics.io/)' daily refer
 
 Once it does, Bitstamp's daily prices become the cross-check. The European Central Bank's reference rates convert prices into other currencies for display.
 
-**Data sources' terms.** The app downloads prices from [Coin Metrics](https://coinmetrics.io/) ([community data and licence](https://github.com/coinmetrics/data)), [Bitstamp](https://www.bitstamp.net/) and the [European Central Bank](https://www.ecb.europa.eu/). Using the app means you agree to each source's terms, including for automated downloads and downloads over Tor. The app doesn't check this for you ([ADR 0042](docs/adr/0042-price-source-terms-are-the-users.md)).
+**Data sources' terms.** The app downloads prices from [Bitstamp](https://www.bitstamp.net/) and the [European Central Bank](https://www.ecb.europa.eu/), and from [Coin Metrics](https://coinmetrics.io/) once its downloader lands. Using the app means you agree to each source's terms, including for automated downloads and downloads over Tor. The app doesn't check this for you ([ADR 0042](docs/adr/0042-price-source-terms-are-the-users.md)).
+- **Coin Metrics:** its community-API terms couldn't be found when this was written (October 2026); its [community data licence](https://github.com/coinmetrics/data) is above.
+- **How the app asks:** for privacy, its requests use a common browser User-Agent, so a source can't tell they come from this app.
+- **If a source refuses downloads over Tor,** upload prices from a CSV file instead of switching to a direct connection: a direct connection shows the source your IP address.
