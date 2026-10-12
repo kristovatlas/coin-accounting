@@ -215,7 +215,7 @@ A pure, deterministic function of events, recomputed on every change. It can com
   - `identified_at` is stored for every lot choice: exchange sales **and exchange withdrawals**. **Warn only** (user decision, 2026-09-27): a choice made after the sale or withdrawal is flagged `late`. The app shows a warning that the IRS may apply the account's standing order, or FIFO if there is none, together with the result under that method. It notes the flag in the audit trail and on reports, but it **uses the user's choice** and does not block reports.
   - **Automatic mode** (ADR 0021): an account can use its standing method (FIFO by default) automatically. The lot picker is then skipped, the lots used are shown, and its selections are never `late` (changing a wallet's whole-wallet FIFO setting after the fact is, ADR 0041). In manual mode, the late warning appears only when the chosen lots **differ** from what the standing method (or FIFO) would give.
   - For 2027+ sales the UI warns that the identification must be communicated to the broker.
-  - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet. How (ADR 0041, proposed): purchases and withdrawals into a wallet are linked to the output they arrived in; when a wallet transaction spends coins, what leaves the wallet takes their lots oldest first, then the fee, then the change, whatever the output order; coins received before a wallet's tracking start date with no link draw from a pool of unlinked lots, and a coin still short gets a placeholder lot of unknown basis (blocking); these aren't supported yet and block the report: more than one leaving event, unclassified outgoing outputs, shared (PayJoin/CoinJoin) and multi-account transactions, identical outputs whose lots would differ, other wallet methods, switching a wallet holding coins back from whole-wallet FIFO, transfers between FIFO and traced wallets, wallets with no tracking start date, and unrecorded receipts after it.
+  - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet. How (ADR 0041): purchases and withdrawals into a wallet are linked to the output they arrived in; when a wallet transaction spends coins, what leaves the wallet takes their lots oldest first, then the fee, then the change, whatever the output order; coins received before a wallet's tracking start date with no link draw from a pool of unlinked lots, and a coin still short gets a placeholder lot of unknown basis (blocking); these aren't supported yet and block the report: more than one leaving event, unclassified outgoing outputs, shared (PayJoin/CoinJoin) and multi-account transactions, identical outputs whose lots would differ, other wallet methods, switching a wallet holding coins back from whole-wallet FIFO, transfers between FIFO and traced wallets, wallets with no tracking start date, and unrecorded receipts after it.
 - **Fees by role:**
   - acquisition fees add to basis
   - disposal fees reduce proceeds; proceeds are net of costs, matching 1099-DA. A self-custody network fee is not one of these: its sats are part of the disposal (ADR 0041)
@@ -372,6 +372,21 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
 
    What M2 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues #184, #186, #188, #190, #192, #194, #196, #198 and #200.
 4. **M3 graph UI:** backward/forward expansion, the tagging side panel, the mixing flag.
+
+   M3 is done (2026-10-08). The merged PRs:
+   - the graph libraries, `cytoscape` and `@dagrejs/dagre` (#204, ADR 0037)
+   - transaction and spender expansion for the graph (#205)
+   - tagging from the graph, the mixing flag and the append-only change log (#207)
+   - tagging follow-ups: the address text checked against its script, the log guarded against replacement, a log holding an id only an outside edit can write refused at upgrade, and import edits logged (#214, #217, #219, #221)
+   - the graph view and its tagging side panel (#223)
+
+   As built, it differs from this plan in these ways:
+   - **Paging:** a transaction's inputs and outputs are all added at once; paging large transactions, with a node budget, is #225.
+   - **Colours:** outputs are coloured by class (yours, someone else's, untagged, unspendable), not per entity yet (#226).
+   - **Expansion E2E:** the E2E test opens a transaction, flags it, checks an unspent output and re-tags it; backward and spent-forward expansion need a spend in the regtest harness (#224).
+   - **Mixing flag:** the user sets it; auto-detection comes with the clustering heuristics (M4).
+
+   What M3 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues #206, #209, #220, #222, #224–#227, #229 (tag provenance per change, before M4) and #230 (frontend unit tests).
 5. **M4 clustering suggestions + doxx propagation:** certain and inferred links, plus the sell planner view.
 6. **M5 prices:** USD from Coin Metrics' daily reference rate with Bitstamp as the cross-check (ADR 0039), display FX for all pairs, proxy support.
 7. **M6 lot engine:**
