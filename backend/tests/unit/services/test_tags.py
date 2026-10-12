@@ -78,25 +78,35 @@ def test_a_newly_tagged_address_is_scanned_and_a_retag_isnt_rescanned(
     assert first.at == AT and second.before == first.after
 
 
-def test_a_refused_tag_is_a_fixed_message_that_doesnt_repeat_the_input(tagging: Tagging) -> None:
+def test_a_refused_tag_is_a_fixed_message_and_nothing_is_stored_or_scanned(
+    tagging: Tagging, conn: sqlite3.Connection, syncs: Syncs
+) -> None:
     with pytest.raises(ImportRefused) as caught:
         tagging.tag_address(SCRIPT, text=None, entity_id=ME, tax_account_id=None, label="", client_ids=[])
-    assert SCRIPT not in str(caught.value)
+    assert str(caught.value) == (
+        "that tag (an unknown owner, account or client; the user's address needs one self-custody"
+        " account, anyone else's none; a descriptor's address changes owner only with its descriptor)"
+    )
+    assert ac.addresses(conn) == [] and syncs.count == 0
 
 
-def test_a_private_key_in_a_label_is_refused_t703(tagging: Tagging, conn: sqlite3.Connection) -> None:
+def test_a_private_key_in_a_label_is_refused_t703(
+    tagging: Tagging, conn: sqlite3.Connection, syncs: Syncs
+) -> None:
     exchange = ac.add_entity(conn, "Some exchange", "exchange")
     wif_shaped = ("K" + "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")[:52]
     with pytest.raises(PrivateKeyError):
         tagging.tag_address(
             SCRIPT, text=None, entity_id=exchange, tax_account_id=None, label=wif_shaped, client_ids=[]
         )
+    assert ac.addresses(conn) == [] and syncs.count == 0  # the service lets the key refusal through first
 
 
 def test_the_mixing_flag_and_its_history(tagging: Tagging) -> None:
     tagging.set_mixing(TXID, True)
     [change] = tagging.changes("tx_flag", TXID)
-    assert change.kind == "tx_flag" and change.after == {"mixing": True, "source": "user"}
+    assert (change.at, change.before) == (AT, None)  # logged at the service's clock
+    assert change.after == {"mixing": True, "source": "user"}
 
 
 def test_a_busy_db_is_busy(tagging: Tagging, monkeypatch: pytest.MonkeyPatch) -> None:
