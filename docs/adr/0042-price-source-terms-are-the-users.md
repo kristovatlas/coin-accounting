@@ -17,7 +17,7 @@ _This ADR amends ADR 0039's licence section, "The API's own terms"._
 
 ## Considered Options
 
-1. **The user accepts the sources' terms; the README says so and links them.** Chosen.
+1. **The user accepts the sources' terms; the README says so and links each source's site.** Chosen.
 2. **Keep ADR 0039's condition:** hold the downloader until the terms are found and confirmed. Rejected: the community API's terms couldn't be found, so this could block the downloader indefinitely.
 3. **Ask the user in the app** (a prompt or setting) before the first download. Rejected: it adds a step to every user's workflow, which the owner doesn't want.
 
@@ -33,7 +33,7 @@ Chosen option: 1, the owner's decision (2026-10-11).
   - the European Central Bank
 
   It links each source's site. Coin Metrics' community-API terms couldn't be found (2026-10-09), so the README links its community data licence and says so.
-- **If a source refuses Tor:** the README says to use the CSV price upload (T-304) rather than switching to a direct connection, which would show the source the user's IP (T-302).
+- **If a source refuses Tor:** the README says to wait or retry over Tor, or use the CSV price upload once it lands (T-304), rather than switch to a direct connection, which would show the source the user's IP (T-302).
 - **Nothing in the app:** no prompt, setting or check. The download flow is unchanged.
 - **Unchanged from ADR 0039:**
   - the CC BY-NC 4.0 licence and its non-commercial limit (already in the README)
@@ -45,7 +45,7 @@ Chosen option: 1, the owner's decision (2026-10-11).
 - Good: the downloader (#277) can land without a terms check the project can't complete.
 - Good: the app's flow stays as it is; there's no click-through.
 - Bad: if a source's terms forbid automated or Tor access, using the app breaches them, and that is the user's responsibility. The README says so plainly.
-- Bad: for privacy (T-302), the app's requests use a common browser User-Agent, so a source can't tell they come from this app. A source whose terms ask automated clients to identify themselves isn't told. The README says this too.
+- Bad: for privacy (T-302), the app's requests use a common browser User-Agent and never name the app. A source can still tell they are automated, from the TLS handshake (Python's, not a browser's) and the fixed request pattern, but isn't told which app sends them. A source whose terms ask automated clients to identify themselves isn't told. The README says this too.
 
 ## References
 
