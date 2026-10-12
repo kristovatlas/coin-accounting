@@ -29,5 +29,7 @@ test("every style is a constant, and no element data reaches a URL-valued proper
 test("the graph view styles Cytoscape with this stylesheet only", () => {
   const view = readFileSync(resolve(__dirname, "..", "..", "frontend", "src", "views", "Graph.tsx"), "utf8");
   expect(view).toContain("style: STYLESHEET");
-  expect(view).not.toMatch(/\.style\(|background-image|\bstyle=\{/);
+  expect(view).not.toMatch(/\.style\(|\.css\(|background-image|\bstyle=\{/);
+  // the one `style:` key is the stylesheet's: no element is added with a style of its own
+  expect(view.match(/\bstyle\s*:/g)).toEqual(["style:"]);
 });
