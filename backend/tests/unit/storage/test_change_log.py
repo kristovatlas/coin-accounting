@@ -3,6 +3,7 @@ only."""
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import typing
 from collections.abc import Iterator
@@ -100,5 +101,17 @@ def test_rows_from_before_the_origin_was_recorded_read_as_unknown_t504(tmp_path:
 
 
 def test_the_origin_check_lists_exactly_the_origins_the_code_writes() -> None:
-    for origin in typing.get_args(change_log.Origin.__value__):
-        assert f"'{origin}'" in m0010_change_log_origin.SQL
+    [listed] = re.findall(r"origin IN \(([^)]*)\)", m0010_change_log_origin.SQL)
+    allowed = {value.strip().strip("'") for value in listed.split(",")}
+    assert allowed == set(typing.get_args(change_log.Origin.__value__))
+
+
+def test_only_a_mixing_flag_may_be_set_by_a_heuristic_t504(conn: sqlite3.Connection) -> None:
+    """Clustering and every other heuristic only suggest (ADR 0010, PLAN §3): a tag the app set by itself
+    is refused, while the mixing flag T-504 lets the app set is accepted."""
+    insert = "INSERT INTO change_log (at, kind, subject, after, origin) VALUES (?, ?, ?, '{}', ?)"
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        conn.execute(insert, (AT, "address_tag", SCRIPT, "heuristic"))
+    conn.execute(insert, (AT, "tx_flag", TXID, "heuristic"))
+    conn.execute(insert, (AT, "address_tag", SCRIPT, "suggestion"))  # an accepted suggestion
+    assert [c.origin for c in tags.changes(conn)] == ["heuristic", "suggestion"]
