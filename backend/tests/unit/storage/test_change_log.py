@@ -71,7 +71,7 @@ def test_a_row_without_an_origin_is_refused_t408(conn: sqlite3.Connection) -> No
         conn.execute(
             "INSERT INTO change_log (at, kind, subject, after) VALUES (?, 'tx_flag', ?, '{}')", (AT, TXID)
         )
-    with pytest.raises(sqlite3.IntegrityError):  # and only a known origin is accepted
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):  # only a known origin
         conn.execute(
             "INSERT INTO change_log (at, kind, subject, after, origin)"
             " VALUES (?, 'tx_flag', ?, '{}', 'robot')",
@@ -104,6 +104,10 @@ def test_the_origin_check_lists_exactly_the_origins_the_code_writes() -> None:
     [listed] = re.findall(r"origin IN \(([^)]*)\)", m0010_change_log_origin.SQL)
     allowed = {value.strip().strip("'") for value in listed.split(",")}
     assert allowed == set(typing.get_args(change_log.Origin.__value__))
+
+
+def test_every_address_source_maps_to_an_origin() -> None:
+    assert set(ac._ORIGIN) == set(typing.get_args(ac.Source.__value__))
 
 
 def test_only_a_mixing_flag_may_be_set_by_a_heuristic_t504(conn: sqlite3.Connection) -> None:

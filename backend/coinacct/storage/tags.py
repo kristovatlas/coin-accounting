@@ -4,7 +4,8 @@ THREAT_MODEL T-408, T-504).
 Each change is written together with a `change_log` row, in one transaction, so the log can't miss
 an edit or record one that didn't happen. The log is append-only: the schema refuses any update or
 delete (`migrations/m0006_tags`) and any insert that would replace a row or take an id below 1
-(`m0007_change_log_ids`, `m0008_change_log_positive_ids`, `m0009_change_log_no_replace`).
+(`m0007_change_log_ids`, `m0008_change_log_positive_ids`, `m0009_change_log_no_replace`). Each row
+names what made the change (`m0010_change_log_origin`); `heuristic` only on a mixing flag.
 
 An address text passed in must already be checked against the script and the chain (`services.tags`
 does it); this module only refuses private keys, whoever calls.
@@ -27,7 +28,7 @@ from typing import Any
 from coinacct.domain.chain import is_hash
 from coinacct.domain.keys import refuse_private
 from coinacct.storage.accounts import AccountsError
-from coinacct.storage.change_log import address_state, append
+from coinacct.storage.change_log import Origin, address_state, append
 from coinacct.storage.db import transaction
 
 
@@ -39,7 +40,7 @@ class Change:
     subject: str
     before: dict[str, Any] | None
     after: dict[str, Any]
-    origin: str | None  # what made the change (m0010); None for rows logged before it was recorded
+    origin: Origin | None  # what made the change (m0010); None for rows logged before it was recorded
 
 
 def tag_address(  # noqa: PLR0913 - the address, its owner and account, label, clients and the time
