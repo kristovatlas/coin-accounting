@@ -92,6 +92,7 @@ def test_the_mixing_flag_is_set_and_logged(world: World) -> None:
         "kind": "tx_flag",
         "before": None,
         "after": {"mixing": True, "source": "user"},
+        "origin": "user",
     }
 
 
