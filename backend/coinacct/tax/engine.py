@@ -323,6 +323,7 @@ class _Open:
     created: bool = (
         False  # made by the engine for a withdrawal from an account without lots, or moved from one
     )
+    carried: Decimal = ZERO  # basis a carried fee's dust added after the lot arrived (_carry)
 
 
 def long_term(acquired: date, disposed: date) -> bool:
@@ -541,12 +542,12 @@ class _Engine:
     def _same_lots(self, judge: _Engine, picks: Sequence[Pick], standing: Sequence[Pick]) -> bool:
         """Whether `picks` are the lots the standing method uses in `judge`. Ids alone don't say so in
         the replay: a moved id (lot@transfer) can name a lot there with other sats or basis (ADR 0040),
-        so the picked sats' figures must match too."""
+        so the lots must also have the same origin: the record they arrived with, and any basis added since."""
         merged = _merged(picks)
         if merged != _merged(standing):
             return False
         return judge is self or all(
-            _figures(self._lots[i], n) == _figures(judge._lots[i], n) for i, n in merged.items()
+            _origin(self._lots[i]) == _origin(judge._lots[i]) for i in merged
         )
 
     def _dispose(self, d: Disposal) -> None:
@@ -749,6 +750,7 @@ class _Engine:
         """Add the basis of fee parts (`sats` of them) to a moved part (the carry treatment's dust case)."""
         entry = self._lots[moved.into]
         entry.basis = add(entry.basis, basis)
+        entry.carried = add(entry.carried, basis)
         i = next(k for k in range(len(self._moves) - 1, -1, -1) if self._moves[k].into == moved.into)
         self._moves[i] = Moved(
             moved.transfer,
@@ -932,21 +934,12 @@ def _dust_target(
     return plain[-1]
 
 
-def _figures(o: _Open, sats: int) -> tuple[object, ...]:
-    """What taking `sats` of a lot gives, as `_take` would compute it (nothing is used up): their bases
-    and the lot's dates and kind. Two lots of the same id give the same figures for these sats exactly
-    when this matches, whatever else each still holds."""
-    loss = None if o.loss_basis is None else share(o.loss_basis, sats, o.sats)
-    return (
-        share(o.basis, sats, o.sats),
-        loss,
-        o.gift,
-        o.fifo,
-        o.lot.acquired,
-        o.lot.loss_from,
-        o.lot.unknown_basis,
-        o.lot.always_long,
-    )
+def _origin(o: _Open) -> tuple[object, ...]:
+    """Which lot this is: the record it was created or moved in with (its sats, bases and dates then),
+    its kind, and any basis a carried fee added since. What it still holds is left out, so two runs that
+    used the same lot in different amounts (its remainder differing by a cent of rounding) still agree;
+    only an id naming another lot, such as a replay-moved lot@transfer, differs (ADR 0040)."""
+    return (o.lot, o.gift, o.fifo, o.created, o.carried)
 
 
 def _merged(picks: Sequence[Pick]) -> dict[str, int]:

@@ -226,6 +226,38 @@ def test_a_moved_id_with_other_figures_in_the_replay_is_still_warned_adr0040() -
     assert [(a.lot, a.basis) for a in result.allocations] == [("b2@d", D("0.01")), ("b1@d", D("0.00"))]
 
 
+def _pick(id: str, day: int, sats: int, picks: tuple[Pick, ...]) -> Disposal:
+    on = date(2025, 3, day)
+    return Disposal(id, "w", on, noon(on), "sell", sats, D("5.00"), picks, LATE)
+
+
+def test_a_lot_whose_remainder_differs_only_by_rounding_is_not_warned_adr0040() -> None:
+    # b1 is 10 sats with $0.03. s1 late-picks 3 of b1 and 2 of b2: the real b1 keeps 7 sats and $0.02,
+    # the replay's (FIFO took 5, $0.015 rounded to $0.02) 5 sats and $0.01. s2 late-picks 2 of b1, which
+    # is the replay's FIFO too: the same lot, so no warning, though a share of each remainder would
+    # differ by a cent
+    events: list[Event] = [
+        Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("0.03")),
+        Acquisition("b2", "w", date(2024, 1, 2), "buy", 10, D("0.04")),
+        _pick("s1", 1, 5, (Pick("b1", 3), Pick("b2", 2))),
+        _pick("s2", 2, 2, (Pick("b1", 2),)),
+    ]
+    assert [w.disposal for w in run(events).late] == ["s1"]
+
+
+def test_a_lot_used_differently_before_is_still_the_same_lot() -> None:
+    # b0 is 1 sat, b1 10 sats with $0.05. s1 late-picks 3 of b1: the real b1 keeps 7 sats and $0.03,
+    # the replay's (FIFO took b0 and 2 of b1) 8 sats and $0.04. s2 late-picks 7 of b1, the replay's
+    # FIFO too: not warned
+    events: list[Event] = [
+        Acquisition("b0", "w", date(2024, 1, 1), "buy", 1, D("0.00")),
+        Acquisition("b1", "w", date(2024, 1, 2), "buy", 10, D("0.05")),
+        _pick("s1", 1, 3, (Pick("b1", 3),)),
+        _pick("s2", 2, 7, (Pick("b1", 7),)),
+    ]
+    assert [w.disposal for w in run(events).late] == ["s1"]
+
+
 def test_the_replay_follows_an_on_time_choice_it_can_hold() -> None:
     # s1 chooses b3 on time, and the replay follows it. s2 then chooses b2 late: the replay's FIFO is
     # b1, so s2 is warned with b1's figures (were the replay to use FIFO for s1, it would hold b2 and
