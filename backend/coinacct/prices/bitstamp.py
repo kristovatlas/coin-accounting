@@ -1,8 +1,8 @@
 """Bitstamp price data into daily prices (PLAN §6, ADR 0039; THREAT_MODEL T-303, T-304).
 
 **Daily OHLC** (Bitstamp's `/api/v2/ohlc/<pair>/` with `step=86400`): JSON candles. Each day's price is
-the typical price (H+L+C)/3: until the Coin Metrics downloader lands it is the USD price, and after that
-the cross-check and the fill for any day the reference rate lacks (ADR 0039).
+the typical price (H+L+C)/3. For USD it is the cross-check on Coin Metrics' reference rate, and the fill
+for any day the rate lacks (ADR 0039).
 
 Pure parsers: text in, values out. All arithmetic is exact integers (values scaled by 10^12), rounded
 once, half to even, to whole cents. Anything malformed raises `PriceError` naming the line or candle,

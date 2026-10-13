@@ -75,13 +75,24 @@ const SPENDER_TEXT: Record<Spender["state"], string> = {
   spent: "Spent",
 };
 
+// T-504: the history says what made each change, so a user's edit and an import's can be told apart.
+const ORIGIN_TEXT: Record<NonNullable<Change["origin"]>, string> = {
+  user: "by you",
+  import: "by an address import",
+  descriptor: "by a descriptor import",
+  discovery: "by discovery",
+  heuristic: "by the app's mixing detection",
+  suggestion: "by a suggestion you accepted",
+};
+
 function History({ changes }: { changes: Change[] }) {
   if (changes.length === 0) return <p>No changes recorded.</p>;
   return (
     <ol id="graph-history">
       {changes.map((c, i) => (
         <li key={i}>
-          {c.at}: {c.before === null ? "set" : "changed"} {JSON.stringify(c.after)}
+          {c.at}: {c.before === null ? "set" : "changed"} {JSON.stringify(c.after)} (
+          {c.origin === null ? "origin not recorded" : ORIGIN_TEXT[c.origin]})
         </li>
       ))}
     </ol>
