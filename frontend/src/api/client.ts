@@ -234,7 +234,15 @@ export type Spender = {
   blockhash: string | null;
   as_of: Tip | null;
 };
-export type Change = { at: string; kind: string; before: Record<string, unknown> | null; after: Record<string, unknown> };
+// What made a change (migration m0010); null for a change logged before it was recorded.
+export type Origin = "user" | "import" | "descriptor" | "discovery" | "heuristic" | "suggestion";
+export type Change = {
+  at: string;
+  kind: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown>;
+  origin: Origin | null;
+};
 
 export const getGraphTx = (session: string, txid: string, blockhash: string | null) =>
   call<GraphTx>(session, "POST", "/api/graph/tx", { txid, blockhash });

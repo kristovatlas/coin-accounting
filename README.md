@@ -9,3 +9,8 @@ It produces estimates and records, not tax advice.
 USD prices come from [Coin Metrics](https://coinmetrics.io/)' daily reference rate, `PriceUSD` ([ADR 0039](docs/adr/0039-coin-metrics-usd-reference-rate.md)). Coin Metrics' community data is licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/): it may be used **only for non-commercial purposes**, with attribution. Using this app commercially needs a different price source or a licence from Coin Metrics.
 
 Bitstamp's daily typical price, (high + low + close) ÷ 3, is the cross-check, and fills any day the rate lacks. The European Central Bank's reference rates convert prices into other currencies for display.
+
+**Data sources' terms.** The app downloads prices from [Coin Metrics](https://coinmetrics.io/), [Bitstamp](https://www.bitstamp.net/) and the [European Central Bank](https://www.ecb.europa.eu/). Using the app means you agree to each source's terms, including for automated downloads and downloads over Tor. The app doesn't check this for you ([ADR 0042](docs/adr/0042-price-source-terms-are-the-users.md)).
+- **Coin Metrics:** its community-API terms couldn't be found when this was written (October 2026). Its community data is under the CC BY-NC 4.0 licence above ([source](https://github.com/coinmetrics/data)).
+- **How the app asks:** for privacy, its requests use a common browser User-Agent and never name the app. A source can still tell they are automated (from the TLS handshake and the fixed request pattern).
+- **If a source refuses downloads over Tor,** wait and retry, or, once the CSV price upload lands, upload prices from a CSV file. Switching to a direct connection instead shows the source your IP address.
