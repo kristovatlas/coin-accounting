@@ -31,8 +31,10 @@ Chosen option: 1, the owner's decision (2026-10-13).
 
 **A network fee, or a BTC fee an exchange takes on a buy, deposit, sale, spend, gift or withdrawal, is never a taxable event, in any tax year, from any account.** It produces no gain or loss and no Form 8949 row of its own. One event bears the whole fee: ADR 0009's rule that splits a fee by the role of each output is retired for every account kind. A fee an exchange records on its own line is part of the event it belongs to, not a second event. What happens to the cost of the fee's sats depends on that event.
 
+**"Oldest" ties:** wherever this ADR says "oldest" (row, fragment or lot), lots acquired at the same moment are ordered by their event id, as in ADR 0041 §2.1.
+
 **Where the fee's basis goes:**
-- **A buy** with its fee withheld from the bitcoin bought (the exchange credits 0.999 BTC of 1): the lot holds the sats credited, and its basis is the full cash paid, as ADR 0009's "acquisition fees add to basis" says. Nothing is disposed of.
+- **A buy** with its fee withheld from the bitcoin bought (the exchange credits 0.999 BTC of 1). A BTC fee line tied to a buy and no larger than the sats bought is always treated as withheld, whether the export shows it net or on its own line: the lot holds the sats credited, and its basis is the full cash paid, as ADR 0009's "acquisition fees add to basis" says. Nothing is disposed of.
 - **A sale or spend**, from a wallet (ADR 0041 §2) or sent straight from an exchange or custodial account, including an exchange's trading fee taken in BTC: the fee is a cost of the disposal.
   - Its sats' basis joins the disposal's basis: it is added to the disposal's row for the same lot, or, if it has none, to its oldest row, which keeps its own date and holding period.
   - Proceeds are what was received; a fee paid in BTC is not subtracted from them. This replaces ADR 0009's "network fees on a spend reduce its proceeds" for every account kind (ADR 0041 §2.5 already did so for wallets).
@@ -41,7 +43,8 @@ Chosen option: 1, the owner's decision (2026-10-13).
 - **An exchange's BTC deposit fee** (the exchange credits less than arrived): the deposit's sats are the gross sats that arrived, matching ADR 0041 §2's check; the account is credited the net. The fee takes its sats from the arriving lots only, by the account's standing method applied to those lots, never from lots already in the account. Its basis joins the same arriving lot in the account, else the oldest arriving lot, which keeps its own date.
 - **An exchange's BTC withdrawal fee:** like a transfer fee. Its basis goes to the withdrawn coins:
   - **into a coin-traced wallet, linked:** to the first withdrawn output, in ADR 0041's canonical output order, that holds a fragment of the same lot, else to the first withdrawn output's oldest fragment, which keeps its own date
-  - **anywhere else** (an unlinked wallet's pool, ADR 0041 §4, or another exchange or custodial account): to the same moved lot there, else to the oldest moved lot, which keeps its own date
+  - When only some withdrawn sats are linked, the linked rule above applies if the fee's lot or any linked fragment is on an output; otherwise the rule below.
+  - **anywhere else** (an unlinked wallet's pool, ADR 0041 §4, a whole-wallet FIFO wallet, ADR 0041 §5, or another exchange or custodial account): to the same moved lot there, else to the oldest moved lot, which keeps its own date
 - **A gift given:** the fee's sats leave with no gain or loss. Their basis isn't added to the gifted coins, so it doesn't change the recipient's basis. The cost is simply not recovered.
 - **A sale, spend or gift sent straight from an exchange to someone else** is one event (`sell`, `spend` or `gift_out`) that also moves the coins out. The fee's lots are picked as for a withdrawal (below); where its basis goes follows the sale, spend or gift rule.
 - **Gift lots with two bases** (ADR 0009's dual basis for a gift received): when a fee's basis joins a row or fragment of its own lot, both bases move together. When it joins a different lot, the lower of the fee lot's two bases moves, the conservative choice; if the receiving lot has two bases, that amount is added to both. The audit trail records the move.
@@ -49,9 +52,9 @@ Chosen option: 1, the owner's decision (2026-10-13).
 **Which lots an exchange fee takes** on a sale, spend, gift or withdrawal (a deposit fee is above; a wallet's fee follows ADR 0041 §2.2):
 - The event's own sats take lots first, by its identified lots or the account's standing method; then the fee takes the next sats.
 - A specific identification may name lots for the gross sats (the event's sats plus the fee). If it names lots only for the event's sats, the fee takes the account's standing method over the remaining lots, or FIFO if there is none, and that is recorded in the identification, so the lateness rule (ADR 0008 §4, ADR 0021) is judged on the whole.
-- **An account with no known lots** (ADR 0009's one exception): the created lot covers the gross sats, and the basis the user supplies covers both. Without it, the lot is unknown basis and blocks reports, as before. On a withdrawal to the user's own account the fee's share passes to the withdrawn coins; on a sale, spend or gift it follows that event's rule.
+- **An account with no known lots** (ADR 0009's one exception, which stays limited to coins moving out of the account: a withdrawal, or a sale, spend or gift sent straight from an exchange): the created lot covers the gross sats, and the basis the user supplies covers both. Without it, the lot is unknown basis and blocks reports, as before. On a withdrawal to the user's own account the fee's share passes to the withdrawn coins; on a sale, spend or gift sent straight out it follows that event's rule. Any other sale from an account with no known lots is treated as before; this ADR creates no lot for it.
 
-**Form 8949 box:** a sale or spend sent straight from an exchange to a buyer or merchant is an on-chain disposal, not a sale the broker carried out. Its default box is I/L when no Form 1099-DA reports it; if one does, ADR 0011's inputs apply as usual (H/K, or G/J when basis is reported). The user can override it, with the reason recorded.
+**Form 8949 box:** a sale or spend sent straight from an exchange to a buyer or merchant is an on-chain disposal, not a sale the broker carried out. For tax years 2025 and later, its default box is I/L when no Form 1099-DA reports it; if one does, ADR 0011's inputs apply as usual (H/K, or G/J when basis is reported). For 2024 and earlier, ADR 0011's A–F rules apply unchanged (C/F without a 1099-B). The user can override it, with the reason recorded.
 
 **Unsupported, so reports are blocked** (like ADR 0041 §3), each until a later ADR decides it. These have no user resolution in the meantime:
 - a BTC fee an exchange charges that isn't tied to one of the events above (a custody or account fee paid in BTC), or a buy's fee paid from bitcoin already held. These are payments for a service rather than a cost of moving or selling bitcoin, or spend other coins
@@ -66,10 +69,10 @@ Chosen option: 1, the owner's decision (2026-10-13).
 
 **What changes elsewhere:**
 - **ADR 0011:** Form 8949 rows come only from `sell` and `spend`, in every tax year. There are no fee rows.
-- **PLAN:** §2's `fee treatment` setting is removed, §7 and §8 follow this ADR, and §7's blocking conditions include its unsupported cases. §2's `fee` event and the per-event fee role are redefined (below).
+- **PLAN:** §2's `fee treatment` setting is removed, §7 and §8 follow this ADR, and §7's blocking conditions include its unsupported cases. They have no user resolution until a later ADR, which amends ADR 0009's "the user resolves each condition explicitly" for them, as ADR 0041 §3 does for its own. §2's `fee` event and the per-event fee are redefined (a fee line is part of its event; an untied one blocks; the event bears the whole fee, a consolidation's goes to its change).
 - **Architecture §6:** the user DB's settings no longer include a fee treatment, and the tax engine's "fees by role" becomes "fees". This ADR records the architecture's new SHA-256 (ADR 0014).
 - **Report settings (T-503):** a report's embedded settings no longer include a fee treatment, and the rule-set version changes with this ADR. Reports print the stated position above.
-- **ADR 0011 and T-510:** a sale or spend sent straight from an exchange defaults to I/L.
+- **ADR 0011, PLAN §8 and T-510:** from 2025, a sale or spend sent straight from an exchange defaults to I/L unless a 1099-DA reports it. PLAN §8's broker comparison also flags proceeds that differ because of a BTC fee, and any fee a broker lists as a sale.
 - **The lot engine:** open PRs #240, #242 and #278 still implement the old rules (a `fee_treatment="dispose"` option and the withdrawal-fee disposal). #285 removes them once the stack is on `main`, with hand-worked tests. It must land before the app produces reports for anyone.
 
 ### Consequences
