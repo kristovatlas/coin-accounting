@@ -248,7 +248,7 @@ flowchart LR
   T --> E["Events<br/>buy · income · deposit · withdrawal ·<br/>sell (identified_at) · spend · gift …"]
   PF["prices: bulk fetch<br/>or CSV upload"] --> P[("Prices<br/>daily USD price · overrides")]
   P --> L
-  E --> L["tax engine (pure)<br/>lots · fragments · identification ·<br/>fees by role · blocking conditions"]
+  E --> L["tax engine (pure)<br/>lots · fragments · identification ·<br/>fees · blocking conditions"]
   C --> X
   T --> X["doxx engine (pure)<br/>paid-to · received-from · reuse ·<br/>forward · backward cluster"]
   L --> R["Report values"]
