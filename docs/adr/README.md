@@ -48,5 +48,6 @@ MADR-format records of significant decisions (see [ADR 0001](0001-record-decisio
 | [0039](0039-coin-metrics-usd-reference-rate.md) | USD prices from Coin Metrics' daily reference rate |
 | [0041](0041-utxo-tracing-in-the-lot-engine.md) | How the lot engine traces lots through self-custody coins |
 | [0042](0042-price-source-terms-are-the-users.md) | The price sources' terms are the user's to accept |
+| [0043](0043-network-fees-are-not-taxable-events.md) | Network fees are never a taxable event |
 
 Template: [0000-template.md](0000-template.md).

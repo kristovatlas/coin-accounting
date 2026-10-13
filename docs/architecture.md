@@ -226,7 +226,7 @@ This is the exhaustive list; it mirrors THREAT_MODEL §6. Any other runtime conn
 
 | Store | Location | Contents | Notes |
 |---|---|---|---|
-| User DB | `<data>/db.sqlite` (+ WAL/journal alongside) | Entities, tax accounts, wallet clients, addresses, public descriptors, events, lots, identifications, doxx tags, prices, **settings** (time zone, fee treatment, proxy, thresholds), chain cache (txs, activity, spenders, coverage, snapshots, chain state, in-flight scan marker), change log | Mode 0600; `temp_store=MEMORY`; `TMPDIR` and `SQLITE_TMPDIR` in `<data>/tmp` (T-401, T-402). Tax-affecting settings are part of each report's input hash (T-503) |
+| User DB | `<data>/db.sqlite` (+ WAL/journal alongside) | Entities, tax accounts, wallet clients, addresses, public descriptors, events, lots, identifications, doxx tags, prices, **settings** (time zone, proxy, thresholds), chain cache (txs, activity, spenders, coverage, snapshots, chain state, in-flight scan marker), change log | Mode 0600; `temp_store=MEMORY`; `TMPDIR` and `SQLITE_TMPDIR` in `<data>/tmp` (T-401, T-402). Tax-affecting settings are part of each report's input hash (T-503) |
 | App config | `<data>/config.toml` | **Only** the RPC endpoint and `rpcauth` credentials | Mode 0600; credentials never logged (T-201) |
 | Logs | `<data>/logs/` | Redacted operational logs, including uvicorn logs and tracebacks | All loggers and exception hooks go through the redacting handler; access log off (T-403) |
 | Exports | `<data>/exports/` | 8949 CSV, income, summaries, audit trail | Type-aware CSV escaping (T-702) |

@@ -141,7 +141,7 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
 - `doxx_tag`: outpoint or scripthash, entity_id, **confidence** (`certain | inferred`), reason (`paid_to | change_of | co_spent_with | address_reuse | cluster_backward | received_from | manual`), source txid, `manual_override`.
 - `price`: UTC date, currency, price, source, method, content hash.
 - `change_log`: append-only record of every edit to events, tags, identifications, overrides, lot links, wallet tracking start dates and the whole-wallet FIFO setting.
-- `settings`: fee treatment, time zone, proxy, confirmation threshold, etc.
+- `settings`: time zone, proxy, confirmation threshold, etc.
 
 ### 3. Import, discovery, clustering (`services/discovery.py`, `services/tagging.py`)
 - **Import:**
@@ -218,22 +218,22 @@ A pure, deterministic function of events, recomputed on every change. It can com
   - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet. How (ADR 0041): purchases and withdrawals into a wallet are linked to the output they arrived in; when a wallet transaction spends coins, what leaves the wallet takes their lots oldest first, then the fee, then the change, whatever the output order; coins received before a wallet's tracking start date with no link draw from a pool of unlinked lots, and a coin still short gets a placeholder lot of unknown basis (blocking); these aren't supported yet and block the report: more than one leaving event, unclassified outgoing outputs, shared (PayJoin/CoinJoin) and multi-account transactions, identical outputs whose lots would differ, other wallet methods, switching a wallet holding coins back from whole-wallet FIFO, transfers between FIFO and traced wallets, wallets with no tracking start date, and unrecorded receipts after it.
 - **Fees by role:**
   - acquisition fees add to basis
-  - disposal fees reduce proceeds; proceeds are net of costs, matching 1099-DA. A self-custody network fee is not one of these: its sats are part of the disposal (ADR 0041)
-  - network fees on self-transfers/deposits: the default carries the fee's basis over to the remaining sats (from a self-custody wallet: to the same lot on the destination, or, if no destination output holds that lot, to the destination's oldest fragment, ADR 0041); a setting instead treats it as a small disposal. The law here isn't settled, so this is a stated tax position (ADR 0009) shown on every report
-  - network fees on `spend`: they reduce proceeds (exchange and custodial accounts). From a self-custody wallet the fee's sats are part of the disposal and are not subtracted again, and a gift's fee is a small disposal (ADR 0041)
-  - BTC withdrawal fees charged by an exchange: handled as a small disposal (default)
-  - A tx mixing owned and third-party outputs splits the fee by role (exchange and custodial accounts). From a self-custody wallet, the single leaving event bears the whole fee and the change never does (ADR 0041)
+  - an exchange's trading fee on a sale reduces its proceeds; proceeds are net of costs, matching 1099-DA
+  - **a network fee, or an exchange's BTC withdrawal fee, is never a taxable event:** no gain or loss, no Form 8949 row (ADR 0043). This is a stated tax position (ADR 0009, ADR 0043) shown on every report. Where its cost goes:
+    - **a sale or spend from a wallet:** the fee's sats are part of the disposal: their basis joins the same lot's row in the sale, or else the sale's oldest row, which keeps its own date. Proceeds are what was received, not reduced again (ADR 0041, ADR 0043). The single leaving event bears the whole fee; the change never does
+    - **a transfer between the user's own accounts, or a deposit:** the fee's basis passes to the coins that arrive (from a wallet: the same lot on the destination, else the destination's oldest fragment, ADR 0041); in a consolidation, to the change
+    - **an exchange's BTC withdrawal fee:** like a transfer fee. The withdrawn sats take lots first, then the fee; its basis passes to the withdrawn coins' same lot, else their oldest fragment, which keeps its own date. An account with no known lots creates its lot over the gross sats (withdrawn plus fee). When the withdrawal is itself a sale, spend or gift, its fee follows that event's rule instead
+    - **a gift given:** the fee's sats leave with no gain or loss; their cost isn't recovered
 - **Blocking conditions:** unknown basis or unconfirmed txs (below the confirmation threshold) block report generation, as do the coin-tracing cases ADR 0041 doesn't support yet (its §3). Late identifications only produce a warning. Each needs an explicit user resolution, which is recorded in the change log.
 - **Dates:** events use UTC timestamps. The tax date is converted to the user's configured time zone. Block timestamps can be off by about ±2h, so the user can override them with exchange-recorded times.
 - **Short/long-term:** held for more than one year counts as long-term.
 - **Out of scope for v1** (documented, and the UI warns if they seem to apply): lost/stolen coins, forks/airdrops, state taxes, §1015(d) gift-tax basis adjustments. As of 2026-09, §1091 wash-sale rules apply only to stock and securities, not BTC. This is re-checked each tax year, and a future toggle is noted.
 
 ### 8. Reports (`tax/reports.py`)
-- **Form 8949 CSV:** one row per disposal-lot allocation. The box is chosen **per disposal** from (tax year, disposal channel, 1099-DA received?, basis reported?), and the user can override it with the reason recorded:
+- **Form 8949 CSV:** one row per disposal-lot allocation. **Only taxable disposals produce rows, in every tax year:** `sell` and `spend`. **`gift_out` and fees never produce a row** (ADR 0011, ADR 0043). The box is chosen **per disposal** from (tax year, disposal channel, 1099-DA received?, basis reported?), and the user can override it with the reason recorded:
   - ≤2024: A/B/C (short-term) and D/E/F (long-term). Digital assets without a 1099-B go in C/F.
   - ≥2025: digital assets go in **G/H/I** (short-term) and **J/K/L** (long-term). C/F may not be used for them.
-    - **only taxable disposals produce rows:** `sell`, `spend` and fee disposals. **`gift_out` never produces a row.**
-    - on-chain disposals (`spend`, fee disposals) → I/L
+    - on-chain disposals (`spend`) → I/L
     - exchange sells default to H/K (proceeds reported, basis not), including coins **deposited from outside** the exchange, which brokers treat as noncovered
     - G/J only for **covered** coins, i.e. bought inside that exchange account on or after 2026-01-01, when the broker reports basis
     - broker-reported basis and dates may differ from the user's books (Notice 2026-20). The report flags differences for review
