@@ -10,17 +10,18 @@ T-302, T-303, T-305).
   common browser User-Agent and nothing else), never a library's or this app's name. That keeps the
   request ordinary; it can't make it indistinguishable from a browser (the TLS handshake is Python's).
   The URLs come from the parsers' modules, never from user records (T-301).
-- **Tor stream isolation:** each connection offers the proxy a fresh random username and password,
-  so Tor puts it on its own circuit, apart from the user's other Tor traffic (Tor's IsolateSOCKSAuth,
-  on by default; Bitcoin Core's -proxyrandomize does the same).
+- **Tor stream isolation:** each download offers the proxy a fresh random username and password, so
+  Tor puts it on its own circuit, apart from the user's other Tor traffic (Tor's IsolateSOCKSAuth, on
+  by default; Bitcoin Core's -proxyrandomize does the same). Coin Metrics' pages and retries share one
+  pair, so a rate limit is waited out, never dodged by asking for another circuit (ADR 0039).
 - **Bounded:** each response is a stream of at most `max_bytes`. Every blocking step waits at most
   `timeout`, and at most the time left before the download's deadline. A body shorter than its
   declared length is an error, not an end, and so is a TLS close without close_notify; the parsers
   still validate what they read (T-304).
 
-The sources' downloads (`download_ohlc`, `download_ecb`) are at the end. Their requests are fixed by
-the calendar alone: the same for every user (T-301). Fetching happens only when the user asks for a
-refresh (services). Nothing here runs on import.
+The sources' downloads (`download_reference`, `download_ohlc`, `download_ecb`) are at the end. Their
+requests are fixed by the calendar alone: the same for every user (T-301). Fetching happens only when
+the user asks for a refresh (services). Nothing here runs on import.
 """
 
 from __future__ import annotations
@@ -37,18 +38,18 @@ import zipfile
 import zlib
 from collections.abc import Buffer, Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final, NoReturn, cast
 from urllib.parse import urlsplit
 
 from coinacct.prices import CURRENCIES, DailyPrice
 from coinacct.prices.bitstamp import typical_by_day
+from coinacct.prices.coinmetrics import FIRST_DAY, reference_page
 from coinacct.prices.fx import Rates, ecb_rates
 
-# ADR 0039: the bitcoincharts archive is gone (unreachable, and a lapsed domain could be taken over);
-# Coin Metrics joins when its downloader lands.
-HOSTS: Final = frozenset({"www.bitstamp.net", "www.ecb.europa.eu"})
+# ADR 0039: Coin Metrics' reference rate, Bitstamp's candles, the ECB's rates.
+HOSTS: Final = frozenset({"community-api.coinmetrics.io", "www.bitstamp.net", "www.ecb.europa.eu"})
 # Tor Browser's User-Agent (Firefox 140 ESR): a common browser's, not a library's or this app's. Review
 # it at each Tor Browser major release.
 USER_AGENT: Final = "Mozilla/5.0 (Windows NT 10.0; rv:140.0) Gecko/20100101 Firefox/140.0"
@@ -57,6 +58,7 @@ HEADERS: Final = {"User-Agent": USER_AGENT, "Accept": "*/*"}
 TIMEOUT: Final = 60.0  # seconds, for the connection and for each read
 DEADLINE: Final = 1800.0  # seconds for a whole download: a slow drip can't hold a refresh forever
 _LONGEST: Final = 86_400.0  # a day: the most either may be (socket timeouts overflow far beyond it)
+UNKNOWN_WAIT: Final = 1_000_000  # a Retry-After not read as a short delay: longer than any wait honoured
 
 
 class FetchError(Exception):
@@ -66,6 +68,15 @@ class FetchError(Exception):
 
 class Cancelled(FetchError):
     """The user cancelled the refresh: not a failure, and never a partial result."""
+
+
+class RateLimited(FetchError):
+    """HTTP 429. `retry_after` is the wait the server asked for, in whole seconds, or None if it named
+    none. A wait it named in a form not read (a date, a huge number) is UNKNOWN_WAIT."""
+
+    def __init__(self, host: str, retry_after: int | None) -> None:
+        super().__init__(f"{host}: HTTP 429 (rate-limited)")
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)
@@ -85,6 +96,19 @@ class Proxy:
             raise FetchError("the SOCKS5 proxy must be a loopback address, such as 127.0.0.1")
         if type(self.port) is not int or not 0 < self.port < 65536:
             raise FetchError("the SOCKS5 proxy needs a port from 1 to 65535")
+
+
+@dataclass(frozen=True)
+class Isolation:
+    """SOCKS5 username and password (RFC 1929) that Tor uses only to choose a circuit (IsolateSOCKSAuth):
+    connections offering the same pair may share one, and a fresh pair gets a circuit of its own."""
+
+    user: bytes = field(repr=False)  # kept out of logs: they would tie log lines to a circuit
+    password: bytes = field(repr=False)
+
+    @classmethod
+    def fresh(cls) -> Isolation:
+        return cls(secrets.token_hex(8).encode(), secrets.token_hex(8).encode())
 
 
 class Body(io.RawIOBase):
@@ -176,7 +200,7 @@ class _DeadlineSocket(_DeadlineIO, ssl.SSLSocket):
 
 
 @contextmanager
-def open_url(  # noqa: PLR0913 - the URL, the proxy, and four keyword-only limits
+def open_url(  # noqa: PLR0913 - the URL, the proxy, and five keyword-only limits and options
     url: str,
     proxy: Proxy | None = None,
     *,
@@ -184,10 +208,13 @@ def open_url(  # noqa: PLR0913 - the URL, the proxy, and four keyword-only limit
     timeout: float = TIMEOUT,
     deadline: float = DEADLINE,
     cancelled: Callable[[], bool] | None = None,
+    isolation: Isolation | None = None,
 ) -> Iterator[Body]:
     """GET `url` and yield its body as a bounded stream; the connection closes on leaving the block.
     `deadline` is in seconds for the whole download, from now. `cancelled`, if given, is asked before
-    connecting and before every read of the body: a cancel takes effect within one `timeout`."""
+    connecting and before every read of the body: a cancel takes effect within one `timeout`.
+    `isolation`, if given, is the SOCKS5 credentials to offer the proxy, so several connections share
+    one Tor circuit; otherwise each connection offers fresh ones, and gets a circuit of its own."""
     if type(max_bytes) is not int or max_bytes < 0:
         _fail("max_bytes must be a non-negative integer")
     for name, value in (("timeout", timeout), ("deadline", deadline)):
@@ -195,7 +222,7 @@ def open_url(  # noqa: PLR0913 - the URL, the proxy, and four keyword-only limit
             _fail(f"{name} must be a positive number of seconds")
     host, target = _check_url(url)
     limit = _Deadline(deadline, timeout, cancelled)  # the first connect asks it: cancelled, no connection
-    conn = _Connection(host, proxy, limit)
+    conn = _Connection(host, proxy, limit, isolation)
     body: Body | None = None
     try:
         try:
@@ -204,6 +231,8 @@ def open_url(  # noqa: PLR0913 - the URL, the proxy, and four keyword-only limit
         except (OSError, http.client.HTTPException, ValueError) as e:
             limit.left(host)  # a step cut by the deadline (or a cancel) says so, not "failed"
             raise FetchError(f"{host}: the download failed ({type(e).__name__})") from None
+        if response.status == http.client.TOO_MANY_REQUESTS:
+            raise RateLimited(host, _retry_after(response.getheader("Retry-After")))
         if response.status != http.client.OK:
             _fail(f"{host}: HTTP {response.status} (a redirect or error; nothing is followed)")
         declared = (
@@ -230,6 +259,17 @@ def _length(header: str | None, host: str, max_bytes: int) -> int | None:
     if len(digits) > len(str(max_bytes)) or int(digits) > max_bytes:
         _fail(f"{host}: the response is larger than allowed")
     return int(digits)
+
+
+def _retry_after(header: str | None) -> int | None:
+    """Retry-After's delay in seconds (RFC 9110 §10.2.3), or None if there is no header. A delay too
+    long to read, an HTTP date or anything else is UNKNOWN_WAIT: a wait that can't be shown to be short,
+    so the caller fails rather than retry before the server allows (ADR 0039)."""
+    if header is None or not (text := header.strip(" \t")):
+        return None
+    if not text.isascii() or not text.isdigit() or len(text) > 6:
+        return UNKNOWN_WAIT
+    return int(text)
 
 
 def _check_url(url: str) -> tuple[str, str]:
@@ -261,11 +301,13 @@ class _Connection(http.client.HTTPSConnection):
     handshake first, so the handshake runs under the deadline's timeout too; a TLS close without
     close_notify is an error, not an end, so a body with no declared length can't be cut unnoticed."""
 
-    def __init__(self, host: str, proxy: Proxy | None, deadline: _Deadline) -> None:
+    def __init__(
+        self, host: str, proxy: Proxy | None, deadline: _Deadline, isolation: Isolation | None = None
+    ) -> None:
         self._tls = _context()
         self._tls.sslsocket_class = _DeadlineSocket
         super().__init__(host, 443, timeout=TIMEOUT, context=self._tls)
-        self._proxy, self._deadline = proxy, deadline
+        self._proxy, self._deadline, self._isolation = proxy, deadline, isolation
 
     def connect(self) -> None:
         sock = self._tcp()
@@ -281,7 +323,7 @@ class _Connection(http.client.HTTPSConnection):
         sock = socket.create_connection(to, timeout=self._deadline.left(self.host))
         if self._proxy is not None:
             try:
-                socks5_connect(sock, self.host, 443, lambda: self._deadline.left(self.host))
+                socks5_connect(sock, self.host, 443, lambda: self._deadline.left(self.host), self._isolation)
             except FetchError as e:
                 sock.close()
                 self._deadline.left(self.host)  # a handshake cut by the deadline is "too long"
@@ -315,12 +357,17 @@ _SOCKS_ERRORS: Final = {
 
 
 def socks5_connect(
-    sock: socket.socket, host: str, port: int, timeout: Callable[[], float] | None = None
+    sock: socket.socket,
+    host: str,
+    port: int,
+    timeout: Callable[[], float] | None = None,
+    isolation: Isolation | None = None,
 ) -> None:
     """Ask a SOCKS5 proxy (RFC 1928), already connected on `sock`, to connect to `host`:`port` by
-    name. It offers a fresh random username and password (RFC 1929), which Tor uses only to keep this
-    connection on its own circuit, or no authentication if the proxy prefers. Raises FetchError if the
-    proxy refuses or answers oddly. `timeout`, if given, sets the socket timeout before each read.
+    name. It offers a username and password (RFC 1929), `isolation` or a fresh random pair, which Tor
+    uses only to choose the connection's circuit, or no authentication if the proxy prefers. Raises
+    FetchError if the proxy refuses or answers oddly. `timeout`, if given, sets the socket timeout
+    before each read.
 
     """
     name = host.encode("ascii")
@@ -329,7 +376,8 @@ def socks5_connect(
     sock.sendall(b"\x05\x02\x02\x00")  # version 5, two methods: username/password, or none
     chosen = _recv(sock, timeout, 2)
     if chosen == b"\x05\x02":
-        user, password = secrets.token_hex(8).encode(), secrets.token_hex(8).encode()
+        pair = isolation or Isolation.fresh()
+        user, password = pair.user, pair.password
         sock.sendall(b"\x01" + bytes([len(user)]) + user + bytes([len(password)]) + password)
         if _recv(sock, timeout, 2) != b"\x01\x00":
             _fail("the SOCKS5 proxy refused the isolation credentials")
@@ -459,3 +507,120 @@ def download_ecb(proxy: Proxy | None, cancelled: Callable[[], bool]) -> tuple[Ra
     except UnicodeDecodeError:
         _fail("www.ecb.europa.eu: the rates file isn't ASCII")
     return ecb_rates(lines), hashlib.sha256(data).hexdigest()
+
+
+# --- Coin Metrics' reference rate (ADR 0039). The URL is fixed but for `end_time`, the day before the
+# refresh's UTC date: calendar-only, so the request is the same for every user (T-301). It also keeps a
+# clock a little behind UTC from asking for a day the server already counts as over.
+REFERENCE_URL: Final = (
+    "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics?assets=btc&metrics=PriceUSD"
+    f"&frequency=1d&paging_from=start&page_size=10000&start_time={FIRST_DAY.isoformat()}&end_time={{end}}"
+)
+REFERENCE_HOST: Final = "community-api.coinmetrics.io"
+REFERENCE_PAGE_DAYS: Final = 10_000  # the API's largest page_size: one page holds the history until 2037
+REFERENCE_MAX: Final = 8 << 20  # every page together: 10,000 rows are about 800 kB
+# A 429 is honoured, never dodged (ADR 0039): wait as Retry-After says, or back off 10, 20, then 40 s,
+# at most RETRIES times, offering the same isolation pair (one Isolation per download), so Tor reuses
+# the circuit while it is fresh (MaxCircuitDirtiness, 10 minutes by default): the app never asks for a
+# new one. A wait longer than RETRY_WAIT_MAX, or one not given as a short delay in seconds (a date),
+# fails the refresh.
+RETRIES: Final = 3
+RETRY_WAIT: Final = 10
+RETRY_WAIT_MAX: Final = 60
+
+
+def download_reference(
+    complete_before: date,
+    proxy: Proxy | None,
+    cancelled: Callable[[], bool],
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[list[DailyPrice], str]:
+    """Coin Metrics' daily reference rate for every complete day, and a SHA-256 over the pages as
+    fetched, each prefixed with its number and length. Each next page is the fixed URL plus only the
+    response's checked `next_page_token`; the server's `next_page_url` is never followed. The pages are
+    capped by what the history can fill, and one deadline and one byte limit cover them all (T-304)."""
+    if complete_before <= FIRST_DAY:
+        _fail(f"{REFERENCE_HOST}: the clock's date is before Coin Metrics' first day")
+    first = REFERENCE_URL.format(end=(complete_before - timedelta(days=1)).isoformat())
+    # One circuit for the whole download, retries included: a 429 is waited out from the same exit, not
+    # dodged from another (ADR 0039). Still apart from the user's other Tor traffic.
+    isolation = Isolation.fresh()
+    pages = (complete_before - FIRST_DAY).days // REFERENCE_PAGE_DAYS + 2
+    until = time.monotonic() + DEADLINE
+    left = REFERENCE_MAX
+    sha = hashlib.sha256()
+    out: list[DailyPrice] = []
+    after: date | None = None
+    url = first
+    for n in range(pages):
+        data = _reference_page(
+            url, proxy, cancelled, until=until, left=left, sleep=sleep, isolation=isolation
+        )
+        left -= len(data)
+        sha.update(f"{n}:{len(data)}\n".encode() + data)
+        try:
+            text = data.decode("ascii")
+        except UnicodeDecodeError:
+            _fail(f"{REFERENCE_HOST}: a page isn't ASCII")
+        page = reference_page(text, complete_before, after)
+        out.extend(page.prices)
+        if page.next_token is None:
+            return out, sha.hexdigest()
+        if page.last is None:
+            _fail(f"{REFERENCE_HOST}: a page with no rows points to another")
+        after = page.last
+        url = f"{first}&next_page_token={page.next_token}"
+    _fail(f"{REFERENCE_HOST}: more pages than the history can fill")
+
+
+def _reference_page(  # noqa: PLR0913 - the URL, the proxy, and the download's shared limits
+    url: str,
+    proxy: Proxy | None,
+    cancelled: Callable[[], bool],
+    *,
+    until: float,
+    left: int,
+    sleep: Callable[[float], None],
+    isolation: Isolation,
+) -> bytes:
+    """One page, retried after a 429 as RETRIES allows, within the download's deadline and bytes."""
+    for attempt in range(RETRIES + 1):
+        try:
+            with open_url(
+                url,
+                proxy,
+                max_bytes=left,
+                deadline=_time_left(until),
+                cancelled=cancelled,
+                isolation=isolation,
+            ) as body:
+                return body.read()
+        except RateLimited as e:
+            if attempt == RETRIES:
+                _fail(f"{REFERENCE_HOST}: still rate-limited after {RETRIES} retries")
+            wait = RETRY_WAIT << attempt if e.retry_after is None else e.retry_after
+            if wait == UNKNOWN_WAIT:
+                _fail(
+                    f"{REFERENCE_HOST}: rate-limited, with a Retry-After that isn't a short delay in seconds"
+                )
+            if wait > RETRY_WAIT_MAX:
+                _fail(f"{REFERENCE_HOST}: rate-limited, asking for a wait longer than {RETRY_WAIT_MAX} s")
+            if wait >= _time_left(until):
+                _fail(f"{REFERENCE_HOST}: the download took too long")
+            _wait(wait, cancelled, sleep)
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns or fails
+
+
+def _time_left(until: float) -> float:
+    left = until - time.monotonic()
+    if left <= 0:
+        _fail(f"{REFERENCE_HOST}: the download took too long")
+    return left
+
+
+def _wait(seconds: int, cancelled: Callable[[], bool], sleep: Callable[[float], None]) -> None:
+    """Wait `seconds`, a second at a time, so a cancel takes effect within one."""
+    for _ in range(seconds):
+        if cancelled():
+            raise Cancelled(f"{REFERENCE_HOST}: the refresh was cancelled")
+        sleep(1.0)

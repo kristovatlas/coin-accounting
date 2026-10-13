@@ -58,6 +58,7 @@ test("a transaction opens in the graph, and its flag and its output's tag are sa
     await page.locator("#graph-show-history").click();
     await expect(page.locator("#graph-history li")).toHaveCount(1);
     await expect(page.locator("#graph-history li")).toContainText('"mixing":true');
+    await expect(page.locator("#graph-history li")).toContainText("(by you)");
 
     // The miner's output: the user's, unspent.
     await output.click();
@@ -77,6 +78,7 @@ test("a transaction opens in the graph, and its flag and its output's tag are sa
     // the logged tag keeps the import's wallet app and carries the new label
     await expect(page.locator("#graph-history li")).toContainText(/"client_ids":\[\d+\]/);
     await expect(page.locator("#graph-history li")).toContainText('"label":"coinbase"');
+    await expect(page.locator("#graph-history li")).toContainText("(by you)");
     // the panel opened afresh shows the saved owner, wallet app included (a second edit keeps it)
     await page.locator(`#graph-nodes [data-node="tx:${txid}"]`).click();
     await output.click();
