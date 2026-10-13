@@ -128,19 +128,20 @@ Amounts are integer sats. Fiat is `Decimal`, stored as a string with a currency 
   - acquisitions: `buy | p2p_buy | income | gift_in | inherit | opening_allocation_2025`
   - movements: `self_transfer | deposit | withdrawal`
   - disposals: `sell | spend | gift_out`
-  - `fee`
+  - `fee`: a BTC fee an exchange records on its own line, part of the buy, deposit, sale, spend, gift or withdrawal it belongs to (not a second event). It stores its parent event, set only from the exchange export's own identifier or by the user's explicit, change-logged choice, never by a timestamp or amount guess; one tied to none blocks reports (ADR 0043)
 
-  Each event carries: UTC timestamp, sats, USD amount, valuation source, a fee role, and links to txid/outpoint or tax_account.
+  Each event carries: UTC timestamp, sats, USD amount, valuation source, the fee it bears (one event bears a transaction's whole fee; a consolidation's fee goes to its change, ADR 0041, ADR 0043), and links to txid/outpoint or tax_account.
 - `lot`: acquisition timestamp, sats, USD basis, origin event.
   - Gifts additionally store donor basis, donor date, FMV at gift, and gift date (dual basis).
   - Inheritance stores FMV at death.
 - `lot_fragment`: (holder = outpoint *or* tax_account, lot_id, sats). The engine can recompute it as of any date.
+- `lot_link` (ADR 0041): an arrival event (an acquisition, or a withdrawal's moved lots) → a wallet output of the same account it arrived in, with sats, an app-set time and its source (proposed from a record, or the user's). Each self-custody `tax_account` also has a tracking start date and a whole-wallet FIFO setting with an effective-from time; cached txs store their position in the block.
 - `identification`: disposal/withdrawal → lot choices, `identified_at` timestamp, method (`specific | standing_order | fifo_default`), and a `late` flag (warning only).
 - `disposal_allocation`: disposal → lot_id, sats, basis, proceeds share (net of disposal costs), holding period, and the 8949 box plus the reason it was chosen.
 - `doxx_tag`: outpoint or scripthash, entity_id, **confidence** (`certain | inferred`), reason (`paid_to | change_of | co_spent_with | address_reuse | cluster_backward | received_from | manual`), source txid, `manual_override`.
 - `price`: UTC date, currency, price, source, method, content hash.
-- `change_log`: append-only record of every edit to events, tags, identifications and overrides.
-- `settings`: fee treatment, time zone, proxy, confirmation threshold, etc.
+- `change_log`: append-only record of every edit to events, tags, identifications, overrides, lot links, wallet tracking start dates and the whole-wallet FIFO setting.
+- `settings`: time zone, proxy, confirmation threshold, etc.
 
 ### 3. Import, discovery, clustering (`services/discovery.py`, `services/tagging.py`)
 - **Import:**
@@ -181,10 +182,11 @@ The doxx set of a coin is the set of **identity-knowing entities** (`knows_ident
 - **Sell planner:** lists UTXOs by doxx set, with basis, holding period and certainty.
 
 ### 6. Prices (`prices/`)
-- **USD:** bulk-download Bitstamp history and compute a **daily volume-weighted average price per UTC day**.
-  - Planned source: the full bitstampUSD trade dump (bitcoincharts archive) for history, plus Bitstamp's paginated daily OHLCV for recent days.
-  - Where there is no trade-level data, fall back to the daily typical price, (H+L+C)/3. The `method` column records which was used.
-  - The M5 step checks that these sources are still up.
+- **USD:** each UTC day's price is **Coin Metrics' daily reference rate** (`PriceUSD`, ADR 0039): a volume-weighted price across vetted exchanges, published for every day since July 2010 and downloaded in bulk from its free community API.
+  - Bitstamp's paginated daily OHLCV is the second source. Its typical price, (H+L+C)/3, is compared with the reference rate every day (a review flag), and fills any day the rate lacks. The `method` column records which was used.
+  - The bitcoincharts trade archive is no longer used: it was unreachable in October 2026 (ADR 0039).
+  - The refresh flags a reference rate that has stopped updating, and M5 checks that every source is still reachable.
+  - Coin Metrics' data is CC BY-NC 4.0: non-commercial use only, and the app credits Coin Metrics wherever it shows or exports these prices.
 - **Other fiat (display only):** Bitstamp EUR/GBP pairs, or USD × ECB historical FX. **All supported pairs are fetched every time**, so the download doesn't reveal the user's currency or residency.
 - **Requests:** made only when the user clicks refresh. They don't depend on user records (events, addresses, tags); only the start of the incremental range depends on what is already cached. An httpx client with an optional SOCKS5/Tor proxy (remote DNS) sends a common browser User-Agent and nothing else.
 - **Overrides:** the user can override the valuation per event, e.g. an exchange fill price, the W-2/payroll value for salary, or a timestamped rate for income on a volatile day.
@@ -200,7 +202,7 @@ A pure, deterministic function of events, recomputed on every change. It can com
   | `income` / mining | USD FMV at receipt time, also recorded as ordinary income | receipt date |
   | `gift_in` | dual basis: donor basis for gains; FMV at the gift, if lower, for losses; no gain/loss between the two. If the donor's basis is unknown, it's *unknown basis* (blocks reports) until the user enters one; zero is offered as the conservative choice and the choice is recorded | donor's date (tacked) for gain basis; the gift date when loss basis applies |
   | `inherit` | FMV at death, or the basis the estate reported (e.g. §2032 alternate valuation date) | always long-term |
-  | `opening_allocation_2025` | **optional**, only for *unattached* pre-2025 basis (Rev. Proc. 2024-28). The user enters the allocation and attests to the method and to when it was made. It must be made by the first 2025 sale; the app warns if the recorded date is later. Users who already tracked coins per wallet (as UTXO tracing does) don't need it | carried from the allocated lots; overrides derived fragments for that account |
+  | `opening_allocation_2025` | **optional**, only for *unattached* pre-2025 basis (Rev. Proc. 2024-28). The user enters the allocation and attests to the method and to when it was made. It must be made by the user's first 2025 sale, disposition or transfer, or the 2025 return's due date if earlier (Rev. Proc. 2024-28 §5.02; ADR 0041); the app warns if the recorded date is later. Users who already tracked coins per wallet (as UTXO tracing does) don't need it | carried from the allocated lots; on 2025-01-01 it replaces the account's undrawn pool and the fragments on held coins that trace back to pool draws or placeholders; fragments that trace back to links are kept (ADR 0041 §5) |
 
 - **Movements never create lots.**
   - Self-transfers between owned UTXOs move fragments and keep their holding periods. **Where the chain shows which coins moved, the fragments follow the UTXO.** When a transaction spends a UTXO that holds several lots (after coins were merged), fragments leave **oldest first (FIFO)**, unless the wallet has a different recorded method (user decision, 2026-09-28).
@@ -211,34 +213,40 @@ A pure, deterministic function of events, recomputed on every change. It can com
 - **Identification timing:**
   - Specific ID counts only if recorded **no later than the sale**. For exchanges, it goes to the broker; through 12/31/2026, the taxpayer's own books and records are also accepted (Notice 2025-7, extended by Notice 2026-20).
   - `identified_at` is stored for every lot choice: exchange sales **and exchange withdrawals**. **Warn only** (user decision, 2026-09-27): a choice made after the sale or withdrawal is flagged `late`. The app shows a warning that the IRS may apply the account's standing order, or FIFO if there is none, together with the result under that method. It notes the flag in the audit trail and on reports, but it **uses the user's choice** and does not block reports.
-  - **Automatic mode** (ADR 0021): an account can use its standing method (FIFO by default) automatically. The lot picker is then skipped, the lots used are shown, and nothing is ever `late`. In manual mode, the late warning appears only when the chosen lots **differ** from what the standing method (or FIFO) would give.
+  - **Automatic mode** (ADR 0021): an account can use its standing method (FIFO by default) automatically. The lot picker is then skipped, the lots used are shown, and its selections are never `late` (changing a wallet's whole-wallet FIFO setting after the fact is, ADR 0041). In manual mode, the late warning appears only when the chosen lots **differ** from what the standing method (or FIFO) would give.
   - For 2027+ sales the UI warns that the identification must be communicated to the broker.
-  - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet.
-- **Fees by role:**
-  - acquisition fees add to basis
-  - disposal fees reduce proceeds; proceeds are net of costs, matching 1099-DA
-  - network fees on self-transfers/deposits: the default carries the fee's basis over to the remaining sats; a setting instead treats it as a small disposal. The law here isn't settled, so this is a stated tax position (ADR 0009) shown on every report
-  - network fees on `spend`: they reduce proceeds
-  - BTC withdrawal fees charged by an exchange: handled as a small disposal (default)
-  - A tx mixing owned and third-party outputs splits the fee by role
-- **Blocking conditions:** unknown basis or unconfirmed txs (below the confirmation threshold) block report generation. Late identifications only produce a warning. Each needs an explicit user resolution, which is recorded in the change log.
+  - For self-custody wallets, the spent UTXO is the identification; the chain is the timestamped record. This is the app's stated tax position. Within a UTXO that holds several lots, fragments are used by the wallet's recorded method, which defaults to FIFO. A user can switch a wallet to strict FIFO across the whole wallet. How (ADR 0041): purchases and withdrawals into a wallet are linked to the output they arrived in; when a wallet transaction spends coins, what leaves the wallet takes their lots oldest first, then the fee, then the change, whatever the output order; coins received before a wallet's tracking start date with no link draw from a pool of unlinked lots, and a coin still short gets a placeholder lot of unknown basis (blocking); these aren't supported yet and block the report: more than one leaving event, unclassified outgoing outputs, shared (PayJoin/CoinJoin) and multi-account transactions, identical outputs whose lots would differ, other wallet methods, switching a wallet holding coins back from whole-wallet FIFO, transfers between FIFO and traced wallets, wallets with no tracking start date, and unrecorded receipts after it.
+- **Fees** (ADR 0043):
+  - acquisition fees add to basis; a buy's fee withheld from the bitcoin bought (a BTC fee line tied to the buy, smaller than the sats bought, counts as withheld; one as large blocks) leaves the lot with the sats credited and the full cash paid as its basis
+  - **"oldest" ties** are broken by event id (ADR 0041), everywhere below
+  - a trading fee an exchange charges in dollars on a sale reduces its proceeds, as on 1099-DA
+  - **a network fee, or a BTC fee an exchange takes on a buy, deposit, sale, spend, gift or withdrawal, is never a taxable event**, from any account: no gain or loss, no Form 8949 row. This is a stated tax position (ADR 0009, ADR 0043) shown on every report. One event bears the whole fee; it is never split by output, and a fee recorded on its own line is part of its event. Where its cost goes:
+    - **a sale or spend** (from a wallet, or sent straight from an exchange; an exchange's trading fee taken in BTC too): the fee's sats are part of the disposal: their basis joins the disposal's row for the same lot, or else its oldest row, which keeps its own date. Proceeds are what was received, never reduced by a fee paid in BTC (ADR 0041, ADR 0043). The change never bears the fee. Exchange sales with a fee taken in BTC won't match a 1099-DA's net proceeds and are flagged for review
+    - **a transfer between the user's own accounts, or a deposit:** the fee's basis passes to the coins that arrive (from a wallet: the same lot on the destination, else the destination's oldest fragment, ADR 0041); in a consolidation, to the change
+    - **an exchange's BTC deposit fee:** the deposit's sats are the gross sats that arrived; the fee takes sats only from the arriving lots (the account's standing method over those lots), and its basis joins the same arriving lot, else the oldest arriving lot
+    - **an exchange's BTC withdrawal fee:** like a transfer fee; its basis passes to the first withdrawn output (ADR 0041's canonical order) holding the same lot, else the first output's oldest fragment, which keeps its own date. Into an unlinked wallet's pool, a whole-wallet FIFO wallet or another account, to the same moved lot there, else the oldest moved lot
+    - **a gift given:** the fee's sats leave with no gain or loss; their cost isn't recovered
+    - **a gift lot with two bases:** a fee's basis that joins a different lot moves the lower of the two; if the receiving lot has two bases, that amount is added to both
+  - **a whole-wallet FIFO wallet:** the leaving event's sats take FIFO first, then the fee; its basis follows the event's rule, and a consolidation's fee basis goes to the same lot if any remains, else the oldest remaining lot (ADR 0043)
+  - **which lots an exchange fee takes** on a sale, spend, gift or withdrawal: the event's sats first, by its identification or the standing method, then the fee. A specific identification may cover the gross sats; if it covers only the event's sats, the fee takes the standing method (or FIFO), recorded in the identification. An account with no known lots creates its lot over the gross sats, only when coins move out of it (a withdrawal, or a sale, spend or gift sent straight out). A sale, spend or gift sent straight from an exchange is one event; it picks the fee's lots this way, and its basis follows that event
+- **Blocking conditions:** unknown basis or unconfirmed txs (below the confirmation threshold) block report generation, as do the coin-tracing cases ADR 0041 doesn't support yet (its §3) and ADR 0043's unsupported cases (a BTC fee an exchange charges that isn't tied to one of its events, or withheld from `income`, `gift_in` or `p2p_buy`; a buy's fee paid from bitcoin already held, or as large as the sats bought; a custodial transaction with more than one leaving event, not counting a fee line; a transaction that is all fee). Late identifications only produce a warning. Each other condition needs an explicit user resolution, which is recorded in the change log; ADR 0041 §3's and ADR 0043's unsupported cases have none until a later ADR.
 - **Dates:** events use UTC timestamps. The tax date is converted to the user's configured time zone. Block timestamps can be off by about ±2h, so the user can override them with exchange-recorded times.
 - **Short/long-term:** held for more than one year counts as long-term.
 - **Out of scope for v1** (documented, and the UI warns if they seem to apply): lost/stolen coins, forks/airdrops, state taxes, §1015(d) gift-tax basis adjustments. As of 2026-09, §1091 wash-sale rules apply only to stock and securities, not BTC. This is re-checked each tax year, and a future toggle is noted.
 
 ### 8. Reports (`tax/reports.py`)
-- **Form 8949 CSV:** one row per disposal-lot allocation. The box is chosen **per disposal** from (tax year, disposal channel, 1099-DA received?, basis reported?), and the user can override it with the reason recorded:
+- **Form 8949 CSV:** one row per disposal-lot allocation. **Only taxable disposals produce rows, in every tax year:** `sell` and `spend`. **`gift_out` and fees never produce a row** (ADR 0011, ADR 0043). The box is chosen **per disposal** from (tax year, disposal channel, 1099-DA received?, basis reported?), and the user can override it with the reason recorded:
   - ≤2024: A/B/C (short-term) and D/E/F (long-term). Digital assets without a 1099-B go in C/F.
   - ≥2025: digital assets go in **G/H/I** (short-term) and **J/K/L** (long-term). C/F may not be used for them.
-    - **only taxable disposals produce rows:** `sell`, `spend` and fee disposals. **`gift_out` never produces a row.**
-    - on-chain disposals (`spend`, fee disposals) → I/L
-    - exchange sells default to H/K (proceeds reported, basis not), including coins **deposited from outside** the exchange, which brokers treat as noncovered
+    - on-chain disposals (a `spend` or `sell` settled on-chain: from a wallet, or sent straight from an exchange with no 1099-DA reporting it, ADR 0043) → I/L
+    - exchange sells (trades carried out on the exchange) default to H/K (proceeds reported, basis not), including coins **deposited from outside** the exchange, which brokers treat as noncovered
     - G/J only for **covered** coins, i.e. bought inside that exchange account on or after 2026-01-01, when the broker reports basis
     - broker-reported basis and dates may differ from the user's books (Notice 2026-20). The report flags differences for review
+    - so are rows whose proceeds and basis differ from the broker's because of a fee taken in BTC, and any fee a broker reports as a sale (ADR 0043)
 - **Ordinary income summary** per year: income events with their USD FMV and source.
 - **Year summary + holdings:** realized short/long-term gains per year; lots held as of any date, with basis, holding period and unrealized gain.
 - **Audit trail:** for each lot, the chain from acquisition event → every tx hop (txids) → identification → disposal. Exported as CSV and JSON.
-- Every report embeds the app version, rule-set version, settings, and a hash of its inputs.
+- Every report embeds the app version, rule-set version, settings, and a hash of its inputs (with coin tracing: also lot links, wallet tracking start dates and the whole-wallet FIFO setting records, ADR 0041).
 - **CSV exports are type-aware:** numeric columns are written as numbers, and only free-text columns are escaped against formula injection.
 
 ## Repo layout
@@ -370,13 +378,28 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
 
    What M2 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues #184, #186, #188, #190, #192, #194, #196, #198 and #200.
 4. **M3 graph UI:** backward/forward expansion, the tagging side panel, the mixing flag.
+
+   M3 is done (2026-10-08). The merged PRs:
+   - the graph libraries, `cytoscape` and `@dagrejs/dagre` (#204, ADR 0037)
+   - transaction and spender expansion for the graph (#205)
+   - tagging from the graph, the mixing flag and the append-only change log (#207)
+   - tagging follow-ups: the address text checked against its script, the log guarded against replacement, a log holding an id only an outside edit can write refused at upgrade, and import edits logged (#214, #217, #219, #221)
+   - the graph view and its tagging side panel (#223)
+
+   As built, it differs from this plan in these ways:
+   - **Paging:** a transaction's inputs and outputs are all added at once; paging large transactions, with a node budget, is #225.
+   - **Colours:** outputs are coloured by class (yours, someone else's, untagged, unspendable), not per entity yet (#226).
+   - **Expansion E2E:** the E2E test opens a transaction, flags it, checks an unspent output and re-tags it; backward and spent-forward expansion need a spend in the regtest harness (#224).
+   - **Mixing flag:** the user sets it; auto-detection comes with the clustering heuristics (M4).
+
+   What M3 left open is tracked in the THREAT_MODEL rows' "Pending" notes and the `review-panel` issues #206, #209, #220, #222, #224–#227, #229 (tag provenance per change: done in #232, before M4) and #230 (frontend unit tests).
 5. **M4 clustering suggestions + doxx propagation:** certain and inferred links, plus the sell planner view.
-6. **M5 prices:** bulk USD VWAP, display FX for all pairs, proxy support.
+6. **M5 prices:** USD from Coin Metrics' daily reference rate with Bitstamp as the cross-check (ADR 0039), display FX for all pairs, proxy support.
 7. **M6 lot engine:**
    - events, per-account basis
    - identification timing
    - the 2025 opening allocation
-   - fees by role
+   - fees (ADR 0043)
    - gifts and inheritance
    - blocking conditions
    - **self-custody UTXO tracing** (ADR 0008 §2, #243): self-transfers, deposits and spends from a wallet take the lots of the outputs they spend. Until then the engine refuses self-transfers, and deposits and spends from a wallet use the account's order. Blocks release (the owner, 2026-10-09: self-custody transfers are extremely common)
@@ -384,7 +407,6 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
 9. Later:
    - exchange CSV import
    - in-app lock (see threat model open questions)
-   - a second price source for cross-checking (needs an ADR, since it adds an outbound flow)
    - lost/stolen and airdrop events
    - **an app-managed Bitcoin Core node,** if the app ever starts the node itself. Today the user runs it, and the app starts no child processes (architecture §2 and §3). So this needs an ADR, an architecture update (§2 `subprocess`, §3 child processes, §5 the node's P2P traffic becoming app-started, §6 the datadir no longer user-managed) and a threat-model update (T-201–T-203, T-209). Requirement (owner, 2026-10-06): the user chooses where the node keeps its data, `-datadir`, and optionally `-blocksdir` for the block files. The full chain doesn't fit on many laptop disks, and pruning isn't an option, because the app needs an unpruned node with its indexes. `-blocksdir` moves only the block files: the chainstate and the indexes stay under `-datadir`, so the app checks free space on both locations before starting the node, and checks their file systems (#111). It never silently defaults to the home directory. The ADR also decides whether the app warns when the datadir isn't on an encrypted volume (T-209: `debug.log` and the RPC credentials live there).
    - **hard-fork coins (next after v1):** e.g. BCH from BTC, BSV from BCH.
@@ -407,7 +429,7 @@ Every milestone ends by updating the THREAT_MODEL status, any ADRs, and the diag
     - all three gift outcomes
     - late identification (flagged and warned, choice kept)
     - the 2025 opening allocation
-    - fee roles
+    - fees (ADR 0043)
     - the 1-year boundary
   - 8949 box selection per tax year
 - **Regtest integration:** script `bitcoind -regtest` to:

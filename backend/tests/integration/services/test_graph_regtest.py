@@ -68,7 +68,10 @@ def test_a_spend_is_found_forward_and_cached_at_its_block_height(
     graph = Graph(conn, functools.partial(open_reader, data), rpc)
     view = graph.tx(first, raw["blockhash"])
     assert view.txid == first and view.blockhash == raw["blockhash"] and view.outputs[n].sats == 100_000_000
-    assert cc.get_tx(conn, first, raw["blockhash"]) is not None  # cached at the tip it was read at
+    cached = cc.get_tx(conn, first, raw["blockhash"])
+    # cached at the height the node gives its block: confirmations counted from the reference tip match
+    assert cached is not None
+    assert cached.confirmations == node.admin("getrawtransaction", [first, True])["confirmations"]
 
     spend = graph.spender(first, raw["blockhash"], n)
     assert (spend.state, spend.spending_txid, spend.blockhash) == ("spent", second, spent_in)
@@ -79,3 +82,4 @@ def test_a_spend_is_found_forward_and_cached_at_its_block_height(
     unspent = graph.spender(second, spent_in, out.n)
     assert unspent.state == "unspent" and unspent.as_of is not None
     assert unspent.as_of.blockhash == node.admin("getbestblockhash")
+    assert cc.unspent_at(conn, Outpoint(second, out.n)) == unspent.as_of  # the snapshot is what was shown
