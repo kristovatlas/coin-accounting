@@ -44,6 +44,11 @@ MADR-format records of significant decisions (see [ADR 0001](0001-record-decisio
 | [0035](0035-m1-chain-access-as-built.md) | The architecture text follows M1's chain access as built |
 | [0036](0036-m2-import-and-discovery-as-built.md) | The architecture text follows M2's import and discovery as built |
 | [0037](0037-graph-libraries.md) | Cytoscape.js and @dagrejs/dagre draw the transaction graph |
+| [0038](0038-schema-changes-within-the-data-model.md) | A migration that implements PLAN §2's data model needs no ADR of its own |
+| [0039](0039-coin-metrics-usd-reference-rate.md) | USD prices from Coin Metrics' daily reference rate |
 | [0040](0040-late-choices-judged-against-a-full-replay.md) | A late choice is judged against a replay without the late choices |
+| [0041](0041-utxo-tracing-in-the-lot-engine.md) | How the lot engine traces lots through self-custody coins |
+| [0042](0042-price-source-terms-are-the-users.md) | The price sources' terms are the user's to accept |
+| [0043](0043-network-fees-are-not-taxable-events.md) | Network fees are never a taxable event |
 
 Template: [0000-template.md](0000-template.md).

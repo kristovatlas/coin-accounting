@@ -174,7 +174,8 @@ def test_no_change_log_id_is_below_1_so_appends_keep_working_t408(
 ) -> None:
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         conn.execute(
-            "INSERT INTO change_log (id, at, kind, subject, after) VALUES (?, ?, 'tx_flag', 'ab', '{}')",
+            "INSERT INTO change_log (id, at, kind, subject, after, origin)"
+            " VALUES (?, ?, 'tx_flag', 'ab', '{}', 'user')",
             (bad_id, AT),
         )
     tags.tag_address(
@@ -189,10 +190,10 @@ def test_no_change_log_id_is_below_1_so_appends_keep_working_t408(
         "UPDATE change_log SET kind = 'tx_flag'",
         "DELETE FROM change_log",
         # REPLACE deletes the old row without firing delete triggers (recursive_triggers is off)
-        "INSERT OR REPLACE INTO change_log (id, at, kind, subject, after)"
-        " VALUES (1, '2026-10-08T12:00:00+00:00', 'tx_flag', 'ab', '{}')",
-        "REPLACE INTO change_log (id, at, kind, subject, after)"
-        " VALUES (1, '2026-10-08T12:00:00+00:00', 'tx_flag', 'ab', '{}')",
+        "INSERT OR REPLACE INTO change_log (id, at, kind, subject, after, origin)"
+        " VALUES (1, '2026-10-08T12:00:00+00:00', 'tx_flag', 'ab', '{}', 'user')",
+        "REPLACE INTO change_log (id, at, kind, subject, after, origin)"
+        " VALUES (1, '2026-10-08T12:00:00+00:00', 'tx_flag', 'ab', '{}', 'user')",
     ],
 )
 def test_the_change_log_is_append_only_t408(conn: sqlite3.Connection, exchange: int, statement: str) -> None:
@@ -245,11 +246,15 @@ def test_a_descriptors_address_changes_owner_only_with_its_descriptor(
         tags.tag_address(
             conn, SCRIPT, text=None, entity_id=exchange, tax_account_id=None, label="", client_ids=[], at=AT
         )
+    [a] = ac.addresses(conn)
+    assert (a.entity_id, a.tax_account_id) == (ME, wallet) and tags.changes(conn) == []
     # its label can still change
     tags.tag_address(
         conn, SCRIPT, text=None, entity_id=ME, tax_account_id=wallet, label="change", client_ids=[], at=AT
     )
     assert ac.addresses(conn)[0].label == "change"
+    [change] = tags.changes(conn, ("address_tag", SCRIPT))
+    assert change.after["label"] == "change" and change.after["source"] == "descriptor"
 
 
 def test_a_private_key_in_a_tag_never_reaches_the_db_t703(conn: sqlite3.Connection, exchange: int) -> None:
@@ -315,7 +320,12 @@ def test_a_db_from_schema_7_upgrades_and_keeps_appending_t408(tmp_path: Path) ->
     old = open_db(data, steps=list(STEPS[:7]))
     try:
         record_chain(old, "regtest")
-        tags.set_mixing(old, TXID, True, at=AT)
+        # what the app of schema 7 wrote: a flag and its log row, which had no origin then
+        old.execute("INSERT INTO tx_flag (txid, mixing, source) VALUES (?, 1, 'user')", (TXID,))
+        old.execute(
+            "INSERT INTO change_log (at, kind, subject, after) VALUES (?, 'tx_flag', ?, ?)",
+            (AT, TXID, '{"mixing": true, "source": "user"}'),
+        )
     finally:
         old.close()
     conn = open_db(data)
@@ -324,8 +334,8 @@ def test_a_db_from_schema_7_upgrades_and_keeps_appending_t408(tmp_path: Path) ->
         assert [c.id for c in tags.changes(conn, ("tx_flag", TXID))] == [1, 2]
         with pytest.raises(sqlite3.IntegrityError, match="append-only"):  # replacing a row: still refused
             conn.execute(
-                "INSERT OR REPLACE INTO change_log (id, at, kind, subject, after)"
-                " VALUES (1, ?, 'tx_flag', 'ab', '{}')",
+                "INSERT OR REPLACE INTO change_log (id, at, kind, subject, after, origin)"
+                " VALUES (1, ?, 'tx_flag', 'ab', '{}', 'user')",
                 (AT,),
             )
     finally:
@@ -355,3 +365,60 @@ def test_a_reimport_that_adds_a_wallet_client_is_logged_once_t408(
     [change] = tags.changes(conn, ("address_tag", SCRIPT))
     assert change.at == AT and change.before is not None
     assert (change.before["client_ids"], change.after["client_ids"]) == ([], [phone])
+
+
+def test_an_edit_whose_log_row_is_refused_is_undone_t408(conn: sqlite3.Connection, exchange: int) -> None:
+    # `at` too short for the change log's CHECK: the edit and its log row stand or fall together
+    with pytest.raises(sqlite3.IntegrityError):
+        tags.set_mixing(conn, TXID, True, at="bad")
+    with pytest.raises(AccountsError):
+        tags.tag_address(
+            conn,
+            SCRIPT,
+            text=None,
+            entity_id=exchange,
+            tax_account_id=None,
+            label="",
+            client_ids=[],
+            at="bad",
+        )
+    assert tags.mixing(conn, TXID) is None and ac.addresses(conn) == [] and tags.changes(conn) == []
+
+
+def test_a_refused_retag_keeps_the_addresss_wallet_apps_t408(conn: sqlite3.Connection, exchange: int) -> None:
+    phone = ac.add_client(conn, "Phone", "mobile")
+    tags.tag_address(
+        conn, SCRIPT, text=None, entity_id=exchange, tax_account_id=None, label="", client_ids=[phone], at=AT
+    )
+    with pytest.raises(AccountsError):  # an unknown client, after the old links were cleared
+        tags.tag_address(
+            conn,
+            SCRIPT,
+            text=None,
+            entity_id=exchange,
+            tax_account_id=None,
+            label="x",
+            client_ids=[999],
+            at=LATER,
+        )
+    [a] = ac.addresses(conn)
+    assert (a.label, a.client_ids) == ("", (phone,)) and len(tags.changes(conn)) == 1
+
+
+def test_one_addresss_history_holds_only_its_own_changes_t408(
+    conn: sqlite3.Connection, exchange: int
+) -> None:
+    other = "0014" + "dd" * 20
+    for script in (SCRIPT, other):
+        tags.tag_address(
+            conn,
+            script,
+            text=None,
+            entity_id=exchange,
+            tax_account_id=None,
+            label=script[-2:],
+            client_ids=[],
+            at=AT,
+        )
+    assert [c.subject for c in tags.changes(conn, ("address_tag", SCRIPT))] == [SCRIPT]
+    assert [c.subject for c in tags.changes(conn, ("address_tag", other))] == [other]
