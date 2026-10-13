@@ -534,9 +534,20 @@ class _Engine:
             judge = self._shadow if self._shadow is not None else self  # these lots once it has stopped
             # the same sats as the real run (_follow checks it), so never short: valid picks cover them
             standing, _ = judge._standing(e.account, e.sats)
-            if _merged(picks) != _merged(standing):
+            if not self._same_lots(judge, picks, standing):
                 return picks, 0, _Late(judge, tuple(standing), judge is not self)
         return picks, 0, None
+
+    def _same_lots(self, judge: _Engine, picks: Sequence[Pick], standing: Sequence[Pick]) -> bool:
+        """Whether `picks` are the lots the standing method uses in `judge`. Ids alone don't say so in
+        the replay: a moved id (lot@transfer) can name a lot there with other sats or basis (ADR 0040),
+        so the picked sats' figures must match too."""
+        merged = _merged(picks)
+        if merged != _merged(standing):
+            return False
+        return judge is self or all(
+            _figures(self._lots[i], n) == _figures(judge._lots[i], n) for i, n in merged.items()
+        )
 
     def _dispose(self, d: Disposal) -> None:
         if d.kind not in DISPOSAL_KINDS:
@@ -919,6 +930,23 @@ def _dust_target(
             "lot moving to take its basis, can't carry the basis to another lot; use fee_treatment='dispose'"
         )
     return plain[-1]
+
+
+def _figures(o: _Open, sats: int) -> tuple[object, ...]:
+    """What taking `sats` of a lot gives, as `_take` would compute it (nothing is used up): their bases
+    and the lot's dates and kind. Two lots of the same id give the same figures for these sats exactly
+    when this matches, whatever else each still holds."""
+    loss = None if o.loss_basis is None else share(o.loss_basis, sats, o.sats)
+    return (
+        share(o.basis, sats, o.sats),
+        loss,
+        o.gift,
+        o.fifo,
+        o.lot.acquired,
+        o.lot.loss_from,
+        o.lot.unknown_basis,
+        o.lot.always_long,
+    )
 
 
 def _merged(picks: Sequence[Pick]) -> dict[str, int]:

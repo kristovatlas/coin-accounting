@@ -205,6 +205,35 @@ def test_a_late_transfers_fee_is_figured_on_the_replays_lot(treatment: engine.Fe
         assert [(a.lot, a.sats, a.basis, a.proceeds) for a in fees] == [("b2", 2, D("0.40"), D("10.00"))]
 
 
+def test_a_moved_id_with_other_figures_in_the_replay_is_still_warned_adr0040() -> None:
+    # b1 is 10 sats with $0.01 of basis. The deposit late-chooses 5 of b1 and 5 of b2: the user's
+    # b1@d gets half a cent, rounded to $0.00; the replay moves all of b1 ($0.01). s1 chooses b2@d on
+    # time; the replay doesn't hold it, so it sells 5 of its b1@d by FIFO ($0.00 of it, half to even),
+    # keeping 5 sats with $0.01. Both runs now hold 5 sats of "b1@d", with $0.00 and $0.01: s2's late
+    # choice of b1@d matches the replay's FIFO by id and sats, but not by figures, so it is warned
+    on1, on2, on3 = date(2025, 3, 1), date(2025, 3, 2), date(2025, 3, 3)
+    events: list[Event] = [
+        Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("0.01")),
+        Acquisition("b2", "w", date(2024, 1, 2), "buy", 10, D("0.02")),
+        Transfer("d", "w", "x", on1, noon(on1), "deposit", 10,
+                 picks=(Pick("b1", 5), Pick("b2", 5)), identified_at=LATE),
+        Disposal("s1", "x", on2, noon(on2), "sell", 5, D("5.00"), (Pick("b2@d", 5),), noon(on1)),
+        Disposal("s2", "x", on3, noon(on3), "sell", 5, D("5.00"), (Pick("b1@d", 5),), LATE),
+    ]  # fmt: skip
+    result = run(events)
+    assert [w.disposal for w in result.late] == ["d", "s2"]
+    assert [(a.lot, a.sats, a.basis) for a in result.late[1].standing] == [("b1@d", 5, D("0.01"))]
+    assert [(a.lot, a.basis) for a in result.allocations] == [("b2@d", D("0.01")), ("b1@d", D("0.00"))]
+
+
+def test_the_replay_follows_an_on_time_choice_it_can_hold() -> None:
+    # s1 chooses b3 on time, and the replay follows it. s2 then chooses b2 late: the replay's FIFO is
+    # b1, so s2 is warned with b1's figures (were the replay to use FIFO for s1, it would hold b2 and
+    # b3, and s2 would match it)
+    result = run([*THREE, sale("s1", 1, "b3", ONTIME), sale("s2", 2, "b2")])
+    assert result.late == (LateIdentification("s2", LATE, (fifo("s2", 2, "b1", "1.00", 1),)),)
+
+
 def test_without_late_choices_the_replay_changes_nothing() -> None:
     events: list[Event] = [*THREE, sale("s1", 1, "b3", ONTIME), sale("s2", 2, "b1", ONTIME)]
     result = run(events)
