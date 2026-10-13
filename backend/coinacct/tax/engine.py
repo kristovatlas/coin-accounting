@@ -323,10 +323,6 @@ class _Open:
     created: bool = (
         False  # made by the engine for a withdrawal from an account without lots, or moved from one
     )
-    moved_from: tuple[
-        object, ...
-    ] = ()  # a moved lot's provenance: its source's origin, the transfer, its sats
-    carried_from: tuple[object, ...] = ()  # where a carried fee's dust came from (_carry): origins and sats
 
 
 def long_term(acquired: date, disposed: date) -> bool:
@@ -378,9 +374,6 @@ class _Engine:
         self._replay = replay
         self._shadow: _Engine | None = None if replay else _Engine(methods, fee_treatment, replay=True)
         self._replay_stopped: str | None = None
-        self._chosen: dict[
-            str, tuple[object, ...]
-        ] = {}  # replay only: the real run's origins for an event's picks
 
     def run(self, events: Sequence[Event]) -> Result:
         last: date | None = None
@@ -442,8 +435,6 @@ class _Engine:
         shadow = self._shadow
         if shadow is None:
             return
-        picks = () if isinstance(event, Acquisition) else event.picks or ()
-        shadow._chosen = {p.lot: _origin(self._lots[p.lot]) for p in picks}
         try:
             if isinstance(event, Acquisition):
                 shadow._acquire(event)
@@ -530,14 +521,9 @@ class _Engine:
         if self._replay:  # the replay disregards a late choice, and an on-time one it can't follow
             if e.identified_at is not None and e.identified_at <= e.at:
                 try:
-                    checked = self._checked_picks(e, e.picks)
+                    return self._checked_picks(e, e.picks), 0, None
                 except EngineError:
-                    checked = None
-                # it follows only the lots the user named: the same id can name other coins here
-                if checked is not None and all(
-                    _origin(self._lots[p.lot]) == self._chosen.get(p.lot) for p in checked
-                ):
-                    return checked, 0, None
+                    pass
             picks, missing = self._standing(e.account, e.sats)
             return picks, missing, None
         if e.identified_at is None:
@@ -548,19 +534,14 @@ class _Engine:
             judge = self._shadow if self._shadow is not None else self  # these lots once it has stopped
             # the same sats as the real run (_follow checks it), so never short: valid picks cover them
             standing, _ = judge._standing(e.account, e.sats)
-            if not self._same_lots(judge, picks, standing):
+            # the same lots means the same coins: a lot id names a purchase and the transfers that
+            # moved it (lot@transfer), so equal ids and sats are the same coins in both runs, even when
+            # their basis differs by the rounding an earlier late choice left behind, or by how much of
+            # the source moved with them. That difference is the earlier choice's, already warned
+            # about; the warning shows the replay's own figures (ADR 0040, its "Lot ids" bullet)
+            if _merged(picks) != _merged(standing):
                 return picks, 0, _Late(judge, tuple(standing), judge is not self)
         return picks, 0, None
-
-    def _same_lots(self, judge: _Engine, picks: Sequence[Pick], standing: Sequence[Pick]) -> bool:
-        """Whether `picks` are the lots the standing method uses in `judge`. Ids alone don't say so in
-        the replay: a moved id (lot@transfer) can name a lot there with other sats or basis (ADR 0040),
-        so the lots must also have the same origin (`_origin`: where their coins came from, never a
-        share of what is left of them)."""
-        merged = _merged(picks)
-        if merged != _merged(standing):
-            return False
-        return judge is self or all(_origin(self._lots[i]) == _origin(judge._lots[i]) for i in merged)
 
     def _dispose(self, d: Disposal) -> None:
         if d.kind not in DISPOSAL_KINDS:
@@ -751,11 +732,7 @@ class _Engine:
             o.lot.loss_from if loss is not None else None,
             o.lot.unknown_basis,
         )
-        moved_from = (_origin(o), t.id, sats, arriving)
-        self._insert(
-            t.to,
-            _Open(lot, arriving, basis, loss, o.gift, o.fifo, created=o.created, moved_from=moved_from),
-        )
+        self._insert(t.to, _Open(lot, arriving, basis, loss, o.gift, o.fifo, created=o.created))
         if not o.created:  # a created lot, however far it moves, is still not one the user recorded
             self._recorded.add(t.to)
         moved = Moved(t.id, lot_id, into, t.to, arriving, basis, o.lot.acquired, sats - arriving)
@@ -766,7 +743,6 @@ class _Engine:
         """Add the basis of fee parts (`sats` of them) to a moved part (the carry treatment's dust case)."""
         entry = self._lots[moved.into]
         entry.basis = add(entry.basis, basis)
-        entry.carried_from += (tuple(_origin(self._lots[i]) for i in lots), sats)
         i = next(k for k in range(len(self._moves) - 1, -1, -1) if self._moves[k].into == moved.into)
         self._moves[i] = Moved(
             moved.transfer,
@@ -948,16 +924,6 @@ def _dust_target(
             "lot moving to take its basis, can't carry the basis to another lot; use fee_treatment='dispose'"
         )
     return plain[-1]
-
-
-def _origin(o: _Open) -> tuple[object, ...]:
-    """Which lot this is, by provenance: an acquired or created lot's record, or, for a moved lot, its
-    source's origin, the transfer, and the sats that left and arrived; with its kind and where any carried
-    fee's dust came from. No basis of a lot's remainder enters it, so a cent of rounding that an earlier
-    late choice left behind doesn't make the same lot look different, before a move or after one. Coins
-    moved in other amounts, or by another transfer, do differ (ADR 0040)."""
-    base = o.moved_from if o.moved_from else (o.lot,)
-    return (base, o.gift, o.fifo, o.created, o.carried_from)
 
 
 def _merged(picks: Sequence[Pick]) -> dict[str, int]:
