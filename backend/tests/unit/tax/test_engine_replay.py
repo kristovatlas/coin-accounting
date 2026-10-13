@@ -258,6 +258,45 @@ def test_a_lot_used_differently_before_is_still_the_same_lot() -> None:
     assert [w.disposal for w in run(events).late] == ["s1"]
 
 
+def test_a_lot_moved_the_same_way_in_both_runs_is_the_same_lot_after_the_move() -> None:
+    # b1 is 10 sats with $0.05. s1 late-picks 3 of b1 and 2 of b2: the real b1 keeps 7 sats and $0.03,
+    # the replay's (FIFO took 5) 5 sats and $0.03. The deposit then moves 5 of b1 on time in both runs:
+    # the real b1@d gets $0.02, the replay's $0.03, a cent inherited from s1. s2 late-picks those 5
+    # sats of b1@d, the replay's FIFO too: the same coins by the same move, so not warned
+    on = date(2025, 3, 2)
+    events: list[Event] = [
+        Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("0.05")),
+        Acquisition("b2", "w", date(2024, 1, 2), "buy", 10, D("0.04")),
+        _pick("s1", 1, 5, (Pick("b1", 3), Pick("b2", 2))),
+        Transfer("d", "w", "x", on, noon(on), "deposit", 5, picks=(Pick("b1", 5),), identified_at=noon(on)),
+        Disposal("s2", "x", date(2025, 3, 3), noon(date(2025, 3, 3)), "sell", 5, D("5.00"),
+                 (Pick("b1@d", 5),), LATE),
+    ]  # fmt: skip
+    result = run(events)
+    assert [w.disposal for w in result.late] == ["s1"]
+    assert [(a.lot, a.basis) for a in result.allocations if a.disposal == "s2"] == [("b1@d", D("0.02"))]
+
+
+def test_the_replay_doesnt_follow_an_on_time_choice_naming_other_coins_adr0040() -> None:
+    # x holds b0 (5 sats, the oldest). The late deposit d moves 5 of b1 and 5 of b2 to x; the replay
+    # moves 10 of b1, so the two runs' b1@d are other coins. s1 sells 5 of b1@d on time: the replay
+    # can't follow it (its b1@d isn't the user's), so it sells b0 by FIFO. s2 late-picks b0: in the
+    # replay FIFO's next is b1@d, so s2 is warned (had the replay followed s1, b0 would match)
+    d1, d2, d3 = date(2025, 3, 1), date(2025, 3, 2), date(2025, 3, 3)
+    events: list[Event] = [
+        Acquisition("b0", "x", date(2023, 1, 1), "buy", 5, D("0.50")),
+        Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("1.00")),
+        Acquisition("b2", "w", date(2024, 1, 2), "buy", 10, D("2.00")),
+        Transfer("d", "w", "x", d1, noon(d1), "deposit", 10,
+                 picks=(Pick("b1", 5), Pick("b2", 5)), identified_at=LATE),
+        Disposal("s1", "x", d2, noon(d2), "sell", 5, D("5.00"), (Pick("b1@d", 5),), noon(d1)),
+        Disposal("s2", "x", d3, noon(d3), "sell", 5, D("5.00"), (Pick("b0", 5),), LATE),
+    ]  # fmt: skip
+    result = run(events)
+    assert [w.disposal for w in result.late] == ["d", "s2"]
+    assert [(a.lot, a.sats) for a in result.late[1].standing] == [("b1@d", 5)]
+
+
 def test_the_replay_follows_an_on_time_choice_it_can_hold() -> None:
     # s1 chooses b3 on time, and the replay follows it. s2 then chooses b2 late: the replay's FIFO is
     # b1, so s2 is warned with b1's figures (were the replay to use FIFO for s1, it would hold b2 and
