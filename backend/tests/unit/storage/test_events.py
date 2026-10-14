@@ -913,14 +913,15 @@ def test_damaged_rows_are_refused_when_read_t408(
     ):
         conn.execute(f"DROP TRIGGER {trigger}")  # damage that bypasses the module and the schema's rules
     conn.execute(damage)
-    with pytest.raises(ev.EventError, match="damaged"):
-        ev.events(conn)
-        ev.identifications(conn)
+    if damage.startswith("UPDATE event"):
+        with pytest.raises(ev.EventError, match="damaged"):
+            ev.events(conn)
+    else:
+        ev.events(conn)  # a damaged choice is the choice readers' to refuse
     with pytest.raises(ev.EventError, match="damaged"):
         ev.identifications(conn)
     with pytest.raises(ev.EventError, match="damaged"):
         ev.identification(conn, sale)  # the one-event read too, which identify's checks rely on
-        ev.events(conn)
 
 
 @pytest.mark.parametrize("kind", ["opening_allocation_2025", "fee"])
@@ -994,6 +995,8 @@ def test_lot_ids_the_engine_builds_are_accepted(
         "WHERE position = 0",
         "UPDATE identification SET identified_at = '2025-03-01T12:00:00.000000'",  # no offset
         "UPDATE identification SET position = 5 WHERE position = 1",  # a gap in the order
+        "UPDATE identification SET method = 'standing_order'",  # a method the module never writes
+        "UPDATE identification SET late = 1 WHERE position = 1",  # a flag the module doesn't set yet
     ],
 )
 def test_a_stored_choice_is_checked_as_identify_would_write_it_t408(
@@ -1003,10 +1006,39 @@ def test_a_stored_choice_is_checked_as_identify_would_write_it_t408(
     sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
     ev.identify(conn, sale, (ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN, at=AT)
     assert ev.identifications(conn) == {sale: ((ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN)}
-    for trigger in ("identification_is_replaced_never_edited",):
-        conn.execute(f"DROP TRIGGER {trigger}")  # damage that bypasses the module and the schema's rules
+    conn.execute("DROP TRIGGER identification_is_replaced_never_edited")  # damage that bypasses the module
     conn.execute(damage)
     with pytest.raises(ev.EventError, match="damaged"):
         ev.identifications(conn)
     with pytest.raises(ev.EventError, match="damaged"):
         ev.identification(conn, sale)  # the one-event read too, which identify's checks rely on
+
+
+def test_a_choice_of_an_event_not_among_those_read_is_refused_t408(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, _ = accounts
+    sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice("e1", 1_000),), WHEN, at=AT)
+    with pytest.raises(ev.EventError, match="damaged"):
+        ev.identifications(conn, [s for s in ev.events(conn) if s.id != sale])
+
+
+def test_a_stored_choice_of_more_than_the_most_lots_is_refused_t408(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, _ = accounts
+    n = ev.MAX_CHOICES + 1
+    sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, n, D("50.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice("e0", n),), WHEN, at=AT)
+    conn.execute("DROP TRIGGER identification_is_replaced_never_edited")  # damage that bypasses the module
+    stamp = conn.execute("SELECT identified_at FROM identification").fetchone()[0]
+    conn.execute("UPDATE identification SET sats = 1")
+    conn.executemany(
+        "INSERT INTO identification (event_id, position, lot, sats, identified_at) VALUES (?, ?, ?, 1, ?)",
+        [(sale, i, f"e{i}", stamp) for i in range(1, n)],
+    )
+    with pytest.raises(ev.EventError, match="damaged"):
+        ev.identifications(conn)
+    with pytest.raises(ev.EventError, match="damaged"):
+        ev.identification(conn, sale)
