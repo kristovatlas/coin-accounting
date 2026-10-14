@@ -205,21 +205,21 @@ export function Events({ session }: { session: string }) {
         Refresh
       </button>
       {error && <p id="events-error">{error}</p>}
-      <fieldset id="new-event">
+      <fieldset id="new-event" disabled={busy}>
         <legend>Add an event</legend>
-        <select id="event-kind" value={kind} onChange={(e) => setKind(e.target.value as EventKind)}>
+        <select autoComplete="off" id="event-kind" value={kind} onChange={(e) => setKind(e.target.value as EventKind)}>
           {KINDS.map((k) => (
             <option key={k.kind} value={k.kind}>
               {k.label}
             </option>
           ))}
         </select>
-        <select id="event-account" aria-label="Account" value={account} onChange={(e) => setAccount(e.target.value)}>
+        <select autoComplete="off" id="event-account" aria-label="Account" value={account} onChange={(e) => setAccount(e.target.value)}>
           <option value="">Account…</option>
           {options}
         </select>
         {MOVEMENTS.includes(kind) && (
-          <select id="event-to" aria-label="To account" value={to} onChange={(e) => setTo(e.target.value)}>
+          <select autoComplete="off" id="event-to" aria-label="To account" value={to} onChange={(e) => setTo(e.target.value)}>
             <option value="">To account…</option>
             {options}
           </select>
@@ -241,7 +241,7 @@ export function Events({ session }: { session: string }) {
             <input autoComplete="off" id="event-fmv" aria-label="USD value at the gift" placeholder="USD value at the gift" value={fmv} onChange={(e) => setFmv(e.target.value)} />
             <input autoComplete="off" id="event-donor-date" type="date" aria-label="When the donor acquired it" value={donorDate} onChange={(e) => setDonorDate(e.target.value)} />
             <label>
-              <input id="event-always-long" type="checkbox" checked={alwaysLong} onChange={(e) => setAlwaysLong(e.target.checked)} />
+              <input autoComplete="off" id="event-always-long" type="checkbox" checked={alwaysLong} onChange={(e) => setAlwaysLong(e.target.checked)} />
               The donor's lot was always long-term
             </label>
           </>
@@ -329,8 +329,8 @@ export function Events({ session }: { session: string }) {
           </p>
           {custodial(current.account) && current.at >= "2027" && (
             <p id="choose-lots-broker">
-              From 2027 your broker must have this identification by the time of the sale: tell them, not only this
-              app (ADR 0008).
+              From 2027 your broker must have this identification by the time of the sale or withdrawal: tell
+              them then, not only this app (ADR 0008).
             </p>
           )}
           <textarea autoComplete="off" id="choose-lots-text" value={lots} onChange={(e) => setLots(e.target.value)} />
