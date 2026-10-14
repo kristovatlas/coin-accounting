@@ -73,6 +73,9 @@ _SELECT_ALL: Final = f"SELECT id, {_COLUMNS} FROM event ORDER BY at, id"  # noqa
 _SELECT_ONE: Final = f"SELECT {_COLUMNS} FROM event WHERE id = ?"  # noqa: S608
 
 
+_NAMED: Final = "other events' choices name this event's lots: change them first"
+
+
 class EventError(ValueError):
     """An event or identification the user DB can't hold. The message names the field, never a value."""
 
@@ -149,7 +152,7 @@ def update_event(
                 )
         moves_its_lots = _lot_shape(event) != _lot_shape(before)
         if moves_its_lots and _named_by_others(conn, event_id):
-            raise EventError("other events' choices name this event's lots: change them first")
+            raise EventError(_NAMED)
         conn.execute(_UPDATE, (*row, event_id))
         append(conn, at, ("event", str(event_id), _state(before), _state(event)), origin)
 
@@ -160,7 +163,7 @@ def remove_event(conn: sqlite3.Connection, event_id: int, *, at: str, origin: Or
     with _refusals(), transaction(conn):
         before = _read(conn, event_id)
         if _named_by_others(conn, event_id):
-            raise EventError("other events' choices name this event's lots: change them first")
+            raise EventError(_NAMED)
         _replace_choice(conn, event_id, (), None, at=at, origin=origin)
         conn.execute("DELETE FROM event WHERE id = ?", (event_id,))
         append(conn, at, ("event", str(event_id), _state(before), None), origin)
@@ -203,6 +206,10 @@ def identify(  # noqa: PLR0913 - the event, its choices, when they were made, an
         event = _read(conn, event_id)
         if choices:
             _check_choice(event, choices)
+        before, _ = identification(conn, event_id)
+        # a movement's choice names the lots it moves, which later choices can name in turn
+        if event.kind in MOVEMENTS and choices != before and _named_by_others(conn, event_id):
+            raise EventError(_NAMED)
         _replace_choice(conn, event_id, choices, stamp, at=at, origin=origin)
 
 
@@ -431,7 +438,8 @@ def _check_sats(value: object, what: str) -> None:
 
 def _day(moment: datetime) -> date:
     """The latest tax date a moment can have: its UTC date plus a day (time zones run to UTC+14)."""
-    return moment.astimezone(UTC).date() + timedelta(days=1)
+    day = moment.astimezone(UTC).date()
+    return day if day == date.max else day + timedelta(days=1)
 
 
 def _moment(value: object, what: str) -> str:

@@ -422,7 +422,7 @@ def test_an_edit_its_choice_no_longer_fits_is_refused(
     ev.update_event(conn, sale, ev.Event("sell", wallet, WHEN, 1_000, D("55.00")), at=AT)  # a new price fits
     with pytest.raises(sqlite3.IntegrityError, match="only a disposal or a movement"):  # the schema too
         conn.execute("UPDATE event SET kind = 'buy', usd = '1.00' WHERE id = ?", (sale,))
-    with pytest.raises(sqlite3.IntegrityError, match="more sats than the event"):
+    with pytest.raises(sqlite3.IntegrityError, match="no longer cover"):
         conn.execute("UPDATE event SET sats = 10 WHERE id = ?", (sale,))
 
 
@@ -629,3 +629,49 @@ def test_the_log_accepts_the_kinds_later_steps_record(conn: sqlite3.Connection, 
 def test_the_log_still_refuses_an_unknown_kind(conn: sqlite3.Connection) -> None:
     with pytest.raises(sqlite3.IntegrityError):
         change_log.append(conn, AT, ("price", "s", None, "x"), "user")
+
+
+@pytest.mark.parametrize(
+    ("change", "refused"),
+    [
+        ("sats = 1100", True),
+        ("fee_sats = 50", True),
+        ("sats = 1050, fee_sats = 150", False),
+        ("note = 'x'", False),
+    ],
+)
+def test_the_schema_keeps_an_edited_events_choice_exact(
+    conn: sqlite3.Connection, accounts: tuple[int, int], change: str, refused: bool
+) -> None:
+    wallet, exchange = accounts
+    deposit = ev.add_event(conn, ev.Event("deposit", wallet, WHEN, 1_000, to=exchange, fee_sats=100), at=AT)
+    ev.identify(conn, deposit, (ev.Choice("e1", 900),), WHEN, at=AT)
+    update = f"UPDATE event SET {change} WHERE id = ?"  # noqa: S608 - the test's own constant changes
+    if refused:
+        with pytest.raises(sqlite3.IntegrityError, match="no longer cover"):
+            conn.execute(update, (deposit,))
+    else:
+        conn.execute(update, (deposit,))
+
+
+def test_a_named_movement_keeps_its_choice(conn: sqlite3.Connection, accounts: tuple[int, int]) -> None:
+    wallet, exchange = accounts
+    bought = ev.add_event(conn, buy(wallet), at=AT)
+    other = ev.add_event(conn, buy(wallet), at=AT)
+    deposit = ev.add_event(conn, ev.Event("deposit", wallet, WHEN, 1_000, to=exchange), at=AT)
+    ev.identify(conn, deposit, (ev.Choice(str(bought), 1_000),), WHEN, at=AT)
+    sale = ev.add_event(conn, ev.Event("sell", exchange, WHEN, 1_000, D("50.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice(f"{bought}@{deposit}", 1_000),), WHEN, at=AT)
+    for choice in ((ev.Choice(str(other), 1_000),), ()):
+        with pytest.raises(ev.EventError, match="other events' choices name"):
+            ev.identify(conn, deposit, choice, WHEN, at=AT)
+    ev.identify(conn, deposit, (ev.Choice(str(bought), 1_000),), WHEN, at=AT)  # the same again
+
+
+def test_a_moment_on_the_calendars_last_day_is_handled(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, _ = accounts
+    last = datetime(9999, 12, 31, 12, tzinfo=UTC)
+    gift = ev.Event("gift_in", wallet, last, 10, fmv=D("1.00"), donor_acquired=date(2020, 1, 1))
+    assert ev.add_event(conn, gift, at=AT) >= 1

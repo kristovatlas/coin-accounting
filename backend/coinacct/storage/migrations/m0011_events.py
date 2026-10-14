@@ -11,8 +11,9 @@ T-408, T-501, T-508).
   come in later steps.
 - `identification` holds a disposal's or movement's chosen lots, in order: the engine's lot id, the sats,
   and when the user chose them (T-508). A chosen set is replaced whole, by the app, with a change-log row.
-  Triggers keep it on a disposal or movement, holding no more sats than the event, through inserts and
-  edits alike; that it covers them exactly is the module's check. Event
+  Triggers keep it on a disposal or movement, holding no more sats than the event as rows go in, and
+  covering them exactly (a movement's: or less its fee) once the event is edited; that a new choice
+  covers them exactly is the module's check, since its rows go in one at a time. Event
   ids are never reused (`AUTOINCREMENT`), so a choice naming a removed event's lot can't come to name
   another's: the engine refuses it instead.
 - The change log gains the kinds `event` and `identification`, so every edit to them is logged (T-408),
@@ -165,7 +166,12 @@ CREATE TRIGGER event_with_chosen_lots_stays_a_disposal_or_movement BEFORE UPDATE
 WHEN NEW.kind NOT IN ('self_transfer', 'deposit', 'withdrawal', 'sell', 'spend', 'gift_out')
     AND EXISTS (SELECT 1 FROM identification WHERE event_id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'only a disposal or a movement chooses lots'); END;
-CREATE TRIGGER event_keeps_the_sats_its_lots_were_chosen_for BEFORE UPDATE OF sats ON event
-WHEN NEW.sats < (SELECT coalesce(sum(sats), 0) FROM identification WHERE event_id = NEW.id)
-BEGIN SELECT RAISE(ABORT, 'the chosen lots hold more sats than the event'); END;
+CREATE TRIGGER event_keeps_the_sats_its_lots_were_chosen_for BEFORE UPDATE OF sats, fee_sats, kind ON event
+WHEN EXISTS (SELECT 1 FROM identification WHERE event_id = NEW.id)
+    AND (SELECT sum(sats) FROM identification WHERE event_id = NEW.id) <> NEW.sats
+    AND NOT (
+        NEW.kind IN ('deposit', 'withdrawal', 'self_transfer') AND NEW.fee_sats > 0
+        AND (SELECT sum(sats) FROM identification WHERE event_id = NEW.id) = NEW.sats - NEW.fee_sats
+    )
+BEGIN SELECT RAISE(ABORT, 'the chosen lots no longer cover the event''s sats'); END;
 """
