@@ -7,8 +7,11 @@ T-408, T-501, T-508).
   USD amount (an acquisition's basis or FMV, a disposal's proceeds net of costs), the valuation's source,
   the fee sats it bears, and an optional txid. A gift received adds the donor's date, the FMV at the gift
   and whether the donor's lot was always long-term; a withdrawal from an account without lots adds the
-  basis and date of the sats it has none for. The opening allocation, a fee on its own line and lot links
-  come in later steps.
+  basis and date of the sats it has none for. PLAN §2's other kinds, `opening_allocation_2025` and
+  `fee` (a fee on its own line), are in the kind list now, so `event` needn't be rebuilt for them: the
+  module refuses them until their steps, which add their columns with `ALTER TABLE … ADD COLUMN` and
+  their cross-field rules as triggers. A rebuild of `event` would have to carry its `sqlite_sequence`
+  row over, or removed ids could be given out again.
 - `identification` holds a disposal's or movement's chosen lots, in order: the engine's lot id, the sats,
   and when the user chose them (T-508). A chosen set is replaced whole, by the app, with a change-log row.
   Triggers keep it on a disposal or movement, holding no more sats than the event as rows go in, and
@@ -83,9 +86,9 @@ CREATE TABLE event (
     -- can't come to name a different purchase (https://www.sqlite.org/autoinc.html)
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL CHECK (kind IN (
-        'buy', 'p2p_buy', 'income', 'gift_in', 'inherit',
+        'buy', 'p2p_buy', 'income', 'gift_in', 'inherit', 'opening_allocation_2025',
         'self_transfer', 'deposit', 'withdrawal',
-        'sell', 'spend', 'gift_out'
+        'sell', 'spend', 'gift_out', 'fee'
     )),
     tax_account_id INTEGER NOT NULL REFERENCES tax_account (id) ON DELETE RESTRICT,
     to_account_id INTEGER REFERENCES tax_account (id) ON DELETE RESTRICT,
@@ -98,15 +101,17 @@ CREATE TABLE event (
     -- USD as text, exact cents: an acquisition's basis or FMV, a disposal's proceeds (None: a gift's
     -- unknown donor basis, or a movement)
     usd TEXT CHECK (usd IS NULL OR (length(usd) BETWEEN 1 AND 24 AND usd GLOB '*[0-9]*'
-        AND usd NOT GLOB '*[^0-9.-]*')),
+        AND usd NOT GLOB '*[^0-9.-]*' AND substr(usd, 2) NOT GLOB '*-*')),
     valuation_source TEXT CHECK (valuation_source IS NULL OR length(valuation_source) BETWEEN 1 AND 200),
     txid TEXT CHECK (txid IS NULL OR (length(txid) = 64 AND txid NOT GLOB '*[^0-9a-f]*')),
-    fmv TEXT CHECK (fmv IS NULL OR (length(fmv) BETWEEN 1 AND 24 AND fmv NOT GLOB '*[^0-9.-]*')),
+    fmv TEXT CHECK (fmv IS NULL OR (length(fmv) BETWEEN 1 AND 24 AND fmv GLOB '*[0-9]*'
+        AND fmv NOT GLOB '*[^0-9.-]*' AND substr(fmv, 2) NOT GLOB '*-*')),
     donor_acquired TEXT CHECK (donor_acquired IS NULL OR (length(donor_acquired) = 10
         AND donor_acquired GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')),
     donor_always_long INTEGER NOT NULL DEFAULT 0 CHECK (donor_always_long IN (0, 1)),
     missing_basis TEXT CHECK (missing_basis IS NULL OR (length(missing_basis) BETWEEN 1 AND 24
-        AND missing_basis NOT GLOB '*[^0-9.-]*')),
+        AND missing_basis GLOB '*[0-9]*' AND missing_basis NOT GLOB '*[^0-9.-]*'
+        AND substr(missing_basis, 2) NOT GLOB '*-*')),
     missing_acquired TEXT CHECK (missing_acquired IS NULL OR (length(missing_acquired) = 10
         AND missing_acquired GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')),
     note TEXT CHECK (note IS NULL OR length(note) BETWEEN 1 AND 2000),
@@ -121,8 +126,8 @@ CREATE TABLE event (
     -- only a withdrawal names the basis of sats its account has no lots for, and then both parts
     CHECK (kind = 'withdrawal' OR (missing_basis IS NULL AND missing_acquired IS NULL)),
     CHECK ((missing_basis IS NULL) = (missing_acquired IS NULL)),
-    -- a fee is borne by a movement, a disposal, or a buy whose fee was withheld from the sats bought
-    -- (ADR 0043: the lot holds the sats credited, its basis the full cash paid)
+    -- a BTC fee is borne by a movement, or a buy whose fee was withheld from the sats bought (ADR 0043:
+    -- the lot holds the sats credited, its basis the full cash paid); a disposal's waits for the engine
     CHECK (
         fee_sats = 0 OR kind IN ('buy', 'self_transfer', 'deposit', 'withdrawal')
     ),

@@ -16,7 +16,10 @@ a gift without its donor's date).
   engine's ids are the events' own ids as text, so a lot an event made or moved is named by that id as one
   segment of the lot id (moves stack: `<buy>@<deposit>@<withdrawal>`); an event other choices name can't
   be removed, or have what its lots depend on changed (kind, accounts, moment, sats, fee, missing basis),
-  until they change.
+  until they change. The guard is on named events only: a movement without a choice of its own moves
+  lots by the standing method, and an edit elsewhere (an earlier purchase, say) can change which, so a
+  later choice naming those moved lots can go stale. The engine then falls back to the standing method
+  and warns (THREAT_MODEL 0.10.6); it never mis-reads the choice.
 - `identification`'s method is always the user's specific choice: an event without one uses the standing
   method, or the FIFO fallback, which the engine tells apart (PLAN §2's `standing_order | fifo_default`
   are derived, not stored).
@@ -58,7 +61,10 @@ ACQUISITIONS: Final = frozenset({"buy", "p2p_buy", "income", "gift_in", "inherit
 MOVEMENTS: Final = frozenset({"self_transfer", "deposit", "withdrawal"})
 DISPOSALS: Final = frozenset({"sell", "spend", "gift_out"})
 GENESIS: Final = date(2009, 1, 3)  # no bitcoin was acquired before the genesis block
+# PLAN §2's kinds the schema lists but the module refuses until their steps (migration 11)
+LATER_KINDS: Final = frozenset({"opening_allocation_2025", "fee"})
 MAX_LOT: Final = 400  # a lot id's length
+MAX_CHOICES: Final = 1000  # lots in one choice
 # the engine's lot ids: event ids and its separators (lot@transfer, lot@tx#vout, @@unrecorded, @@placeholder)
 _LOT: Final = re.compile(r"[0-9A-Za-z_.:@#-]+", re.ASCII)
 _COLUMNS: Final = (
@@ -194,6 +200,8 @@ def identify(  # noqa: PLR0913 - the event, its choices, when they were made, an
             raise EventError("a choice names a lot by the engine's id")
         refuse_private(c.lot)  # no key in any text the DB keeps (T-703)
         _check_sats(c.sats, "a choice's sats")
+    if len(choices) > MAX_CHOICES:
+        raise EventError(f"a choice names at most {MAX_CHOICES} lots")
     if len({c.lot for c in choices}) != len(choices):
         raise EventError("a choice names each lot once")
     if choices and identified_at is None:
@@ -215,6 +223,11 @@ def identify(  # noqa: PLR0913 - the event, its choices, when they were made, an
         # a movement's choice names the lots it moves, which later choices can name in turn; the same
         # lots in another order move the same lots (the engine takes picks in FIFO order)
         changed = sorted((c.lot, c.sats) for c in choices) != sorted((c.lot, c.sats) for c in before)
+        _, before_at = identification(conn, event_id)
+        if identified_at is not None and before_at is not None and identified_at < before_at:
+            # a choice is made after the one it replaces: never re-dated earlier, so a late choice can't
+            # be made to look timely (T-508)
+            raise EventError("a choice of lots can't be dated before the one it replaces")
         if event.kind in MOVEMENTS and changed and _named_by_others(conn, event_id):
             raise EventError(_NAMED)
         _replace_choice(conn, event_id, choices, stamp, at=at, origin=origin)
@@ -234,10 +247,9 @@ def _log_time(at: str) -> datetime:
 
 
 def _check_lots_exist(conn: sqlite3.Connection, choices: tuple[Choice, ...]) -> None:
-    """Every event a chosen lot id names (as its first segment, or a later `@` segment) is stored, so a
-    choice can't come to name an event added after it (ids are given out in order)."""
-    # an id's `#<vout>` suffix is an output index, not an event
-    named = {int(part) for c in choices for part in c.lot.split("#", 1)[0].split("@") if part.isdigit()}
+    """The event each chosen lot starts from (`_origin`) is stored, so a choice can't come to name an event
+    added after it (ids are given out in order)."""
+    named = {o for c in choices if (o := _origin(c.lot)) is not None}
     if not named:
         return
     marks = ", ".join("?" * len(named))
@@ -267,9 +279,31 @@ def _check_choice(event: Event, choices: tuple[Choice, ...]) -> None:
 def _named_by_others(conn: sqlite3.Connection, event_id: int) -> bool:
     """Whether another event's choice names a lot `event_id` made or moved: its id as any segment of the
     engine's lot id (`<id>`, `<id>@…`, `…@<id>`, `…@<id>@…`, `…@<id>#<vout>`), as `services/` names lots."""
-    name = re.compile(rf"(?:^|@){event_id}(?:$|[@#])")
     lots = conn.execute("SELECT lot FROM identification WHERE event_id != ?", (event_id,))
-    return any(name.search(lot) for (lot,) in lots)
+    return any(event_id in _events_named(lot) for (lot,) in lots)
+
+
+_EVENT_ID: Final = re.compile(r"[1-9][0-9]{0,18}")
+
+
+def _origin(lot: str) -> int | None:
+    """The stored event a lot id starts from, if it starts from one: its first segment, all digits, written
+    as SQLite stores an id (no leading zero, at most 19 digits), so one event has one spelling. Lot ids
+    in a coin-traced wallet start from a coin instead (ADR 0041), and name no event here."""
+    first = re.split(r"[@#]", lot, maxsplit=1)[0]
+    if not first.isdigit():
+        return None
+    if not _EVENT_ID.fullmatch(first) or int(first) > 2**63 - 1:
+        raise EventError("a choice names an event by its id, with no leading zero")
+    return int(first)
+
+
+def _events_named(lot: str) -> set[int]:
+    """Every event id a lot id may name, as any `@` segment before a `#<vout>`: the lot's origin and the
+    movements it went through (`<id>@<move>…`). A later all-digit segment can also be a part's index (an
+    opening allocation's `<id>@<n>`), so this errs towards protecting an event, never away from it."""
+    parts = lot.split("#", 1)[0].split("@")
+    return {int(p) for p in parts if _EVENT_ID.fullmatch(p) and int(p) <= 2**63 - 1}
 
 
 def events(conn: sqlite3.Connection) -> list[Stored]:
@@ -286,7 +320,8 @@ def identification(conn: sqlite3.Connection, event_id: int) -> tuple[tuple[Choic
     ).fetchall()
     if not rows:
         return (), None
-    return tuple(Choice(lot, sats) for lot, sats, _ in rows), datetime.fromisoformat(rows[0][2])
+    with _damaged():
+        return tuple(Choice(lot, sats) for lot, sats, _ in rows), datetime.fromisoformat(rows[0][2])
 
 
 @contextmanager
@@ -304,10 +339,11 @@ def _refusals() -> Iterator[None]:
 def identifications(conn: sqlite3.Connection) -> dict[int, tuple[tuple[Choice, ...], datetime]]:
     """Every stored choice of lots, by event id, in one query: its lots in order, and when it was made."""
     out: dict[int, tuple[list[Choice], datetime]] = {}
-    for event_id, lot, sats, chosen_at in conn.execute(
-        "SELECT event_id, lot, sats, identified_at FROM identification ORDER BY event_id, position"
-    ):
-        out.setdefault(event_id, ([], datetime.fromisoformat(chosen_at)))[0].append(Choice(lot, sats))
+    with _damaged():
+        for event_id, lot, sats, chosen_at in conn.execute(
+            "SELECT event_id, lot, sats, identified_at FROM identification ORDER BY event_id, position"
+        ):
+            out.setdefault(event_id, ([], datetime.fromisoformat(chosen_at)))[0].append(Choice(lot, sats))
     return {k: (tuple(v[0]), v[1]) for k, v in out.items()}
 
 
@@ -356,6 +392,8 @@ def _check_fee(e: Event) -> None:
 def _checked(e: Event) -> Event:  # noqa: PLR0912 - one check per field
     if not isinstance(e, Event):
         raise EventError("an event is an Event")
+    if e.kind in LATER_KINDS:
+        raise EventError("an opening allocation, or a fee on its own line, isn't supported yet")
     if e.kind not in ACQUISITIONS | MOVEMENTS | DISPOSALS:
         raise EventError("unknown kind of event")
     if isinstance(e.account, bool) or not isinstance(e.account, int):
@@ -429,12 +467,23 @@ def _row(e: Event) -> tuple[Any, ...]:
     )
 
 
-def _event(r: tuple[Any, ...]) -> Event:
-    """A stored row as an `Event`; a damaged one is refused, never half-read (T-408)."""
+@contextmanager
+def _damaged() -> Iterator[None]:
+    """A stored row that can't be read, or that the module wouldn't write, is refused, never half-read."""
     try:
-        return _decoded(r)
-    except (ValueError, TypeError, ArithmeticError):
+        yield
+    except (ValueError, TypeError, ArithmeticError, EventError):
         raise EventError("a stored event is damaged (T-408): restore the user DB from a backup") from None
+
+
+def _event(r: tuple[Any, ...]) -> Event:
+    """A stored row as an `Event`, checked as a write would be: a sub-cent amount, a moment not in UTC or
+    any rule the schema doesn't hold is refused as damage (T-408)."""
+    with _damaged():
+        e = _decoded(r)
+        if e.at.utcoffset() != timedelta(0) or _row(_checked(e)) != tuple(r[: len(_row(e))]):
+            raise EventError("damaged")
+        return e
 
 
 def _decoded(r: tuple[Any, ...]) -> Event:
