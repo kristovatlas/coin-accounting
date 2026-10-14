@@ -56,6 +56,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Final, Literal
 
+from coinacct.domain.chain import SATS_PER_BTC
 from coinacct.domain.money import add, signed_usd, subtract, usd, value_of
 from coinacct.tax.engine import (
     Acquisition,
@@ -72,7 +73,6 @@ type Channel = Literal["exchange", "onchain"]
 
 SHORT_BOXES: Final[frozenset[str]] = frozenset("ABCGHI")
 BASIS_BOXES: Final[frozenset[str]] = frozenset("ADGJ")  # the boxes of sales a form reports with basis
-SATS_PER_BTC: Final = 100_000_000
 ZERO: Final = Decimal("0.00")
 COVERED_FROM: Final = date(2026, 1, 1)  # a digital asset bought from then is covered (ADR 0011)
 # The stated tax positions every report prints (PLAN §8), by the ADR that records each
@@ -398,38 +398,35 @@ class IncomeSummary:
 
 
 def income_summary(
-    events: Sequence[Event],
     result: Result,
     tax_year: int,
     *,
     blocking: Sequence[object],
     sources: Mapping[str, str] | None = None,
 ) -> IncomeSummary | Blocked:
-    """The tax year's `income` acquisitions, by date, with their FMV and total (PLAN §8), or why it
-    can't be built: `result` is the engine's run of `events`, whose blocking conditions block it, as the
-    caller's do (`blocking`, as for `form_8949`). `sources` names who paid each income event."""
+    """The tax year's `income` acquisitions of the engine's run, by date, with their FMV and total (PLAN
+    §8), or why it can't be built: the run's blocking conditions block it, as the caller's do
+    (`blocking`, as for `form_8949`). `sources` names who paid each income event; a row the caller names
+    no source for has none (`source` None)."""
     rules_for(tax_year)
     _check_blocking(blocking)
-    last = max((e.on for e in events), default=None)
-    if result.through != last:
-        raise EngineError("result is the engine's run of these events: its last date differs")
     named = {} if sources is None else sources
-    income = {e.id for e in events if isinstance(e, Acquisition) and e.kind == "income"}
+    income = [e for e in result.events if isinstance(e, Acquisition) and e.kind == "income"]
     if not isinstance(named, Mapping) or not all(
         isinstance(k, str) and isinstance(v, str) and v for k, v in named.items()
     ):
         raise EngineError("sources maps income events to the names of who paid them")
-    if not set(named) <= income:
-        raise EngineError(f"sources names events that aren't income: {sorted(set(named) - income)}")
+    if not set(named) <= {e.id for e in income}:
+        raise EngineError(
+            f"sources names events that aren't income: {sorted(set(named) - {e.id for e in income})}"
+        )
     if result.blocking or blocking:
         return Blocked((*result.blocking, *blocking))
-    rows: list[IncomeRow] = []
-    for e in events:
-        if not isinstance(e, Acquisition) or e.kind != "income" or e.on.year != tax_year:
-            continue
-        if e.basis is None:
-            raise EngineError(f"income {e.id!r}: its FMV at receipt is needed")
-        rows.append(IncomeRow(e.id, e.on, e.sats, _usd(e.basis, e.id), named.get(e.id)))
+    rows = [
+        IncomeRow(e.id, e.on, e.sats, _usd(e.basis, e.id), named.get(e.id))
+        for e in income
+        if e.on.year == tax_year and e.basis is not None  # the engine refuses income without its FMV
+    ]
     rows.sort(key=lambda r: (r.received, r.event))
     return IncomeSummary(
         tax_year, tuple(rows), _sum(r.fmv for r in rows), result.replay_stopped, tuple(result.late)
@@ -457,7 +454,8 @@ class YearSummary:
 
 def year_summary(result: Result, tax_year: int, *, blocking: Sequence[object]) -> YearSummary | Blocked:
     """The tax year's realized short- and long-term totals, from its sales' and spends' allocations, or
-    why it can't be built (the engine's blocking conditions and the caller's, as for `form_8949`)."""
+    why it can't be built (the engine's blocking conditions and the caller's, as for `form_8949`).
+    `result` is the run of every event, as for `form_8949` (#298: blocking by year)."""
     rules_for(tax_year)
     _check_blocking(blocking)
     if result.blocking or blocking:
@@ -484,7 +482,6 @@ class Holding:
     loss_from: date | None  # and the gift date its holding period runs from
     long_term: bool  # the gain side's holding period on the date asked about
     loss_long_term: bool | None  # a gift's loss side's (None without a loss basis)
-    unknown_basis: bool
     value: Decimal | None  # at the price given, if any
     unrealized: Decimal | None  # gain over the gain basis, loss under the loss basis, none between
 
@@ -500,22 +497,27 @@ class Holdings:
 
 
 def holdings(
-    result: Result, as_of: date, price: Decimal | None = None, *, blocking: Sequence[object]
+    events: Sequence[Event],
+    result: Result,
+    as_of: date,
+    price: Decimal | None = None,
+    *,
+    blocking: Sequence[object],
 ) -> Holdings | Blocked:
     """The lots `result` left, by account in the engine's order, with their holding periods on `as_of`
     and, given a USD price per BTC, their value and unrealized gain (a gift's by its dual basis), or why
-    they can't be shown (the engine's blocking conditions and the caller's). `result` must be a run of
-    the events up to `as_of` (`Result.through`)."""
+    they can't be shown (the engine's blocking conditions and the caller's). `result` is the engine's run
+    of exactly `events` up to `as_of` (`Result.events`)."""
     _check_blocking(blocking)
     if type(as_of) is not date:
         raise EngineError("holdings are as of a date")
-    if result.through is not None and result.through > as_of:
-        raise EngineError(f"the run has events after {as_of}: run the engine on the events up to it")
-    if result.blocking or blocking:
-        return Blocked((*result.blocking, *blocking))
+    if result.events != tuple(e for e in events if e.on <= as_of):
+        raise EngineError(f"result is the engine's run of these events up to {as_of}: it took others")
     btc = None if price is None else _usd(price, "the price")
     if btc is not None and btc == ZERO:
         raise EngineError("the price: a BTC price is at least a cent")
+    if result.blocking or blocking:
+        return Blocked((*result.blocking, *blocking))
     rows: list[Holding] = []
     for lot in result.holdings:
         value = None if btc is None else _value(lot.sats, btc)
@@ -533,7 +535,6 @@ def holdings(
                 lot.loss_from,
                 lot.always_long or long_term(lot.acquired, as_of),
                 loss_long,
-                lot.unknown_basis,
                 value,
                 None if value is None else _unrealized(value, lot.basis, lot.loss_basis),
             )
@@ -555,7 +556,7 @@ def _unrealized(value: Decimal, basis: Decimal, loss_basis: Decimal | None) -> D
 def _value(sats: int, price: Decimal) -> Decimal:
     try:
         return value_of(sats, price)
-    except ValueError as e:
+    except (TypeError, ValueError) as e:
         raise EngineError(f"{sats} sats at {price}: {e}") from None
 
 

@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from coinacct.domain.money import value_of
-from coinacct.tax.engine import Acquisition, Disposal, EngineError, Event, Pick, run
+from coinacct.tax.engine import Acquisition, Disposal, EngineError, Event, Pick, Transfer, run
 from coinacct.tax.reports import (
     Blocked,
     Holding,
@@ -33,8 +33,8 @@ def at(day: date) -> datetime:
     return datetime(day.year, day.month, day.day, 12, tzinfo=UTC)
 
 
-def sell(id: str, on: date, sats: int, proceeds: str) -> Disposal:
-    return Disposal(id, "x", on, at(on), "sell", sats, D(proceeds))
+def sell(id: str, on: date, sats: int, proceeds: str, **kw: Any) -> Disposal:
+    return Disposal(id, "x", on, at(on), "sell", sats, D(proceeds), **kw)
 
 
 INCOME: list[Event] = [
@@ -48,7 +48,7 @@ INCOME: list[Event] = [
 def income(
     events: list[Event], year: int = 2025, *, blocking: Any = (), sources: Any = None
 ) -> IncomeSummary | Blocked:
-    return income_summary(events, run(events), year, blocking=blocking, sources=sources)
+    return income_summary(run(events), year, blocking=blocking, sources=sources)
 
 
 def test_the_income_summary_lists_the_years_income_with_its_fmv_and_source() -> None:
@@ -93,17 +93,17 @@ def test_the_income_summary_checks_its_year() -> None:
         income([INCOME[0]], 2012)
 
 
-def test_income_without_its_fmv_raises() -> None:
-    events: list[Event] = [Acquisition("pay", "w", date(2025, 1, 1), "income", 1, D("1.00"))]
-    bad = [Acquisition("pay", "w", date(2025, 1, 1), "income", 1, None)]
-    with pytest.raises(EngineError, match="FMV at receipt"):
-        income_summary(bad, run(events), 2025, blocking=())
+def test_income_without_its_fmv_never_reaches_the_summary() -> None:
+    with pytest.raises(EngineError, match="only a gift's basis can be unknown"):
+        run([Acquisition("pay", "w", date(2025, 1, 1), "income", 1, None)])
 
 
-def test_the_income_summary_needs_the_run_of_its_events() -> None:
+def test_the_income_summary_is_the_runs_income_t509() -> None:
+    # the rows are the run's own events: no other list can pair with a run that lacks its blocks
     events = sorted(INCOME, key=lambda e: e.on)
-    with pytest.raises(EngineError, match="run of these events"):
-        income_summary(events, run(events[:-1]), 2025, blocking=())
+    summary = income_summary(run(events[:2]), 2025, blocking=())
+    assert isinstance(summary, IncomeSummary)
+    assert [r.event for r in summary.rows] == ["pay0"]
 
 
 def test_the_income_summary_shows_the_late_warnings_and_a_stopped_replay_t508() -> None:
@@ -145,14 +145,45 @@ def test_the_year_summary_totals_each_term() -> None:
 
 
 def test_the_year_summary_matches_form_8949s_totals() -> None:
-    result = run(YEAR)
+    # with gift lots sold in the no-gain band (basis = proceeds) and under the FMV (the FMV basis)
+    gifts: list[Event] = [
+        Acquisition("g1", "x", date(2024, 2, 1), "gift_in", 1_000, D("10.00"), D("6.00"), date(2020, 1, 1)),
+        Acquisition("g2", "x", date(2024, 2, 2), "gift_in", 1_000, D("10.00"), D("6.00"), date(2020, 1, 1)),
+    ]
+    events: list[Event] = [
+        YEAR[0],
+        *gifts,
+        sell(
+            "g1s",
+            date(2025, 1, 5),
+            1_000,
+            "8.00",
+            picks=(Pick("g1", 1_000),),
+            identified_at=at(date(2025, 1, 5)),
+        ),
+        sell(
+            "g2s",
+            date(2025, 1, 6),
+            1_000,
+            "5.00",
+            picks=(Pick("g2", 1_000),),
+            identified_at=at(date(2025, 1, 6)),
+        ),
+        *YEAR[1:],
+    ]
+    result = run(events)
     summary = year_summary(result, 2025, blocking=())
-    form = form_8949(result, {s: Sale("exchange", True) for s in ("s1", "s2", "s3")}, 2025, blocking=())
+    sales = {s: Sale("exchange", True) for s in ("g1s", "g2s", "s1", "s2", "s3")}
+    form = form_8949(result, sales, 2025, blocking=())
     assert isinstance(summary, YearSummary) and not isinstance(form, Blocked)
     for term, boxes in ((summary.short, "GHI"), (summary.long, "JKL")):
         totals = [t for t in form.totals if t.box in boxes]
         assert term.rows == sum(t.rows for t in totals)
-        assert term.gain == sum((t.gain for t in totals), D("0.00"))
+        for field in ("proceeds", "basis", "gain"):
+            assert getattr(term, field) == sum((getattr(t, field) for t in totals), D("0.00"))
+    # long: the old lot and g1 (between its bases, on the donor's side, tacked from 2020); g2's loss
+    # under the FMV is held from the gift date (2024-02-02), so short-term
+    assert (summary.long.rows, summary.short.rows) == (2, 3)
 
 
 def test_the_year_summary_is_blocked_while_anything_blocks() -> None:
@@ -175,7 +206,7 @@ def test_holdings_show_the_holding_period_on_the_date_and_the_unrealized_gain() 
         Acquisition("new", "x", date(2025, 2, 1), "buy", 25_000_000, D("25000.00")),
         Acquisition("inh", "w", date(2025, 3, 1), "inherit", 1_000, D("1.00")),
     ]
-    found = holdings(run(events), date(2025, 3, 1), D("100000.00"), blocking=())
+    found = holdings(events, run(events), date(2025, 3, 1), D("100000.00"), blocking=())
     assert isinstance(found, Holdings)
     assert found.rows == (
         Holding(
@@ -188,7 +219,6 @@ def test_holdings_show_the_holding_period_on_the_date_and_the_unrealized_gain() 
             None,
             True,
             None,
-            False,
             D("1.00"),
             D("0.00"),
         ),
@@ -203,7 +233,6 @@ def test_holdings_show_the_holding_period_on_the_date_and_the_unrealized_gain() 
             None,
             False,
             None,
-            False,
             D("150000.00"),
             D("90000.00"),
         ),
@@ -217,7 +246,6 @@ def test_holdings_show_the_holding_period_on_the_date_and_the_unrealized_gain() 
             None,
             False,
             None,
-            False,
             D("25000.00"),
             D("0.00"),
         ),
@@ -234,11 +262,11 @@ def test_holdings_show_the_holding_period_on_the_date_and_the_unrealized_gain() 
     ],
 )
 def test_a_gifts_holding_follows_its_dual_basis_t510(price: str, unrealized: str, long_term: bool) -> None:
-    # 1,000 sats... scaled: 0.001 BTC; donor basis $10 from 2020, FMV $6 at the gift on 2025-01-10
+    # 100,000 sats (0.001 BTC); donor basis $10 from 2020, FMV $6 at the gift on 2025-01-10
     gift = Acquisition(
         "g", "w", date(2025, 1, 10), "gift_in", 100_000, D("10.00"), D("6.00"), date(2020, 1, 1)
     )
-    found = holdings(run([gift]), date(2025, 6, 1), D(price), blocking=())
+    found = holdings([gift], run([gift]), date(2025, 6, 1), D(price), blocking=())
     assert isinstance(found, Holdings)
     (row,) = found.rows
     assert (row.loss_basis, row.loss_from) == (D("6.00"), date(2025, 1, 10))
@@ -249,9 +277,8 @@ def test_a_gifts_holding_follows_its_dual_basis_t510(price: str, unrealized: str
 
 
 def test_holdings_without_a_price_have_no_value() -> None:
-    found = holdings(
-        run([Acquisition("b", "x", date(2025, 1, 1), "buy", 1, D("1.00"))]), date(2025, 1, 2), blocking=()
-    )
+    bought: list[Event] = [Acquisition("b", "x", date(2025, 1, 1), "buy", 1, D("1.00"))]
+    found = holdings(bought, run(bought), date(2025, 1, 2), blocking=())
     assert isinstance(found, Holdings)
     (row,) = found.rows
     assert (row.value, row.unrealized) == (None, None)
@@ -260,9 +287,11 @@ def test_holdings_without_a_price_have_no_value() -> None:
 def test_holdings_are_blocked_while_anything_blocks_t509() -> None:
     gift = Acquisition("g", "w", date(2025, 1, 2), "gift_in", 1, None, D("1.00"), date(2024, 1, 1))
     result = run([gift])
-    assert holdings(result, date(2025, 2, 1), blocking=()) == Blocked(result.blocking)
-    ok = run([Acquisition("b", "x", date(2025, 1, 1), "buy", 1, D("1.00"))])
-    assert holdings(ok, date(2025, 2, 1), blocking=["unconfirmed tx"]) == Blocked(("unconfirmed tx",))
+    assert holdings([gift], result, date(2025, 2, 1), blocking=()) == Blocked(result.blocking)
+    bought: list[Event] = [Acquisition("b", "x", date(2025, 1, 1), "buy", 1, D("1.00"))]
+    assert holdings(bought, run(bought), date(2025, 2, 1), blocking=["unconfirmed tx"]) == Blocked(
+        ("unconfirmed tx",)
+    )
 
 
 def test_holdings_need_a_run_up_to_the_date() -> None:
@@ -271,22 +300,24 @@ def test_holdings_need_a_run_up_to_the_date() -> None:
         Acquisition("b", "x", date(2025, 1, 1), "buy", 10, D("1.00")),
         sell("s", date(2025, 3, 1), 5, "1.00"),
     ]
-    with pytest.raises(EngineError, match="events after"):
-        holdings(run(events), date(2025, 2, 1), blocking=())
+    with pytest.raises(EngineError, match="it took others"):
+        holdings(events, run(events), date(2025, 2, 1), blocking=())
     with pytest.raises(EngineError, match="as of a date"):
-        holdings(run(events), datetime(2025, 3, 2, tzinfo=UTC), blocking=())  # a datetime is no tax date
+        holdings(
+            events, run(events), datetime(2025, 3, 2, tzinfo=UTC), blocking=()
+        )  # a datetime is no tax date
 
 
 @pytest.mark.parametrize("price", ["-1.00", "0.00", "0.001"])
 def test_a_bad_price_raises(price: str) -> None:
     with pytest.raises(EngineError, match="the price"):
-        holdings(run([]), date(2025, 1, 1), D(price), blocking=())
+        holdings([], run([]), date(2025, 1, 1), D(price), blocking=())
 
 
 def test_a_value_too_large_raises() -> None:
-    big = run([Acquisition("b", "x", date(2025, 1, 1), "buy", 2_000_000_000_000_000, D("1.00"))])
+    big: list[Event] = [Acquisition("b", "x", date(2025, 1, 1), "buy", 2_000_000_000_000_000, D("1.00"))]
     with pytest.raises(EngineError, match="sats at"):
-        holdings(big, date(2025, 1, 2), D("999999999999999.99"), blocking=())
+        holdings(big, run(big), date(2025, 1, 2), D("999999999999999.99"), blocking=())
 
 
 def test_an_inherited_gifts_loss_side_runs_from_the_gift_date_t510() -> None:
@@ -295,7 +326,7 @@ def test_an_inherited_gifts_loss_side_runs_from_the_gift_date_t510() -> None:
     gift = Acquisition(
         "g", "w", date(2025, 1, 10), "gift_in", 100_000, D("10.00"), D("6.00"), date(2024, 12, 1), True
     )
-    found = holdings(run([gift]), date(2025, 6, 1), D("5000.00"), blocking=())
+    found = holdings([gift], run([gift]), date(2025, 6, 1), D("5000.00"), blocking=())
     assert isinstance(found, Holdings)
     (row,) = found.rows
     assert (row.long_term, row.loss_long_term, row.unrealized) == (True, False, D("-1.00"))
@@ -312,7 +343,7 @@ def test_a_gifts_unrealized_edges_match_a_sale_t510(price: str, unrealized: str)
     gift = Acquisition(
         "g", "w", date(2025, 1, 10), "gift_in", 100_000, D("10.00"), D("6.00"), date(2020, 1, 1)
     )
-    found = holdings(run([gift]), date(2025, 6, 1), D(price), blocking=())
+    found = holdings([gift], run([gift]), date(2025, 6, 1), D(price), blocking=())
     assert isinstance(found, Holdings)
     (row,) = found.rows
     assert row.unrealized == D(unrealized)
@@ -354,3 +385,94 @@ def test_the_year_summary_lists_the_late_choices_its_totals_rest_on_t508() -> No
     summary = year_summary(run([*YEAR[:2], late]), 2025, blocking=())
     assert isinstance(summary, YearSummary)
     assert [w.disposal for w in summary.late] == ["s"]
+
+
+# test_reports' diverged history: the real run creates a lot in x for wd2's unrecorded sats, the replay
+# can't, and stops at wd2; the late sale s2 is then judged on the user's lots (ADR 0040)
+LATE = datetime(2025, 3, 10, 18, tzinfo=UTC)
+STOPPED: list[Event] = [
+    Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("1.00")),
+    Transfer(
+        "wd0",
+        "e",
+        "w",
+        date(2025, 2, 1),
+        at(date(2025, 2, 1)),
+        "withdrawal",
+        10,
+        missing_basis=D("2.00"),
+        missing_acquired=date(2024, 6, 1),
+    ),
+    Transfer(
+        "t1",
+        "w",
+        "x",
+        date(2025, 3, 1),
+        at(date(2025, 3, 1)),
+        "deposit",
+        10,
+        picks=(Pick("wd0@@unrecorded@wd0", 10),),
+        identified_at=LATE,
+    ),
+    sell("s1", date(2025, 3, 2), 10, "50.00"),
+    Transfer(
+        "wd2",
+        "x",
+        "y",
+        date(2025, 3, 3),
+        at(date(2025, 3, 3)),
+        "withdrawal",
+        10,
+        missing_basis=D("3.00"),
+        missing_acquired=date(2024, 7, 1),
+    ),
+    Acquisition("b9", "w", date(2025, 3, 4), "buy", 10, D("9.00")),
+    Disposal(
+        "s2",
+        "w",
+        date(2025, 3, 4),
+        at(date(2025, 3, 4)),
+        "sell",
+        10,
+        D("5.00"),
+        picks=(Pick("b9", 10),),
+        identified_at=LATE,
+    ),
+]
+
+
+def test_every_report_shows_a_stopped_replay_and_the_late_warnings_adr0040() -> None:
+    result = run(STOPPED)
+    assert result.replay_stopped == "wd2"
+    late = {w.disposal for w in result.late}
+    assert late == {"t1", "s2"}
+    summary = year_summary(result, 2025, blocking=())
+    found = holdings(STOPPED, result, date(2025, 3, 4), blocking=())
+    income = income_summary(result, 2025, blocking=())
+    for report in (summary, found, income):
+        assert not isinstance(report, Blocked)
+        assert report.replay_stopped == "wd2"
+        assert {w.disposal for w in report.late} == late
+
+
+def test_holdings_need_the_run_of_every_event_up_to_the_date() -> None:
+    # a run that stops before a sale made by the date overstates the holdings: refused
+    events: list[Event] = [
+        Acquisition("b", "x", date(2025, 1, 1), "buy", 10, D("1.00")),
+        sell("s", date(2025, 1, 2), 5, "1.00"),
+    ]
+    with pytest.raises(EngineError, match="it took others"):
+        holdings(events, run(events[:1]), date(2025, 6, 1), blocking=())
+
+
+def test_holdings_refuse_another_run_with_the_same_count_and_date_t509() -> None:
+    # the events hold a gift of unknown basis (blocking); a run of a different list of the same length
+    # ending the same day has no block: it is refused, not reported from
+    events: list[Event] = [
+        Acquisition("b", "x", date(2025, 1, 1), "buy", 10, D("1.00")),
+        Acquisition("g", "x", date(2025, 1, 2), "gift_in", 5, None, D("1.00"), date(2024, 1, 1)),
+    ]
+    other: list[Event] = [events[0], Acquisition("c", "x", date(2025, 1, 2), "buy", 5, D("1.00"))]
+    with pytest.raises(EngineError, match="it took others"):
+        holdings(events, run(other), date(2025, 6, 1), blocking=())
+    assert isinstance(holdings(events, run(events), date(2025, 6, 1), blocking=()), Blocked)
