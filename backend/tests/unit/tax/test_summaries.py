@@ -100,6 +100,31 @@ def test_income_without_its_fmv_raises() -> None:
         income_summary(bad, run(events), 2025, blocking=())
 
 
+def test_the_income_summary_needs_the_run_of_its_events() -> None:
+    events = sorted(INCOME, key=lambda e: e.on)
+    with pytest.raises(EngineError, match="run of these events"):
+        income_summary(events, run(events[:-1]), 2025, blocking=())
+
+
+def test_the_income_summary_shows_the_late_warnings_and_a_stopped_replay_t508() -> None:
+    late = Disposal(
+        "s",
+        "x",
+        date(2025, 6, 1),
+        at(date(2025, 6, 1)),
+        "sell",
+        500,
+        D("30.00"),
+        picks=(Pick("new", 500),),
+        identified_at=datetime(2025, 6, 2, tzinfo=UTC),
+    )
+    events: list[Event] = [*YEAR[:2], late]
+    summary = income(events)
+    assert isinstance(summary, IncomeSummary)
+    assert [w.disposal for w in summary.late] == ["s"]
+    assert summary.replay_stopped is None
+
+
 YEAR: list[Event] = [
     Acquisition("old", "x", date(2023, 1, 10), "buy", 1_000, D("10.00")),
     Acquisition("new", "x", date(2025, 2, 1), "buy", 1_000, D("40.00")),
@@ -252,9 +277,49 @@ def test_holdings_need_a_run_up_to_the_date() -> None:
         holdings(run(events), datetime(2025, 3, 2, tzinfo=UTC), blocking=())  # a datetime is no tax date
 
 
-def test_a_bad_price_raises() -> None:
+@pytest.mark.parametrize("price", ["-1.00", "0.00", "0.001"])
+def test_a_bad_price_raises(price: str) -> None:
     with pytest.raises(EngineError, match="the price"):
-        holdings(run([]), date(2025, 1, 1), D("-1.00"), blocking=())
+        holdings(run([]), date(2025, 1, 1), D(price), blocking=())
+
+
+def test_a_value_too_large_raises() -> None:
+    big = run([Acquisition("b", "x", date(2025, 1, 1), "buy", 2_000_000_000_000_000, D("1.00"))])
+    with pytest.raises(EngineError, match="sats at"):
+        holdings(big, date(2025, 1, 2), D("999999999999999.99"), blocking=())
+
+
+def test_an_inherited_gifts_loss_side_runs_from_the_gift_date_t510() -> None:
+    # a donor's inherited lot (always long-term on the donor's basis) given at an FMV below that basis:
+    # under the FMV, the loss is short-term until a year after the gift, as a sale would figure it
+    gift = Acquisition(
+        "g", "w", date(2025, 1, 10), "gift_in", 100_000, D("10.00"), D("6.00"), date(2024, 12, 1), True
+    )
+    found = holdings(run([gift]), date(2025, 6, 1), D("5000.00"), blocking=())
+    assert isinstance(found, Holdings)
+    (row,) = found.rows
+    assert (row.long_term, row.loss_long_term, row.unrealized) == (True, False, D("-1.00"))
+    sale = Disposal("s", "w", date(2025, 6, 1), at(date(2025, 6, 1)), "sell", 100_000, D("5.00"))
+    (sold,) = run([gift, sale]).allocations
+    assert (sold.long_term, sold.gain) == (row.loss_long_term, row.unrealized)
+
+
+@pytest.mark.parametrize(
+    ("price", "unrealized"),
+    [("10000.00", "0.00"), ("6000.00", "0.00"), ("5990.00", "-0.01")],
+)
+def test_a_gifts_unrealized_edges_match_a_sale_t510(price: str, unrealized: str) -> None:
+    gift = Acquisition(
+        "g", "w", date(2025, 1, 10), "gift_in", 100_000, D("10.00"), D("6.00"), date(2020, 1, 1)
+    )
+    found = holdings(run([gift]), date(2025, 6, 1), D(price), blocking=())
+    assert isinstance(found, Holdings)
+    (row,) = found.rows
+    assert row.unrealized == D(unrealized)
+    value = value_of(100_000, D(price))
+    sale = Disposal("s", "w", date(2025, 6, 1), at(date(2025, 6, 1)), "sell", 100_000, value)
+    (sold,) = run([gift, sale]).allocations
+    assert sold.gain == row.unrealized
 
 
 @pytest.mark.parametrize(

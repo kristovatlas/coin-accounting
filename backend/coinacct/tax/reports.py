@@ -391,6 +391,8 @@ class IncomeSummary:
     tax_year: int
     rows: tuple[IncomeRow, ...]
     total: Decimal
+    replay_stopped: str | None = None
+    late: tuple[LateIdentification, ...] = ()  # every late warning: the report shows them all
     ruleset: str = RULESET
     positions: tuple[str, ...] = POSITIONS
 
@@ -408,6 +410,9 @@ def income_summary(
     caller's do (`blocking`, as for `form_8949`). `sources` names who paid each income event."""
     rules_for(tax_year)
     _check_blocking(blocking)
+    last = max((e.on for e in events), default=None)
+    if result.through != last:
+        raise EngineError("result is the engine's run of these events: its last date differs")
     named = {} if sources is None else sources
     income = {e.id for e in events if isinstance(e, Acquisition) and e.kind == "income"}
     if not isinstance(named, Mapping) or not all(
@@ -426,7 +431,9 @@ def income_summary(
             raise EngineError(f"income {e.id!r}: its FMV at receipt is needed")
         rows.append(IncomeRow(e.id, e.on, e.sats, _usd(e.basis, e.id), named.get(e.id)))
     rows.sort(key=lambda r: (r.received, r.event))
-    return IncomeSummary(tax_year, tuple(rows), _sum(r.fmv for r in rows))
+    return IncomeSummary(
+        tax_year, tuple(rows), _sum(r.fmv for r in rows), result.replay_stopped, tuple(result.late)
+    )
 
 
 @dataclass(frozen=True)
@@ -507,10 +514,14 @@ def holdings(
     if result.blocking or blocking:
         return Blocked((*result.blocking, *blocking))
     btc = None if price is None else _usd(price, "the price")
+    if btc is not None and btc == ZERO:
+        raise EngineError("the price: a BTC price is at least a cent")
     rows: list[Holding] = []
     for lot in result.holdings:
-        value = None if btc is None else value_of(lot.sats, btc)
-        loss_long = None if lot.loss_from is None else lot.always_long or long_term(lot.loss_from, as_of)
+        value = None if btc is None else _value(lot.sats, btc)
+        # the FMV side runs from the gift date alone: a donor's long-term status (an inheritance) carries
+        # over only with the donor's basis (Treas. Reg. §1.1223-1(b)), as the engine figures a sale
+        loss_long = None if lot.loss_from is None else long_term(lot.loss_from, as_of)
         rows.append(
             Holding(
                 lot.id,
@@ -539,6 +550,13 @@ def _unrealized(value: Decimal, basis: Decimal, loss_basis: Decimal | None) -> D
     if value < loss_basis:
         return subtract(value, loss_basis)
     return ZERO
+
+
+def _value(sats: int, price: Decimal) -> Decimal:
+    try:
+        return value_of(sats, price)
+    except ValueError as e:
+        raise EngineError(f"{sats} sats at {price}: {e}") from None
 
 
 def _check_blocking(blocking: object) -> None:
