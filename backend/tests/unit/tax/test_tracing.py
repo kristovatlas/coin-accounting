@@ -10,7 +10,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from coinacct.tax.engine import EngineError, FeeTreatment
+from coinacct.tax.engine import EngineError
 from coinacct.tax.tracing import (
     Blocked,
     FeeCarry,
@@ -52,8 +52,8 @@ def lots(parts: tuple[Fragment, ...]) -> list[tuple[str, int]]:
     return [(f.lot, f.sats) for f in parts]
 
 
-def traced(t: WalletTx, fee_treatment: FeeTreatment = "carry") -> Traced:
-    result = trace(t, fee_treatment)
+def traced(t: WalletTx) -> Traced:
+    result = trace(t)
     assert isinstance(result, Traced), result
     return result
 
@@ -123,8 +123,6 @@ def test_identical_destinations_block_when_one_would_take_the_fee_basis() -> Non
     assert blocked == Blocked(
         "t1", "identical_outputs", "outputs 0, 1 would get different basis from the fee"
     )
-    # With the fee disposed of, nothing is carried, so the identical outputs are fine.
-    assert isinstance(trace(tx([c], outs, Leaving("d", "deposit", 2_000)), "dispose"), Traced)
 
 
 def test_identical_outputs_across_roles_count_as_identical() -> None:
@@ -137,17 +135,50 @@ def test_identical_outputs_across_roles_count_as_identical() -> None:
     assert blocked == Blocked("t1", "identical_outputs", "outputs 0, 1 would get different lots")
 
 
-def test_the_dispose_setting_carries_nothing() -> None:
+def test_a_sales_fee_carries_nothing_adr0043() -> None:
+    # A sale's fee lots are part of the disposal (ADR 0043): the engine adds their basis to the sale's
+    # row, so nothing is carried onto an output
     result = traced(
         tx(
             [ADR_COIN],
-            [Output(0, 99_990_000, DEST, account="w2", kind="self_custody", event="x")],
-            Leaving("x", "transfer", 99_990_000),
-        ),
-        "dispose",
+            [Output(0, 99_990_000, PAY, event="s")],
+            Leaving("s", "sell", 99_990_000),
+        )
     )
     assert lots(result.fee) == [("L2", 10_000)]
     assert result.carries == ()
+
+
+def test_a_fee_carries_to_the_first_destination_holding_its_lot() -> None:
+    # One lot spans both deposit outputs and the fee: its basis goes to the larger output's fragment
+    c = coin(frag("L1", 3_000))
+    result = traced(
+        tx(
+            [c],
+            [
+                Output(0, 1_000, DEST, account="x", kind="custodial", event="d"),
+                Output(1, 1_500, CHANGE, account="x", kind="custodial", event="d"),
+            ],
+            Leaving("d", "deposit", 2_500),
+        )
+    )
+    assert [(k.lot, k.sats, k.vout, k.onto) for k in result.carries] == [("L1", 500, 1, "L1")]
+
+
+def test_a_fallback_carry_goes_to_the_first_destinations_oldest_fragment() -> None:
+    # The fee's lot L3 is on no destination: its basis goes to the larger destination's oldest fragment
+    c = coin(frag("L1", 1_000), frag("L2", 1_500, 1), frag("L3", 100, 2))
+    result = traced(
+        tx(
+            [c],
+            [
+                Output(0, 1_000, DEST, account="x", kind="custodial", event="d"),
+                Output(1, 1_500, CHANGE, account="x", kind="custodial", event="d"),
+            ],
+            Leaving("d", "deposit", 2_500),
+        )
+    )
+    assert [(k.lot, k.vout, k.onto) for k in result.carries] == [("L3", 1, "L1")]
 
 
 def test_fee_spanning_two_lots_carries_each() -> None:
@@ -473,12 +504,10 @@ def test_a_transaction_that_isnt_a_wallet_tx_raises() -> None:
         trace(WalletTx("t1", "", (coin(frag("L1", 1)),), ()))
 
 
-def test_an_unknown_fee_treatment_raises() -> None:
+def test_a_custodial_change_output_raises() -> None:
+    # change is the wallet's own output, so it is self-custody; anything else is the caller's error
     with pytest.raises(EngineError):
-        trace(
-            tx([coin(frag("L1", 10_000))], [Output(0, 9_000, CHANGE, account="w", kind="self_custody")]),
-            bad("keep"),
-        )
+        trace(tx([coin(frag("L1", 10_000))], [Output(0, 9_000, CHANGE, account="w", kind="custodial")]))
 
 
 KINDS: list[LeavingKind] = ["sell", "spend", "gift_out", "deposit", "transfer"]
@@ -530,11 +559,9 @@ def _shuffled(t: WalletTx, rnd: Any) -> WalletTx:
 
 
 @settings(max_examples=300)
-@given(wallet_txs(), st.randoms(), st.sampled_from(["carry", "dispose"]))
-def test_the_order_of_outputs_inputs_and_lots_never_changes_the_result(
-    t: WalletTx, rnd: Any, fee_treatment: FeeTreatment
-) -> None:
-    assert trace(t, fee_treatment) == trace(_shuffled(t, rnd), fee_treatment)
+@given(wallet_txs(), st.randoms())
+def test_the_order_of_outputs_inputs_and_lots_never_changes_the_result(t: WalletTx, rnd: Any) -> None:
+    assert trace(t) == trace(_shuffled(t, rnd))
 
 
 @settings(max_examples=300)
@@ -550,9 +577,9 @@ def test_a_foreign_input_blocks_whatever_the_order(t: WalletTx, rnd: Any, owner:
 
 
 @settings(max_examples=300)
-@given(wallet_txs(), st.sampled_from(["carry", "dispose"]))
-def test_every_output_holds_its_value_and_nothing_is_lost(t: WalletTx, fee_treatment: FeeTreatment) -> None:
-    result = trace(t, fee_treatment)
+@given(wallet_txs())
+def test_every_output_holds_its_value_and_nothing_is_lost(t: WalletTx) -> None:
+    result = trace(t)
     paid = [o for o in t.outputs if o.value > 0]
     if isinstance(result, Blocked):
         assert result.reason in {"identical_outputs", "fee_only"}
@@ -584,12 +611,17 @@ def test_every_output_holds_its_value_and_nothing_is_lost(t: WalletTx, fee_treat
     for f in result.fee:
         out[f.lot] = out.get(f.lot, 0) + f.sats
     assert out == spent
-    carried = (t.leaving is None or t.leaving.kind in ("deposit", "transfer")) and fee_treatment == "carry"
+    carried = t.leaving is None or t.leaving.kind in ("deposit", "transfer")
     assert bool(result.carries) == (bool(result.fee) and carried)
     if result.carries:
         assert [(c.lot, c.sats) for c in result.carries] == lots(result.fee)
+        destination = [o.vout for o in (order if order else order_change)]
         for c in result.carries:
-            assert any(f.lot == c.onto for f in held[c.vout])
+            holding = [v for v in destination if any(f.lot == c.lot for f in held[v])]
+            # the first destination holding the fee's lot takes it, else the first's oldest fragment
+            assert (c.vout, c.onto) == (
+                (holding[0], c.lot) if holding else (destination[0], held[destination[0]][0].lot)
+            )
 
 
 def _entered(t: WalletTx, lot: str) -> tuple[datetime, str]:

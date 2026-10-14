@@ -1,5 +1,5 @@
 """Coin tracing in a self-custody wallet: which lots each output of one wallet transaction gets (ADR 0041
-§2 and §3, proposed; PLAN §7; T-507, T-508, T-509).
+§2 and §3, ADR 0043; PLAN §7; T-507, T-508, T-509).
 
 Pure, and in sats only: basis, dates and the fee's tax treatment stay with the engine, which applies what
 this module decides. One call traces one transaction that spends coins of one coin-traced wallet account:
@@ -10,12 +10,13 @@ this module decides. One call traces one transaction that spends coins of one co
   inputs minus the sum of all outputs; the change never bears any of it.
 - **The canonical order** fills outputs of the same role one after another, largest first, then by the
   output script's bytes (§2.3). An output's position in the transaction never changes the result.
-- **A transfer fee's basis** (a deposit, a transfer to another of the user's wallets, or a consolidation
-  with no leaving event), when the fee is carried (`fee_treatment="carry"`, the default), passes, per lot
-  the fee consumes, to that lot's fragment on the first destination output in the canonical order that
-  holds it, else to the first destination output's oldest fragment (§2.4). The destination is the leaving
-  outputs, or the change in a consolidation. With `"dispose"`, or for a sale, spend or gift given, the
-  fee's lots are part of the disposal or a small disposal: the engine's call, and nothing is carried.
+- **A network fee is never a taxable event** (ADR 0043). A transfer fee's basis (a deposit, a transfer
+  to another of the user's wallets, or a consolidation with no leaving event) passes, per lot the fee
+  consumes, to that lot's fragment on the first destination output in the canonical order that holds it,
+  else to the first destination output's oldest fragment (§2.4). The destination is the leaving outputs,
+  or the change in a consolidation. For a sale or spend the fee's lots are part of the disposal (their
+  basis joins its row for the same lot, else its oldest: the engine's figures); for a gift given their
+  basis isn't recovered. Nothing is carried for either.
 - **Zero-value outputs** (an OP_RETURN, say) carry no sats and get no lots.
 - **Who owns what:** a change output belongs to the wallet's account; a deposit's outputs to one of the
   user's custodial (exchange) accounts, a transfer's to another of the user's self-custody wallets; a
@@ -24,8 +25,8 @@ this module decides. One call traces one transaction that spends coins of one co
 - **The caller resolves links and the pool first** (ADR 0041 §1, §4): each of the wallet's inputs must
   carry exactly its value in lots. Uncovered sats are a block or a pool draw there, never an input here.
 - **Not decided here:** whether the receiving wallet is coin-traced or on whole-wallet FIFO (§3's mixed
-  transfers), and whether a fee lot that is a gift's or of unknown basis may carry onto another lot. Both
-  need the lots' and accounts' details, so the engine blocks them.
+  transfers), and the basis a fee lot carries when it is a gift's (ADR 0043: the lower of its two bases)
+  or of unknown basis. These need the lots' and accounts' details: the engine's.
 
 **What blocks** (`Blocked`, until a later ADR adds a rule; §2, §3): an input the user doesn't own
 (PayJoin, CoinJoin), an input from another of the user's accounts, more than one leaving event, an
@@ -40,13 +41,14 @@ output, a wrong type) is the caller's error and raises `EngineError`.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final, Literal
 
 from coinacct.domain.chain import MAX_SATS
-from coinacct.tax.engine import EngineError, FeeTreatment
+from coinacct.tax.engine import EngineError
 
 type LeavingKind = Literal["sell", "spend", "gift_out", "deposit", "transfer"]
 type BlockReason = Literal[
@@ -142,9 +144,9 @@ class Blocked:
     detail: str
 
 
-def trace(tx: WalletTx, fee_treatment: FeeTreatment = "carry") -> Traced | Blocked:
+def trace(tx: WalletTx) -> Traced | Blocked:
     """Trace one wallet transaction (ADR 0041 §2), or say why it blocks (§3)."""
-    _check(tx, fee_treatment)
+    _check(tx)
     blocked = _unsupported(tx)
     if blocked is not None:
         return blocked
@@ -163,7 +165,7 @@ def trace(tx: WalletTx, fee_treatment: FeeTreatment = "carry") -> Traced | Block
         return Blocked(tx.txid, "identical_outputs", f"outputs {_list(same)} would get different lots")
     carries: tuple[FeeCarry, ...] = ()
     carried = tx.leaving is None or tx.leaving.kind in CARRIED
-    if fee_parts and carried and fee_treatment == "carry":
+    if fee_parts and carried:
         destination = filled[: len(leaving)] if leaving else filled
         carries = tuple(_carry(f, destination) for f in fee_parts)
         twins = _twins(filled, {c.vout for c in carries})
@@ -251,7 +253,7 @@ class _Stream:
     """The spent lots, oldest first; each `take` cuts the next sats off the front."""
 
     def __init__(self, fragments: list[Fragment]) -> None:
-        self._rest = fragments
+        self._rest = deque(fragments)
 
     def take(self, sats: int) -> tuple[Fragment, ...]:
         parts: list[Fragment] = []
@@ -261,7 +263,7 @@ class _Stream:
             parts.append(Fragment(head.lot, used, head.entered, head.event))
             sats -= used
             if used == head.sats:
-                self._rest.pop(0)
+                self._rest.popleft()
             else:
                 self._rest[0] = Fragment(head.lot, head.sats - used, head.entered, head.event)
         return tuple(parts)
@@ -301,11 +303,9 @@ def _carry(fee: Fragment, destination: _Filled) -> FeeCarry:
     return FeeCarry(fee.lot, fee.sats, first.vout, parts[0].lot)
 
 
-def _check(tx: object, fee_treatment: object) -> None:
+def _check(tx: object) -> None:
     if not isinstance(tx, WalletTx) or not _name(tx.txid) or not _name(tx.account):
         raise EngineError("trace needs a WalletTx with a txid and an account")
-    if not isinstance(fee_treatment, str) or fee_treatment not in ("carry", "dispose"):
-        raise EngineError(f"tx {tx.txid}: unknown fee treatment")
     if not isinstance(tx.inputs, tuple) or not isinstance(tx.outputs, tuple) or not tx.inputs:
         raise EngineError(f"tx {tx.txid}: the inputs and outputs must be tuples, with at least one input")
     for i in tx.inputs:
@@ -344,6 +344,8 @@ def _check_outputs(tx: WalletTx) -> None:
             )
         if o.kind not in (None, "self_custody", "custodial") or (o.kind is None) != (o.account is None):
             raise EngineError(f"tx {tx.txid}: an output of the user's has its account's kind, and only then")
+        if o.account == tx.account and o.kind != "self_custody":
+            raise EngineError(f"tx {tx.txid}: a change output is the wallet's own, so self-custody")
         if o.value == 0 and type(o.value) is int and o.event is not None:
             raise EngineError(f"tx {tx.txid}: a zero-value output pays no event")
         if isinstance(o.vout, bool) or not isinstance(o.vout, int) or o.vout < 0:
