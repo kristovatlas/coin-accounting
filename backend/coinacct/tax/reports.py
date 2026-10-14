@@ -14,6 +14,14 @@ disposal was made (`Sale`); `Sale.default` gives ADR 0011's defaults:
   2026-01-01, with the broker reporting basis), which the caller marks; through 2024, C/F unless a
   1099-B reported it
 
+**Income** (`income_summary`): each `income` acquisition in the tax year, with its USD FMV at receipt
+(its basis, which is also ordinary income) and the source the caller names (PLAN §8).
+
+**Year summary** (`year_summary`): the tax year's realized short- and long-term proceeds, basis and
+gain, from the same allocations as Form 8949. **Holdings** (`holdings`): the lots an engine run up to a
+date left, each with its basis, its holding period on that date and, given a price, its value and
+unrealized gain (against its gain basis; a gift's loss basis is shown apart).
+
 **Blocked:** a report isn't built while the engine reports a blocking condition (unknown basis,
 missing lots, an untraced transaction: ADR 0009, ADR 0041 §3): `Blocked` lists them. A late lot
 identification only warns (T-508): its rows are flagged, and a stopped late-choice replay is shown
@@ -22,20 +30,21 @@ identification only warns (T-508): its rows are flagged, and a stopped late-choi
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Final, Literal
 
-from coinacct.domain.money import add, subtract
-from coinacct.tax.engine import Allocation, EngineError, Result
+from coinacct.domain.money import add, share, subtract, usd
+from coinacct.tax.engine import Acquisition, Allocation, EngineError, Event, Result, long_term
 from coinacct.tax.rules import BOXES, RULESET, Box, box, y2024
 
 type Channel = Literal["exchange", "onchain"]
 
 SHORT_BOXES: Final[frozenset[str]] = frozenset("ABCGHI")
 SAT: Final = Decimal("0.00000001")
+SATS_PER_BTC: Final = 100_000_000
 ZERO: Final = Decimal("0.00")
 # The stated tax positions every report prints (PLAN §8), by the ADR that records each
 POSITIONS: Final[tuple[str, ...]] = (
@@ -180,3 +189,118 @@ def _totals(rows: list[Row]) -> tuple[Total, ...]:
             r.box, t.rows + 1, add(t.proceeds, r.proceeds), add(t.basis, r.basis), add(t.gain, r.gain)
         )
     return tuple(out[b] for b in sorted(out))
+
+
+@dataclass(frozen=True)
+class IncomeRow:
+    event: str
+    received: date
+    sats: int
+    fmv: Decimal  # USD at receipt: ordinary income, and the lot's basis
+    source: str | None  # who paid it (an employer, a pool), as the caller names it
+
+
+@dataclass(frozen=True)
+class IncomeSummary:
+    tax_year: int
+    rows: tuple[IncomeRow, ...]
+    total: Decimal
+
+
+def income_summary(
+    events: Sequence[Event], tax_year: int, sources: Mapping[str, str] | None = None
+) -> IncomeSummary:
+    """The tax year's `income` acquisitions, by date, with their FMV and total (PLAN §8)."""
+    named = sources or {}
+    rows: list[IncomeRow] = []
+    for e in events:
+        if not isinstance(e, Acquisition) or e.kind != "income" or e.on.year != tax_year:
+            continue
+        if e.basis is None:
+            raise EngineError(f"income {e.id!r}: its FMV at receipt is needed")
+        rows.append(IncomeRow(e.id, e.on, e.sats, usd(e.basis), named.get(e.id)))
+    rows.sort(key=lambda r: (r.received, r.event))
+    total = ZERO
+    for r in rows:
+        total = add(total, r.fmv)
+    return IncomeSummary(tax_year, tuple(rows), total)
+
+
+@dataclass(frozen=True)
+class Term:
+    rows: int
+    proceeds: Decimal
+    basis: Decimal
+    gain: Decimal
+
+
+@dataclass(frozen=True)
+class YearSummary:
+    tax_year: int
+    short: Term
+    long: Term
+    replay_stopped: str | None
+    ruleset: str = RULESET
+    positions: tuple[str, ...] = POSITIONS
+
+
+def year_summary(result: Result, tax_year: int) -> YearSummary | Blocked:
+    """The tax year's realized short- and long-term totals, from its sales' and spends' allocations."""
+    if result.blocking:
+        return Blocked(tuple(result.blocking))
+    terms = {False: Term(0, ZERO, ZERO, ZERO), True: Term(0, ZERO, ZERO, ZERO)}
+    for a in result.allocations:
+        if a.disposed.year == tax_year:
+            t = terms[a.long_term]
+            gain = subtract(a.proceeds, a.basis)
+            terms[a.long_term] = Term(
+                t.rows + 1, add(t.proceeds, a.proceeds), add(t.basis, a.basis), add(t.gain, gain)
+            )
+    return YearSummary(tax_year, terms[False], terms[True], result.replay_stopped)
+
+
+@dataclass(frozen=True)
+class Holding:
+    lot: str
+    account: str
+    acquired: date
+    sats: int
+    basis: Decimal  # the gain basis (a gift's donor basis)
+    loss_basis: Decimal | None  # a gift's FMV at the gift, where lower
+    long_term: bool  # on the date asked about
+    unknown_basis: bool
+    value: Decimal | None  # at the price given, if any
+    unrealized: Decimal | None  # value less basis
+
+
+def holdings(result: Result, as_of: date, price: Decimal | None = None) -> tuple[Holding, ...]:
+    """The lots `result` left (an engine run on the events up to `as_of`), by account then lot, with
+    their holding period on `as_of` and, given a USD price per BTC, their value and unrealized gain."""
+    btc = None if price is None else usd(price)
+    out: list[Holding] = []
+    for lot in result.holdings:
+        if lot.acquired > as_of:
+            raise EngineError(f"lot {lot.id!r} was acquired after {as_of}: run the engine up to that date")
+        value = None if btc is None else value_of(lot.sats, btc)
+        out.append(
+            Holding(
+                lot.id,
+                lot.account,
+                lot.acquired,
+                lot.sats,
+                lot.basis,
+                lot.loss_basis,
+                lot.always_long or long_term(lot.acquired, as_of),
+                lot.unknown_basis,
+                value,
+                None if value is None else subtract(value, lot.basis),
+            )
+        )
+    out.sort(key=lambda h: (h.account, h.acquired, h.lot))
+    return tuple(out)
+
+
+def value_of(sats: int, price: Decimal) -> Decimal:
+    """`sats` at `price` USD per BTC, to the cent (half to even)."""
+    whole, rest = divmod(sats, SATS_PER_BTC)
+    return add(price * whole, share(price, rest, SATS_PER_BTC))
