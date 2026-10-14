@@ -267,3 +267,62 @@ export const setMixing = (session: string, txid: string, mixing: boolean) =>
 
 export const getTagHistory = (session: string, kind: "address_tag" | "tx_flag", subject: string) =>
   call<{ changes: Change[] }>(session, "POST", "/api/tags/history", { kind, subject });
+
+// --- Events and choices of lots (services/events; PLAN §2, §7, M6) ---------------------------------------
+
+export type EventKind =
+  | "buy"
+  | "p2p_buy"
+  | "income"
+  | "inherit"
+  | "gift_in"
+  | "sell"
+  | "spend"
+  | "gift_out"
+  | "deposit"
+  | "withdrawal"
+  | "self_transfer";
+
+/** An event as the API takes it: USD amounts as exact-cent text, moments as ISO 8601 text with a zone. */
+export type EventInput = {
+  kind: EventKind;
+  account: number;
+  at: string;
+  sats: number;
+  usd?: string | null;
+  to?: number | null;
+  fee_sats?: number;
+  valuation_source?: string | null;
+  txid?: string | null;
+  fmv?: string | null;
+  donor_acquired?: string | null;
+  donor_always_long?: boolean;
+  missing_basis?: string | null;
+  missing_acquired?: string | null;
+  note?: string | null;
+};
+
+export type Choice = { lot: string; sats: number };
+export type StoredEvent = Required<EventInput> & { id: number; choices: Choice[]; identified_at: string | null };
+
+export const getEvents = (session: string) => call<{ events: StoredEvent[] }>(session, "GET", "/api/events");
+
+export const addEvent = (session: string, event: EventInput) =>
+  call<{ id: number }>(session, "POST", "/api/events", event);
+
+export const updateEvent = (session: string, id: number, event: EventInput) =>
+  call<unknown>(session, "POST", "/api/events/update", { id, event });
+
+export const removeEvent = (session: string, id: number) => call<unknown>(session, "POST", "/api/events/remove", { id });
+
+/** Set (or, with no choices, clear) an event's choice of lots; the app records when (ADR 0008 §3). */
+export const identifyLots = (session: string, id: number, choices: Choice[]) =>
+  call<unknown>(session, "POST", "/api/events/identify", { id, choices });
+
+/** BTC text (up to eight decimals) as sats, by integer arithmetic only; null if it isn't an amount. */
+export function satsOf(text: string): number | null {
+  const m = /^(\d{1,8})(?:\.(\d{1,8}))?$/.exec(text.trim());
+  if (m === null) return null;
+  const sats = Number(m[1]) * 100_000_000 + Number((m[2] ?? "").padEnd(8, "0"));
+  return sats > 0 && sats <= 2_100_000_000_000_000 ? sats : null;
+}
