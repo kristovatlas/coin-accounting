@@ -142,7 +142,27 @@ def test_every_accepted_name_fits_the_pattern_and_the_schema() -> None:
     assert all(settings._ZONE_NAME.fullmatch(z) and len(z) <= 64 for z in zones)
 
 
-def test_without_a_zone_table_only_utc_is_accepted(tmp_path: Path) -> None:
-    assert settings._canonical((str(tmp_path),)) == frozenset()
-    (tmp_path / "zone1970.tab").write_text("# a comment\nUS\t+404251-0740023\tAmerica/New_York\tEastern\n")
-    assert settings._canonical((str(tmp_path),)) == {"America/New_York"}
+@pytest.mark.parametrize("name", ["Europe/Amsterdam", "Europe/Oslo", "America/St_Thomas"])
+def test_zones_merged_into_links_upstream_are_still_accepted(conn: sqlite3.Connection, name: str) -> None:
+    settings.set_time_zone(conn, name)  # tzdata 2022b made these links; they are still the users' places
+    assert settings.time_zone(conn) == ZoneInfo(name)
+
+
+def test_the_allow_list_keeps_places_and_utc_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    listed = {
+        "America/New_York",
+        "US/Eastern",
+        "Etc/GMT+5",
+        "EST5EDT",
+        "GMT",
+        "localtime",
+        "Factory",
+        "Europe/Oslo",
+    }
+    monkeypatch.setattr(settings, "available_timezones", lambda: listed)
+    settings._zones.cache_clear()
+    try:
+        assert settings._zones() == {"America/New_York", "Europe/Oslo", "UTC"}
+    finally:
+        monkeypatch.undo()
+        settings._zones.cache_clear()
