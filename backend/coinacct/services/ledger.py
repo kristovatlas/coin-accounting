@@ -26,7 +26,7 @@ run (THREAT_MODEL T-501, T-507, T-508).
   identification, or none, leaves FIFO, the engine's only standing method and the statutory fallback.
 
 The engine refuses input it can't use (`EngineError`); the run then stops with a fixed message naming
-the event (`refused`), which the API shows as a 422.
+the event when the refusal names one (`refused`), which the API shows as a 422.
 """
 
 from __future__ import annotations
@@ -94,8 +94,8 @@ def ignored_choices(stored: Sequence[Stored], chosen: Chosen, automatic: frozens
 _STALE: Final = re.compile(
     r"(?:event '(?P<event>[1-9][0-9]{0,18})': "
     r"(?:lot '[0-9A-Za-z_.:@#-]{1,400}' (?:isn't held in account '[1-9][0-9]{0,18}'"
-    r"|holds fewer sats than chosen)$)"
-    r"|transfer '(?P<transfer>[1-9][0-9]{0,18})': an account without lots has none to choose$)",
+    r"|holds fewer sats than chosen))"
+    r"|transfer '(?P<transfer>[1-9][0-9]{0,18})': an account without lots has none to choose)",
     re.ASCII,
 )
 # the event an engine refusal names, as `str(id)` of a stored event (`engine_events`)
@@ -104,7 +104,7 @@ _REFUSED: Final = re.compile(r"(?:event|acquisition|disposal|transfer|gift) '([1
 
 def _stale_choice(error: engine.EngineError, chosen: Chosen, ignored: set[int]) -> int | None:
     """The event whose stored choice `error` refuses as stale, if it is one the run can ignore."""
-    match = _STALE.match(str(error))
+    match = _STALE.fullmatch(str(error))
     event_id = None if match is None else int(match.group("event") or match.group("transfer"))
     return event_id if event_id in chosen and event_id not in ignored else None
 

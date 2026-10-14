@@ -397,6 +397,7 @@ def test_only_the_stale_refusals_count_as_stale(message: str) -> None:
     chosen = {4: ((ev.Choice("1@3", 10),), datetime(2025, 1, 1, tzinfo=UTC))}
     assert _stale_choice(engine.EngineError(message), chosen, set()) == 4
     assert _stale_choice(engine.EngineError(message + " and more"), chosen, set()) is None  # anchored
+    assert _stale_choice(engine.EngineError(message + "\n"), chosen, set()) is None  # to the very end
     assert _stale_choice(engine.EngineError(message), chosen, {4}) is None  # once only
 
 
