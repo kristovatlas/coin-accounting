@@ -95,8 +95,9 @@ class Event:
     sats: int
     usd: Decimal | None = None
     to: int | None = None  # a movement's destination account
-    # of `sats`, the fee (ADR 0043): a buy's, withheld from the sats bought; a movement's, of the sats that
-    # leave; a disposal's, of the sats disposed of, its basis joining the disposal's
+    # of `sats`, the BTC fee (ADR 0043): a buy's, withheld from the sats bought; a movement's, of the sats
+    # that leave. A sale's, spend's or gift's BTC fee (ADR 0043's gross sats) waits for the engine to take
+    # it, so it is refused; a fee in dollars is in a sale's `usd`, net of costs.
     fee_sats: int = 0
     valuation_source: str | None = None
     txid: str | None = None
@@ -123,6 +124,7 @@ class Choice:
 def add_event(conn: sqlite3.Connection, event: Event, *, at: str, origin: Origin = "user") -> int:
     """Store `event`; its id."""
     row = _row(_checked(event))
+    _log_time(at)
     with _refusals(), transaction(conn):
         cur = conn.execute(_INSERT, row)
         event_id = cur.lastrowid
@@ -135,10 +137,12 @@ def add_event(conn: sqlite3.Connection, event: Event, *, at: str, origin: Origin
 def update_event(
     conn: sqlite3.Connection, event_id: int, event: Event, *, at: str, origin: Origin = "user"
 ) -> None:
-    """Replace stored event `event_id` with `event`. The same values again are not logged. An edit its
-    choice of lots no longer fits, or one that changes the account, kind or sats of a purchase other
-    events' choices name, is refused: change those choices first."""
+    """Replace stored event `event_id` with `event`. The same values again are not logged. Refused, until
+    the choices concerned change: an edit its own choice of lots no longer fits, or that changes its
+    account or moment while it has one; and, while other events' choices name its lots, an edit to what
+    those lots depend on (`_lot_shape`)."""
     row = _row(_checked(event))
+    _log_time(at)
     with _refusals(), transaction(conn):
         before = _read(conn, event_id)
         if before == event:
@@ -160,6 +164,7 @@ def update_event(
 def remove_event(conn: sqlite3.Connection, event_id: int, *, at: str, origin: Origin = "user") -> None:
     """Remove stored event `event_id`, and its identification first, each logged; refused while other
     events' choices name its lots."""
+    _log_time(at)
     with _refusals(), transaction(conn):
         before = _read(conn, event_id)
         if _named_by_others(conn, event_id):
@@ -194,23 +199,51 @@ def identify(  # noqa: PLR0913 - the event, its choices, when they were made, an
     if choices and identified_at is None:
         raise EventError("a choice of lots names when it was made")
     stamp = None if identified_at is None else _moment(identified_at, "when the lots were chosen")
-    try:
-        recorded = datetime.fromisoformat(at)
-    except (TypeError, ValueError):
-        raise EventError("the log's time is an ISO 8601 moment") from None
-    if recorded.utcoffset() is None:
-        raise EventError("the log's time is timezone-aware")
-    if identified_at is not None and identified_at > recorded:
-        raise EventError("lots can't be chosen later than the choice is recorded")
+    recorded = _log_time(at)
+    if identified_at is not None:
+        if identified_at.astimezone(UTC).date() < GENESIS:
+            raise EventError("lots are chosen no earlier than the genesis block")
+        # at the log's precision: a choice made within the second it is recorded in isn't later
+        if identified_at.replace(microsecond=0) > recorded:
+            raise EventError("lots can't be chosen later than the choice is recorded")
     with _refusals(), transaction(conn):
         event = _read(conn, event_id)
         if choices:
             _check_choice(event, choices)
+            _check_lots_exist(conn, choices)
         before, _ = identification(conn, event_id)
-        # a movement's choice names the lots it moves, which later choices can name in turn
-        if event.kind in MOVEMENTS and choices != before and _named_by_others(conn, event_id):
+        # a movement's choice names the lots it moves, which later choices can name in turn; the same
+        # lots in another order move the same lots (the engine takes picks in FIFO order)
+        changed = sorted((c.lot, c.sats) for c in choices) != sorted((c.lot, c.sats) for c in before)
+        if event.kind in MOVEMENTS and changed and _named_by_others(conn, event_id):
             raise EventError(_NAMED)
         _replace_choice(conn, event_id, choices, stamp, at=at, origin=origin)
+
+
+def _log_time(at: str) -> datetime:
+    """The change log's time for a write: a timezone-aware ISO 8601 moment, 20 to 40 characters."""
+    if not isinstance(at, str) or not 20 <= len(at) <= 40:
+        raise EventError("the log's time is an ISO 8601 moment")
+    try:
+        moment = datetime.fromisoformat(at)
+    except ValueError:
+        raise EventError("the log's time is an ISO 8601 moment") from None
+    if moment.utcoffset() is None:
+        raise EventError("the log's time is timezone-aware")
+    return moment
+
+
+def _check_lots_exist(conn: sqlite3.Connection, choices: tuple[Choice, ...]) -> None:
+    """Every event a chosen lot id names (as its first segment, or a later `@` segment) is stored, so a
+    choice can't come to name an event added after it (ids are given out in order)."""
+    # an id's `#<vout>` suffix is an output index, not an event
+    named = {int(part) for c in choices for part in c.lot.split("#", 1)[0].split("@") if part.isdigit()}
+    if not named:
+        return
+    marks = ", ".join("?" * len(named))
+    found = conn.execute(f"SELECT count(*) FROM event WHERE id IN ({marks})", tuple(named)).fetchone()[0]  # noqa: S608
+    if found != len(named):
+        raise EventError("a choice names a lot of an event that isn't stored")
 
 
 def _lot_shape(e: Event) -> tuple[object, ...]:
@@ -311,6 +344,15 @@ def _read(conn: sqlite3.Connection, event_id: int) -> Event:
     return _event(row)
 
 
+def _check_fee(e: Event) -> None:
+    if isinstance(e.fee_sats, bool) or not isinstance(e.fee_sats, int) or not 0 <= e.fee_sats < e.sats:
+        raise EventError("the fee is whole sats, fewer than the event's")
+    if e.fee_sats and e.kind in DISPOSALS:
+        raise EventError("a BTC fee on a sale, spend or gift isn't supported yet: enter it as its own event")
+    if e.fee_sats and e.kind in ACQUISITIONS - {"buy"}:
+        raise EventError("only a movement or a buy bears a BTC fee")
+
+
 def _checked(e: Event) -> Event:  # noqa: PLR0912 - one check per field
     if not isinstance(e, Event):
         raise EventError("an event is an Event")
@@ -326,10 +368,7 @@ def _checked(e: Event) -> Event:  # noqa: PLR0912 - one check per field
     if e.at.astimezone(UTC).date() < GENESIS:
         raise EventError("the moment is no earlier than the genesis block")
     _check_sats(e.sats, "the sats")
-    if isinstance(e.fee_sats, bool) or not isinstance(e.fee_sats, int) or not 0 <= e.fee_sats < e.sats:
-        raise EventError("the fee is whole sats, fewer than the event's")
-    if e.fee_sats and e.kind in ACQUISITIONS - {"buy"}:
-        raise EventError("only a movement, a disposal or a buy bears a fee")
+    _check_fee(e)
     if e.to is not None and e.to == e.account:
         raise EventError("a movement goes to another account")
     if e.kind in MOVEMENTS:
@@ -391,6 +430,14 @@ def _row(e: Event) -> tuple[Any, ...]:
 
 
 def _event(r: tuple[Any, ...]) -> Event:
+    """A stored row as an `Event`; a damaged one is refused, never half-read (T-408)."""
+    try:
+        return _decoded(r)
+    except (ValueError, TypeError, ArithmeticError):
+        raise EventError("a stored event is damaged (T-408): restore the user DB from a backup") from None
+
+
+def _decoded(r: tuple[Any, ...]) -> Event:
     def money(v: str | None) -> Decimal | None:
         return None if v is None else Decimal(v)
 

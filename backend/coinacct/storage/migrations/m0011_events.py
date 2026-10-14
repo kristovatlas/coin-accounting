@@ -19,8 +19,7 @@ T-408, T-501, T-508).
 - The change log gains the kinds `event` and `identification`, so every edit to them is logged (T-408),
   and, so that it needn't be rebuilt again, the other kinds PLAN §2 says it records: `override` (a doxx
   override), `lot_link`, `tracking_start` and `wallet_fifo` (ADR 0041's links, tracking start dates and
-  whole-wallet FIFO setting) and `setting` (a tax-affecting setting, such as the time zone, T-503), for
-  their later steps.
+  whole-wallet FIFO setting), for their later steps.
   SQLite can't change a CHECK in place, so the log is rebuilt as SQLite documents: a new table with the
   same columns and every rule of the old one, the rows copied with their ids, the old one dropped, the
   new one renamed, and m0006 to m0010's triggers recreated unchanged. Every value is kept (ADR 0038: a
@@ -34,7 +33,7 @@ CREATE TABLE change_log_m0011 (
     at TEXT NOT NULL CHECK (length(at) BETWEEN 20 AND 40),
     kind TEXT NOT NULL CHECK (kind IN (
         'address_tag', 'tx_flag', 'event', 'identification',
-        'override', 'lot_link', 'tracking_start', 'wallet_fifo', 'setting'
+        'override', 'lot_link', 'tracking_start', 'wallet_fifo'
     )),
     subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 20000),
     before TEXT CHECK (before IS NULL OR json_valid(before)),
@@ -125,7 +124,7 @@ CREATE TABLE event (
     -- a fee is borne by a movement, a disposal, or a buy whose fee was withheld from the sats bought
     -- (ADR 0043: the lot holds the sats credited, its basis the full cash paid)
     CHECK (
-        fee_sats = 0 OR kind IN ('buy', 'self_transfer', 'deposit', 'withdrawal', 'sell', 'spend', 'gift_out')
+        fee_sats = 0 OR kind IN ('buy', 'self_transfer', 'deposit', 'withdrawal')
     ),
     -- a gift given has no proceeds (ADR 0009)
     CHECK (kind != 'gift_out' OR usd = '0.00')
@@ -157,11 +156,16 @@ CREATE TRIGGER identification_within_its_events_sats BEFORE INSERT ON identifica
 WHEN NEW.sats + (SELECT coalesce(sum(sats), 0) FROM identification WHERE event_id = NEW.event_id)
     > (SELECT sats FROM event WHERE id = NEW.event_id)
 BEGIN SELECT RAISE(ABORT, 'the chosen lots hold more sats than the event'); END;
-CREATE TRIGGER identification_stays_on_a_disposal_or_movement BEFORE UPDATE ON identification
-WHEN (SELECT kind FROM event WHERE id = NEW.event_id) NOT IN (
-    'self_transfer', 'deposit', 'withdrawal', 'sell', 'spend', 'gift_out'
-)
-BEGIN SELECT RAISE(ABORT, 'only a disposal or a movement chooses lots'); END;
+CREATE TRIGGER identification_is_replaced_never_edited BEFORE UPDATE ON identification
+BEGIN SELECT RAISE(ABORT, 'a choice of lots is replaced, never edited'); END;
+CREATE TRIGGER identification_not_on_a_missing_basis BEFORE INSERT ON identification
+WHEN (SELECT missing_basis FROM event WHERE id = NEW.event_id) IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'a withdrawal with a missing basis chooses no lots'); END;
+CREATE TRIGGER event_with_chosen_lots_keeps_its_account_moment_and_basis
+BEFORE UPDATE OF tax_account_id, at, missing_basis ON event
+WHEN EXISTS (SELECT 1 FROM identification WHERE event_id = NEW.id)
+    AND (NEW.tax_account_id <> OLD.tax_account_id OR NEW.at <> OLD.at OR NEW.missing_basis IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'an event with a choice of lots keeps its account, moment and basis'); END;
 CREATE TRIGGER event_with_chosen_lots_stays_a_disposal_or_movement BEFORE UPDATE OF kind ON event
 WHEN NEW.kind NOT IN ('self_transfer', 'deposit', 'withdrawal', 'sell', 'spend', 'gift_out')
     AND EXISTS (SELECT 1 FROM identification WHERE event_id = NEW.id)
