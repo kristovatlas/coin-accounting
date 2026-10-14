@@ -78,17 +78,18 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   - a sale's or spend's lots are its outputs' and the fee's (the fee's basis is in the disposal); a
     gift's are its outputs', and the fee's basis isn't recovered (ADR 0043)
   - a deposit or self-transfer moves its outputs' lots, as a transfer does; the fee's basis passes to
-    the moved part of the same lot, else the oldest moved part (ADR 0041 §2.4)
+    the lot's fragment on the first leaving output in the canonical order that holds it, else to the
+    first leaving output's oldest fragment (ADR 0041 §2.4)
   - a consolidation keeps the fee's basis in the wallet, on the change
   - the change stays on the wallet's new coins, under the same lots.
 
   A transaction the engine can't trace blocks (`Untraced`, ADR 0041 §3): one tracing blocks, a coin
   whose links don't hold exactly its value (`uncovered`; the pool of ADR 0041 §4 comes in
   a later slice), a coin from another account, a self-transfer to an account that isn't coin-traced.
-  Its leaving event is then figured by the account's FIFO order, provisionally (the fee's sats leave by
-  FIFO too, their basis not carried anywhere: the figures only stand in until the block is resolved),
-  and the wallet's later transactions block too (`after_untraced`), since its coins no longer match
-  its lots; its coin records are dropped. A self-transfer
+  Its leaving event is then figured by the account's FIFO order, provisionally, its fee's basis following
+  ADR 0043's rule for a whole-wallet FIFO wallet (a sale's row; a consolidation's same, else oldest
+  remaining lot). The wallet's later transactions block too (`after_untraced`), since its coins no
+  longer match its lots; its coin records are dropped. A self-transfer
   from an account that isn't coin-traced blocks (`mixed_transfer`), figured by FIFO provisionally, and
   a coin-traced wallet it arrives in is untraced from then on. Exchange accounts are unchanged.
 
@@ -720,12 +721,8 @@ class _Engine:
 
     def _transfer(self, t: Transfer, *, untraced: bool = False) -> None:
         self._check_plain_transfer(t, untraced=untraced)
-        if t.kind == "self_transfer" and not untraced:  # its lots follow the coins it spends (ADR 0041)
-            detail = f"a self-transfer from {t.account!r}, which isn't coin-traced"
-            self._blocking.append(Untraced(t.id, "mixed_transfer", detail))
-            if t.to in self._wallets:  # the coins it arrives in don't hold the lots it moves by FIFO
-                self._untraced.add(t.to)
-                self._coins[t.to].clear()
+        if t.kind == "self_transfer" and not untraced and self._mixed(t):
+            return
         self._unrecorded_if_needed(t)
         picks, missing, late = self._choose(t)
         if late is not None and t.identified_at is not None:
@@ -749,7 +746,8 @@ class _Engine:
             else:  # all fee: its basis (the lower of a gift's two) passes to the oldest moved part
                 basis, loss = self._take(pick.lot, pick.sats)
                 orphans.append((_lower(basis, loss), pick.sats, pick.lot))
-        if t.coins and self._link(t.id, t.to, [(m.into, m.sats) for m in moved], t.coins):
+        arrived = sorted(moved, key=lambda m: self._oldest_key(m.into))  # oldest first (ADR 0041 §1)
+        if t.coins and self._link(t.id, t.to, [(m.into, m.sats) for m in arrived], t.coins):
             self._fee_onto_coins(t, moved, own, orphans)  # ADR 0043: linked, the fee follows a coin
             return
         for m, basis, loss, n in own:  # links refused: the fee's basis stays with the moved part
@@ -776,16 +774,16 @@ class _Engine:
             coin = held[outpoint]
             if self._lots[lot].sats == coin[lot]:  # all of it is on this coin
                 return lot
-            new = f"{lot}{SPLIT}{order.index(outpoint)}"
+            new = f"{lot}{SPLIT}{outpoint.rsplit(':', 1)[1]}"  # by its vout
             if new not in self._lots:
                 self._split_off(t.to, lot, coin.pop(lot), new)
                 coin[new] = self._lots[new].sats
                 base[new] = base[lot]
             return new
 
-        def oldest() -> str:
+        def oldest() -> str:  # this withdrawal's oldest fragment there, never another event's lot
             first = held[order[0]]
-            return fragment(order[0], min(first, key=self._oldest_key))
+            return fragment(order[0], min((lot for lot in first if lot in base), key=self._oldest_key))
 
         for m, basis, loss, n in own:
             on = next((op for op in order if m.into in held.get(op, {})), None)
@@ -946,7 +944,7 @@ class _Engine:
         """An untraceable sale, spend or gift by the account's FIFO order: its sats, then the fee's,
         whose basis follows ADR 0043 as in a traced one (a whole-wallet FIFO wallet's rule)."""
         picks, missing = self._standing(d.account, d.sats + fee)
-        if missing:  # short of lots: figured as a disposal is, the fee's sats left where they are
+        if missing > fee:  # short of lots for the disposal itself: figured as a disposal is
             self._dispose(d, untraced=True)
             return
         leave: dict[str, int] = {}
@@ -1007,18 +1005,24 @@ class _Engine:
 
     def _consolidated(self, c: WalletTx, carries: tuple[tracing.FeeCarry, ...]) -> None:
         """A consolidation's fee basis joins the fragment tracing names on the change. Where that lot is
-        on several change outputs, the named fragment becomes a lot of its own first (`lot@tx#vout`), so
-        the basis stays on that coin (ADR 0041 §2.4)."""
+        anywhere else too (another coin, or the pool), the named fragment becomes a lot of its own first
+        (`lot@tx#vout`), so the basis stays on that coin (ADR 0041 §2.4)."""
         held = self._coins[c.account]
         split: dict[tuple[str, int], str] = {}  # (lot, vout) -> the lot its fragment there became
+        pending: dict[str, int] = {}  # each lot's fee sats yet to go
+        for k in carries:
+            pending[k.lot] = pending.get(k.lot, 0) + k.sats
         for k in carries:
             coin = held[f"{c.txid}:{k.vout}"]
             target = split.get((k.onto, k.vout), k.onto)
-            if target == k.onto and sum(1 for lots in held.values() if target in lots) > 1:
+            # the lot's fee sats aside, is any of it anywhere but this fragment (another coin, the pool)?
+            elsewhere = self._lots[target].sats - pending.get(target, 0) > coin[target]
+            if target == k.onto and elsewhere:
                 new = f"{target}@{c.id}{SPLIT}{k.vout}"  # split it off, once per coin
                 self._split_off(c.account, target, coin.pop(target), new)
                 coin[new] = self._lots[new].sats
                 split[k.onto, k.vout] = target = new
+            pending[k.lot] -= k.sats
             if k.lot == target:  # the lot's own fee sats: it keeps their basis
                 self._lots[k.lot].sats -= k.sats
                 continue
@@ -1092,7 +1096,8 @@ class _Engine:
     ) -> dict[tuple[str, int], Moved]:
         """Move each leaving output's lots to `t.to`: one moved lot per lot, or, for a lot on several
         leaving outputs, one per output (`lot@transfer#vout`), so that a fee's basis stays on the output
-        tracing names. A moved part keeps the basis of its lot's fee sats tracing puts on it; a lot all
+        tracing names. The outputs' sats move first, then the fee's: a moved part takes the basis of its
+        lot's fee sats tracing puts on it (both of a gift's bases); a lot all
         of whose sats here went to the fee passes its basis to the moved part tracing names (ADR 0041
         §2.4)."""
         own = {(k.lot, k.vout): k.sats for k in carries if k.onto == k.lot}
@@ -1105,9 +1110,10 @@ class _Engine:
             for v in spans[pick.lot]:
                 n = parts[v][pick.lot]
                 into = f"{pick.lot}@{t.id}" if len(spans[pick.lot]) == 1 else f"{pick.lot}@{t.id}{SPLIT}{v}"
-                moved[pick.lot, v] = self._move(
-                    t, pick.lot, n + own.get((pick.lot, v), 0), arrive=n, into=into
-                )
+                moved[pick.lot, v] = self._move(t, pick.lot, n, arrive=n, into=into)
+        for (lot, v), n in own.items():  # then the fee's sats (ADR 0041 §2.2's order), their basis on v
+            basis, loss = self._take(lot, n)
+            self._carry(moved[lot, v], _Fee(basis, n, (), loss))
         onto: dict[tuple[str, int], list[tuple[Decimal, int, str]]] = {}
         for k in carries:
             if k.onto != k.lot:
@@ -1116,6 +1122,19 @@ class _Engine:
         for key, parts_ in onto.items():
             self._carry(moved[key], _orphans_fee(parts_))
         return moved
+
+    def _mixed(self, t: Transfer) -> bool:
+        """A self-transfer from an account that isn't coin-traced: its lots follow the coins it spends
+        (ADR 0041), so it blocks, figured by FIFO provisionally; whether it was figured here."""
+        detail = f"a self-transfer from {t.account!r}, which isn't coin-traced"
+        self._blocking.append(Untraced(t.id, "mixed_transfer", detail))
+        if t.to in self._wallets:  # the coins it arrives in don't hold the lots it moves by FIFO
+            self._untraced.add(t.to)
+            self._coins[t.to].clear()
+        if t.picks is None:
+            return False
+        self._transfer(replace(t, picks=None, identified_at=None), untraced=True)  # whatever it names
+        return True
 
     def _check_plain_transfer(self, t: Transfer, *, untraced: bool) -> None:
         _checked_transfer(t)
@@ -1406,14 +1425,12 @@ def _checked_wallet_tx(c: WalletTx, wallets: frozenset[str]) -> Disposal | Trans
             _check_sats(i.value, f"wallet tx {c.id!r}")
     if len({i.outpoint for i in c.inputs}) != len(c.inputs):
         raise EngineError(f"wallet tx {c.id!r}: a coin is spent once")
-    for o in c.outputs:  # checked here too, since a transaction can block before tracing sees it
-        if not isinstance(o, tracing.Output) or type(o.vout) is not int or o.vout < 0:
-            raise EngineError(f"wallet tx {c.id!r}: an output is an Output with its vout")
-        if type(o.value) is not int or not 0 <= o.value <= MAX_SATS:
-            raise EngineError(f"wallet tx {c.id!r}: an output's value is a whole number of sats")
-    if len({o.vout for o in c.outputs}) != len(c.outputs) or sum(o.value for o in c.outputs) > c.sats:
-        raise EngineError(f"wallet tx {c.id!r}: its outputs have distinct vouts and don't exceed its inputs")
-    return _checked_leaving(c, wallets)
+    tracing.check_outputs(c.txid, c.account, c.outputs, c.sats)  # here too: it can block before tracing
+    leaving = _checked_leaving(c, wallets)
+    named = {o.event for o in c.outputs if o.event is not None}
+    if named != (set() if leaving is None else {leaving.id}):
+        raise EngineError(f"wallet tx {c.id!r}: its outputs pay its leaving event, and only that")
+    return leaving
 
 
 def _checked_leaving(c: WalletTx, wallets: frozenset[str]) -> Disposal | Transfer | None:
