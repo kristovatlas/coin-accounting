@@ -4,6 +4,7 @@ Synthetic data only."""
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,9 @@ class World:
         self.wallet = ac.add_tax_account(self.db, "Wallet", "self_custody")
         exchange = ac.add_entity(self.db, "Some exchange", "exchange")
         self.exchange = ac.add_tax_account(self.db, "Exchange", "custodial", entity_id=exchange)
+        self.wallet2 = ac.add_tax_account(self.db, "Cold wallet", "self_custody")
+        other = ac.add_entity(self.db, "Another exchange", "exchange")
+        self.exchange2 = ac.add_tax_account(self.db, "Exchange 2", "custodial", entity_id=other)
         self.app = create_app(
             port=PORT,
             sessions=Sessions(TOKEN),
@@ -126,6 +130,7 @@ def test_a_choice_of_lots_is_set_now_and_listed_adr0008(world: World) -> None:
         ({"at": "2025-03-01T12:00:00"}, 422),  # no time zone
         ({"sats": 0}, 422),
         ({"sats": "1000"}, 422),  # strict: no number as text
+        ({"at": 1740830400}, 422),  # strict: no Unix time for a moment
         ({"valuation_source": f"from {WIF}"}, 422),  # a private key in free text (T-703)
         ({"at": "0001-01-01T00:00:00+05:00"}, 422),  # a moment at the calendar's edge
         ({"kind": "swap"}, 422),
@@ -251,6 +256,10 @@ def test_the_change_log_records_the_apps_clock(world: World) -> None:
         ("withdrawal", "exchange", "wallet", 201),
         ("withdrawal", "wallet", "exchange", 422),
         ("self_transfer", "wallet", "exchange", 422),
+        ("self_transfer", "wallet", "wallet2", 201),
+        ("withdrawal", "exchange", "exchange2", 201),  # straight from one exchange into another
+        ("deposit", "exchange", "exchange2", 422),
+        ("self_transfer", "exchange", "exchange2", 422),
     ],
 )
 def test_a_movement_goes_the_way_its_kind_says(
@@ -271,3 +280,43 @@ def test_ids_are_strict_integers(world: World) -> None:
     assert world.post("/api/events/remove", {"id": True}).status == 422
     assert world.post("/api/events", buy(world, account=str(world.wallet))).status == 422
     assert len(world.get("/api/events").json()["events"]) == 1
+
+
+def test_an_edit_the_wrong_way_is_refused_and_nothing_changes(world: World) -> None:
+    body = {
+        "kind": "deposit",
+        "account": world.wallet,
+        "to": world.exchange,
+        "at": "2025-03-01T12:00:00Z",
+        "sats": 10,
+    }
+    deposit = world.post("/api/events", body).json()["id"]
+    before = (world.get("/api/events").json(), world.db.execute("SELECT count(*) FROM change_log").fetchone())
+    assert (
+        world.post("/api/events/update", {"id": deposit, "event": {**body, "to": world.wallet2}}).status
+        == 422
+    )
+    assert world.post("/api/events/update", {"id": deposit, "event": {**body, "note": WIF}}).status == 422
+    after = (world.get("/api/events").json(), world.db.execute("SELECT count(*) FROM change_log").fetchone())
+    assert after == before
+
+
+def test_a_gifts_donor_date_is_iso_text_only(world: World) -> None:
+    gift = {
+        "kind": "gift_in",
+        "account": world.wallet,
+        "at": "2025-02-01T00:00:00Z",
+        "sats": 10,
+        "fmv": "1.00",
+        "donor_acquired": 1577836800,
+    }
+    assert world.post("/api/events", gift).status == 422
+    assert world.get("/api/events").json()["events"] == []
+
+
+def test_the_apps_clock_rounds_up_to_the_second_t508() -> None:
+    from coinacct.services.events import _second_up  # noqa: PLC0415 - the one private helper tested
+
+    sale = datetime(2025, 3, 1, 12, 0, 0, tzinfo=UTC)
+    assert _second_up(sale) == sale
+    assert _second_up(sale.replace(microsecond=1)) == sale + timedelta(seconds=1)  # never before the sale

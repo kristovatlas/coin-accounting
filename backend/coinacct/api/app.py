@@ -21,6 +21,10 @@ Routes:
   A refusal is a 422 with the service's fixed message, which never repeats the upload (T-403,
   T-703); a busy DB is a 503; a descriptor while offline is a 409 (T-203). Upload size is bounded by
   the security layer's body limit, before any of this runs.
+- Events (bearer; PLAN §2, §7, T-408, T-508), through `services.events.Events`: `GET /api/events`
+  (every event with its choice of lots), `POST /api/events` (add), `/api/events/update`,
+  `/api/events/remove` and `/api/events/identify` (when, from the app's clock). An unknown event is
+  404, a refusal 422 with a fixed message, a busy DB 503.
 - History (bearer; PLAN §3), through `services.history.History`, from the chain cache only, as of the
   last finished sync (`as_of`; each address's `scanned_to` says how far its own history is scanned):
   - `GET /api/addresses[?tax_account_id=N]`: every address, with its owner, balance, UTXO count and
@@ -41,14 +45,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field
 
 from coinacct.api.placeholder import APP_JS, INDEX_HTML
 from coinacct.api.security import MAX_BODY_BYTES, SecurityMiddleware
@@ -492,6 +496,13 @@ class Subject(Strict):
 USD = Annotated[str, Field(pattern=r"^-?[0-9]{1,15}(\.[0-9]{1,2})?$")]  # exact cents, as text
 
 
+def _iso_text(value: object) -> object:
+    """A moment or a date is ISO 8601 text: pydantic would read a number as a Unix time."""
+    if not isinstance(value, str):
+        raise ValueError("ISO 8601 text")
+    return value
+
+
 class EventBody(Strict):
     kind: Literal[
         "buy",
@@ -508,17 +519,17 @@ class EventBody(Strict):
     ]
     account: RowId
     to: RowId | None = None
-    at: AwareDatetime
+    at: Annotated[AwareDatetime, BeforeValidator(_iso_text)]
     sats: int = Field(strict=True, ge=1, le=MAX_SATS)
     usd: USD | None = None
     fee_sats: int = Field(default=0, strict=True, ge=0, le=MAX_SATS)
     valuation_source: str | None = Field(default=None, min_length=1, max_length=200)
     txid: str | None = Field(default=None, pattern=HASH)
     fmv: USD | None = None
-    donor_acquired: date | None = None
+    donor_acquired: Annotated[date, BeforeValidator(_iso_text)] | None = None
     donor_always_long: bool = Field(default=False, strict=True)
     missing_basis: USD | None = None
-    missing_acquired: date | None = None
+    missing_acquired: Annotated[date, BeforeValidator(_iso_text)] | None = None
     note: str | None = Field(default=None, min_length=1, max_length=2000)
 
     def event(self) -> event_service.Event:
@@ -565,7 +576,9 @@ class Identification(Strict):
     choices: list[ChoiceBody] = Field(max_length=1000)
 
 
-def _event_json(stored: Any, choice: Any) -> dict[str, Any]:
+def _event_json(
+    stored: event_service.Stored, choice: tuple[tuple[event_service.Choice, ...], datetime | None]
+) -> dict[str, Any]:
     e = stored.event
     choices, chosen_at = choice
     return {

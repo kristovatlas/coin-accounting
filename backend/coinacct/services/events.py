@@ -18,12 +18,19 @@ from coinacct.domain.keys import PrivateKeyError
 from coinacct.services.graph import NotFound
 from coinacct.services.imports import ImportRefused, db_errors
 from coinacct.storage import accounts, events
-from coinacct.storage.db import Connection
+from coinacct.storage.db import Connection, transaction
 from coinacct.storage.events import Choice, Event, EventError, EventNotFound, Stored
 
 
 def _now() -> str:
-    return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+    return _second_up(datetime.datetime.now(datetime.UTC)).isoformat(timespec="seconds")
+
+
+def _second_up(moment: datetime.datetime) -> datetime.datetime:
+    """`moment` rounded up to its next whole second: a choice of lots made within a sale's second is
+    then never recorded before it, so the late check (T-508) can only err towards warning."""
+    whole = moment.replace(microsecond=0)
+    return whole if whole == moment else whole + datetime.timedelta(seconds=1)
 
 
 __all__ = ["Choice", "Event", "Events", "Stored"]  # the value types the API builds and reads
@@ -51,18 +58,19 @@ class Events:
         return [(s, chosen.get(s.id, ((), None))) for s in stored]
 
     def add(self, event: Event) -> int:
-        with _refused():
+        with _refused(), transaction(self._writer):  # the check and the write, under the writer's lock
             self._check_direction(event)
             return events.add_event(self._writer, event, at=self._now())
 
     def update(self, event_id: int, event: Event) -> None:
-        with _refused():
+        with _refused(), transaction(self._writer):
             self._check_direction(event)
             events.update_event(self._writer, event_id, event, at=self._now())
 
     def _check_direction(self, event: Event) -> None:
         """A movement goes the way its kind says (PLAN §7): a deposit from a self-custody account into a
-        custodial one, a withdrawal out of a custodial one, a self-transfer between self-custody ones."""
+        custodial one, a withdrawal out of a custodial one (into a wallet, or another exchange account),
+        a self-transfer between self-custody ones. Called inside the write's transaction."""
         if event.to is None or event.kind not in events.MOVEMENTS:
             return  # the storage layer refuses a destination on anything else
         kinds = {a.id: a.kind for a in accounts.tax_accounts(self._writer)}
@@ -71,13 +79,13 @@ class Events:
             return  # the storage layer refuses an account that doesn't exist
         expected = {
             "deposit": ("self_custody", "custodial"),
-            "withdrawal": ("custodial", "self_custody"),
+            "withdrawal": ("custodial", target),  # into a wallet, or straight into another exchange
             "self_transfer": ("self_custody", "self_custody"),
         }[event.kind]
         if (source, target) != expected:
             raise ImportRefused(
-                "a deposit goes from a wallet into an exchange account, a withdrawal from an exchange account"
-                " into a wallet, and a self-transfer between wallets"
+                "a deposit goes from a wallet into an exchange account, a withdrawal out of an exchange"
+                " account, and a self-transfer between wallets"
             )
 
     def remove(self, event_id: int) -> None:
