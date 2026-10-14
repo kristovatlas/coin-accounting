@@ -4,11 +4,15 @@ A coin's **doxx set** is the set of entities that know the user's identity (`ide
 the coin to them. Each tag has a confidence, `certain` or `inferred`, the reason it was given (PLAN
 §2's `doxx_tag.reason`), the transaction and coin it came from, and whether it rests on a heuristic:
 
-- **Paid to K** (`paid_to`, `change_of`): a transaction paying an output K owns doxxes every owned
-  input (`paid_to`) and every owned output, the change (`change_of`), to K, certainly; in a transaction
-  flagged `mixing`, the owned inputs only as inferred, since K can't tell which inputs are the user's.
+- **Paid to K** (`paid_to`, `change_of`): a transaction the user spends in that pays an output K owns
+  doxxes every owned input (`paid_to`) and every owned output, the change (`change_of`), to K,
+  certainly; in a transaction flagged `mixing`, the owned inputs only as inferred, since K can't tell
+  which inputs are the user's. One the user spends nothing in (a withdrawal from K, someone's batch
+  payout) links nothing by this rule.
 - **Received from K** (`received_from`): a coin the user recorded as coming from K (a withdrawal, a
-  salary), certainly. It comes from the recorded event, never from recognising K's addresses.
+  salary), certainly. It comes from the recorded event, never from recognising K's addresses: a
+  transaction spending a coin of K's that pays the user, with no such event, is only suggested
+  (`Doxx.suggested`), for the user to record or dismiss (T-511).
 - **Address reuse** (`address_reuse`): every coin ever paid to an address that holds a coin doxxed to
   K. The rule is certain (ADR 0010), so the coin takes its source's confidence: certain from a certain
   tag, inferred from an inferred one.
@@ -16,8 +20,10 @@ the coin to them. Each tag has a confidence, `certain` or `inferred`, the reason
   sets, with their confidence; through a `mixing` transaction only as inferred (ADR 0010).
 - **Backward cluster** (`cluster_backward`): addresses co-spent in a transaction that isn't `mixing`
   form a cluster (the common-input heuristic); a K-doxxed coin at one of them doxxes the coins at the
-  others to K, inferred. The cluster is the one the user's whole history shows (ADR 0010's "earlier"
-  co-spends are an open question for the owner: a co-spend after the doxxing counts too).
+  others to K, inferred, hop by hop: each tag names the co-spend of its hop and the coin it was spent
+  with, so its transactions lead back to the K-doxxed coin. The cluster is the one the user's whole
+  history shows (ADR 0010's "earlier" co-spends are an open question for the owner: a co-spend after
+  the doxxing counts too).
 
 A rule never makes a link more certain than the link it starts from: reading ADR 0010's "certain" for
 reuse and forward as the rule's own confidence keeps a guess (a cluster, a mixing tx) from turning
@@ -44,6 +50,7 @@ the coin named or on the coins it would have reached, as `suppressed`, so the ca
 from __future__ import annotations
 
 import heapq
+from collections import deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
@@ -68,8 +75,10 @@ class DoxxError(ValueError):
 
 @dataclass(frozen=True)
 class Coin:
-    """A transaction's input or output: its outpoint ("txid:vout"), the address (or script hash) it
-    pays, whether the user owns it, and the entity that owns it otherwise, if known."""
+    """A transaction's input or output: its outpoint ("txid:vout"), the address it pays, whether the user
+    owns it, and the entity that owns it otherwise, if known. `address` is one canonical key per script
+    for every coin (the caller's: the script hash, say); two forms of one script would split its reuse
+    and its cluster. Every coin at an address has the same owner."""
 
     outpoint: str
     address: str
@@ -129,10 +138,22 @@ class Unresolved:
 
 
 @dataclass(frozen=True)
+class Suggestion:
+    """A receipt the graph shows and no `Received` records: `txid` spends a coin of `entity`'s (an input
+    the caller tagged) and pays the user's `outpoint`. Never a tag (ADR 0010: a receipt comes from a
+    recorded event); the caller asks the user to record it or dismiss it (T-511)."""
+
+    outpoint: str
+    entity: str
+    txid: str
+
+
+@dataclass(frozen=True)
 class Doxx:
     tags: tuple[Tag, ...]
     unresolved: tuple[Unresolved, ...] = ()
     suppressed: tuple[Tag, ...] = ()  # tags the user's removals kept off, there and downstream
+    suggested: tuple[Suggestion, ...] = ()  # receipts from identity-knowing parties no event records
 
 
 def doxx(
@@ -167,10 +188,23 @@ def doxx(
                 kept = tags.get(outpoint, {}).get(k)
                 if kept is None or _stronger(value, kept):
                     suppressed.setdefault(outpoint, {})[k] = value
+    recorded = {(r.outpoint, r.entity) for r in received}
+    suggested = sorted(
+        {
+            Suggestion(o.outpoint, i.entity, t.txid)
+            for t in order
+            for i in t.inputs
+            if not i.owned and i.entity in identity
+            for o in t.outputs
+            if o.owned and (o.outpoint, i.entity) not in recorded
+        },
+        key=lambda g: (_key(g.outpoint), g.entity, g.txid),
+    )
     return Doxx(
         _tags(tags),
         tuple(sorted(unresolved, key=lambda u: (u.kind, _key(u.outpoint), u.entity, u.why))),
         _tags(suppressed),
+        tuple(suggested),
     )
 
 
@@ -209,14 +243,17 @@ def _tags(tags: dict[str, dict[str, _Value]]) -> tuple[Tag, ...]:
 
 
 def _paid_to(state: _State, t: Tx, identity: frozenset[str]) -> None:
-    """Paid to K: K sees every owned input (only inferred in a mixing tx) and every owned output."""
+    """Paid to K: when the user spends in a transaction paying K, K sees every owned input (only
+    inferred in a mixing tx) and every owned output, the change. A transaction the user spends nothing
+    in (a withdrawal from K, someone's batch payout) links nothing here: a receipt is recorded."""
+    if not any(i.owned for i in t.inputs):
+        return
     paid = {o.entity for o in t.outputs if not o.owned and o.entity is not None and o.entity in identity}
     for k in sorted(paid):
         for i in t.inputs:
             if i.owned:
-                state.give(
-                    i.outpoint, k, ("inferred" if t.mixing else "certain", "paid_to", t.txid, None, False)
-                )
+                conf: Confidence = "inferred" if t.mixing else "certain"
+                state.give(i.outpoint, k, (conf, "paid_to", t.txid, None, False))
         for o in t.outputs:
             if o.owned:
                 state.give(o.outpoint, k, ("certain", "change_of", t.txid, None, False))
@@ -257,11 +294,12 @@ def _reuse(state: _State) -> None:
                     state.give(c, k, (conf, "address_reuse", source.rpartition(":")[0], source, other[1]))
 
 
-def _cluster(state: _State, clusters: list[tuple[list[str], dict[str, str]]]) -> None:
+def _cluster(state: _State, clusters: list[_Cluster]) -> None:
     """Backward cluster: a tag at one address of a common-input cluster is inferred, as a heuristic, at
-    all of them, from the strongest holder; the tag names the co-spend transaction that put the address in
-    the cluster. A coin is never its own source."""
-    for members, joined_by in clusters:
+    the cluster's other addresses, hop by hop from the strongest holder's: each tag names the co-spend
+    transaction of its hop and the coin it was co-spent with, which holds the tag the hop came from (the
+    holder's other coins get it by reuse). So a tag's transactions lead back to the holder."""
+    for members, edges in clusters:
         best: dict[str, tuple[int, bool, tuple[str, int], str]] = {}  # entity -> its best holder
         for a in members:
             for c in state.by_address.get(a, ()):
@@ -270,10 +308,18 @@ def _cluster(state: _State, clusters: list[tuple[list[str], dict[str, str]]]) ->
                     if k not in best or mine < best[k]:
                         best[k] = mine
         for k, holder in sorted(best.items()):
-            for a in members:
-                for c in state.by_address.get(a, ()):
-                    if c != holder[3]:  # a holder whose tag is weaker (reuse) would name itself
-                        state.give(c, k, ("inferred", "cluster_backward", joined_by[a], holder[3], True))
+            root = state.address_of[holder[3]]
+            reached = {root}
+            queue = deque([root])
+            while queue:
+                here = queue.popleft()
+                for txid, there, coin_here, _ in edges[here]:
+                    if there in reached:
+                        continue
+                    reached.add(there)
+                    queue.append(there)
+                    for c in state.by_address[there]:
+                        state.give(c, k, ("inferred", "cluster_backward", txid, coin_here, True))
 
 
 class _State:
@@ -282,11 +328,13 @@ class _State:
         self.removed = removed
         self.owned: set[str] = set()
         self.by_address: dict[str, list[str]] = {}
+        self.address_of: dict[str, str] = {}
         for t in txs:
             for c in (*t.inputs, *t.outputs):
                 if c.owned and c.outpoint not in self.owned:
                     self.owned.add(c.outpoint)
                     self.by_address.setdefault(c.address, []).append(c.outpoint)
+                    self.address_of[c.outpoint] = c.address
         self.changed = True
 
     def give(self, outpoint: str, entity: str, value: _Value) -> None:
@@ -309,11 +357,16 @@ def _stronger(new: _Value, old: _Value) -> bool:
     return rank(new) < rank(old)
 
 
-def _clusters(txs: Sequence[Tx]) -> list[tuple[list[str], dict[str, str]]]:
+type _Edge = tuple[str, str, str, str]  # txid, the other address, the coin here and the coin there
+type _Cluster = tuple[list[str], dict[str, list[_Edge]]]
+
+
+def _clusters(txs: Sequence[Tx]) -> list[_Cluster]:
     """The common-input clusters of the user's addresses (co-spent in a transaction that isn't mixing),
-    each with the transaction that first joined each address to another (by txid order)."""
+    with their co-spend edges: each transaction joins its lowest address to each other one it spends
+    from, through the lowest coin it spends at each. Edges sort by txid, then address."""
     parent: dict[str, str] = {}
-    joined_by: dict[str, str] = {}
+    edges: dict[str, list[_Edge]] = {}
 
     def find(a: str) -> str:
         while parent.setdefault(a, a) != a:
@@ -321,19 +374,23 @@ def _clusters(txs: Sequence[Tx]) -> list[tuple[list[str], dict[str, str]]]:
             a = parent[a]
         return a
 
-    for t in sorted(txs, key=lambda t: t.txid):
-        spent = sorted({i.address for i in t.inputs if i.owned})
-        for a in spent:
-            find(a)
-        if not t.mixing and len(spent) > 1:
-            for a in spent:
-                joined_by.setdefault(a, t.txid)
-            for a in spent[1:]:
-                parent[find(a)] = find(spent[0])
+    for t in txs:
+        if t.mixing:
+            continue
+        at: dict[str, str] = {}
+        for i in sorted((i for i in t.inputs if i.owned), key=lambda i: _key(i.outpoint)):
+            at.setdefault(i.address, i.outpoint)
+        hub, *others = sorted(at) or [""]
+        for a in others:
+            edges.setdefault(hub, []).append((t.txid, a, at[hub], at[a]))
+            edges.setdefault(a, []).append((t.txid, hub, at[a], at[hub]))
+            parent[find(a)] = find(hub)
+    for listed in edges.values():
+        listed.sort()
     groups: dict[str, list[str]] = {}
     for a in sorted(parent):
         groups.setdefault(find(a), []).append(a)
-    return [(g, {a: joined_by[a] for a in g}) for g in groups.values() if len(g) > 1]
+    return [(g, {a: edges[a] for a in g}) for g in groups.values() if len(g) > 1]
 
 
 def _key(outpoint: str) -> tuple[str, int]:
@@ -346,6 +403,8 @@ def _vout(outpoint: str) -> int | None:
     """The vout of a canonical "txid:vout" (ASCII digits, no leading zero), else None."""
     txid, sep, vout = outpoint.rpartition(":")
     if not sep or not txid or not (vout.isascii() and vout.isdigit()) or (len(vout) > 1 and vout[0] == "0"):
+        return None
+    if len(vout) > 10:  # a vout is a 32-bit number; a longer one isn't, and int() has a digit limit
         return None
     return int(vout)
 
@@ -401,15 +460,18 @@ def _check_txs(txs: Sequence[Tx]) -> None:
         if not isinstance(t.inputs, tuple) or not isinstance(t.outputs, tuple):
             raise DoxxError(f"tx {t.txid!r}: its inputs and outputs are tuples")
         _check_coins(t.txid, (*t.inputs, *t.outputs))
-        for o in t.outputs:
-            if o.outpoint.rpartition(":")[0] != t.txid or o.outpoint in outputs:
-                raise DoxxError(f"tx {t.txid!r}: an output's outpoint is its txid:index, once")
+        for index, o in enumerate(t.outputs):
+            if o.outpoint != f"{t.txid}:{index}":
+                raise DoxxError(
+                    f"tx {t.txid!r}: its outputs are every output, each at its index (txid:index)"
+                )
             outputs.add(o.outpoint)
         for c in (*t.inputs, *t.outputs):  # the same coin is the same coin wherever it appears
             if coins.setdefault(c.outpoint, (c.address, c.owned, c.entity)) != (c.address, c.owned, c.entity):
                 raise DoxxError(
                     f"coin {c.outpoint!r}: its address, owner and entity differ between sightings"
                 )
+    _check_owners(txs)
     spent: set[str] = set()
     for t in txs:
         for i in t.inputs:
@@ -433,6 +495,19 @@ def _check_coins(txid: str, coins: Iterable[object]) -> None:
             raise DoxxError(f"tx {txid!r}: a coin says whether it is owned, and its entity is a name or None")
         if c.owned and c.entity is not None:
             raise DoxxError(f"tx {txid!r}: a coin of the user's has no other entity")
+
+
+def _check_owners(txs: Sequence[Tx]) -> None:
+    owners: dict[str, tuple[bool, str | None]] = {}
+    for c in _all(txs):
+        if owners.setdefault(c.address, (c.owned, c.entity)) != (c.owned, c.entity):
+            raise DoxxError(f"address {c.address!r}: its coins name different owners")
+
+
+def _all(txs: Sequence[Tx]) -> Iterable[Coin]:
+    for t in txs:
+        yield from t.inputs
+        yield from t.outputs
 
 
 def _items[T](values: object, kind: type[T], name: str) -> list[T]:

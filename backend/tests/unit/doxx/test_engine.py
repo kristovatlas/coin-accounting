@@ -7,7 +7,18 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from coinacct.doxx.engine import Coin, Doxx, DoxxError, Override, Received, Tag, Tx, Unresolved, doxx
+from coinacct.doxx.engine import (
+    Coin,
+    Doxx,
+    DoxxError,
+    Override,
+    Received,
+    Suggestion,
+    Tag,
+    Tx,
+    Unresolved,
+    doxx,
+)
 
 K = frozenset({"exch", "boss"})  # the parties that know the user's identity
 
@@ -327,6 +338,10 @@ def test_a_long_chain_is_followed_whatever_its_txids_order() -> None:
             "cycle",
         ),
         ([Tx("t", (mine("a:03", "A"),), ())], "its outpoint"),
+        ([Tx("t", (mine("a:" + "1" * 11, "A"),), ())], "its outpoint"),
+        ([Tx("t", (), (mine("t:1", "A"),))], "each at its index"),
+        ([Tx("t", (), (mine("t:1", "A"), mine("t:0", "B")))], "each at its index"),
+        ([Tx("t", (mine("a:0", "A"),), (theirs("t:0", "A", "exch"),))], "different owners"),
         ([Tx("t", (mine("a:\u00b2", "A"),), ())], "its outpoint"),
     ],
 )
@@ -353,4 +368,57 @@ def test_a_coin_with_a_heuristic_reuse_tag_isnt_its_own_cluster_source_t504() ->
     result = {t.outpoint: t for t in doxx(txs, K, [Received("p:0", "exch")]).tags}
     assert all(t.source != t.outpoint for t in result.values())
     assert (result["a1:0"].reason, result["a1:0"].source) == ("address_reuse", "tf:0")
-    assert (result["b:0"].reason, result["b:0"].source) == ("cluster_backward", "a1:0")
+    # b:0's hop is tc, where it was co-spent with a3:0
+    assert (result["b:0"].reason, result["b:0"].source, result["b:0"].txid) == (
+        "cluster_backward",
+        "a3:0",
+        "tc",
+    )
+
+
+def test_paid_to_needs_the_user_to_spend_in_the_transaction_adr0010() -> None:
+    # a withdrawal from exch (exch's inputs, the user's output, exch's change) and someone's batch paying
+    # boss and the user: no paid-to link; the withdrawal is a suggested receipt instead
+    withdrawal = Tx("w", (theirs("x:0", "X", "exch"),), (mine("w:0", "A"), theirs("w:1", "X", "exch")))
+    batch = Tx("b", (theirs("y:0", "Y"),), (theirs("b:0", "Z", "boss"), mine("b:1", "B")))
+    result = doxx([withdrawal, batch], K)
+    assert result.tags == ()
+    assert result.suggested == (Suggestion("w:0", "exch", "w"),)
+
+
+def test_a_recorded_receipt_isnt_suggested_again_t511() -> None:
+    withdrawal = Tx("w", (theirs("x:0", "X", "exch"),), (mine("w:0", "A"),))
+    assert doxx([withdrawal], K, [Received("w:0", "exch")]).suggested == ()
+
+
+def test_a_cluster_tag_names_the_hop_that_links_it_t504() -> None:
+    # co-spends C+D (t1), A+B (t2), then B+C (t3); the holder is at A. D's tag names t1 and the coin at
+    # C it was co-spent with, C's names t3 and the coin at B, B's names t2 and the coin at A
+    txs = [
+        Tx("f", (theirs("e:0", "E"),), tuple(mine(f"f:{i}", a) for i, a in enumerate("ABCDBC"))),
+        Tx("t1", (mine("f:2", "C"), mine("f:3", "D")), (theirs("t1:0", "Y"),)),
+        Tx("t2", (mine("f:0", "A"), mine("f:1", "B")), (theirs("t2:0", "Y"),)),
+        Tx("t3", (mine("f:4", "B"), mine("f:5", "C")), (theirs("t3:0", "Y"),)),
+    ]
+    tags_ = {t.outpoint: t for t in doxx(txs, K, overrides=[Override("f:0", "exch", True)]).tags}
+    assert (tags_["f:1"].txid, tags_["f:1"].source) == ("t2", "f:0")
+    assert (tags_["f:2"].txid, tags_["f:2"].source) == ("t3", "f:4")
+    assert (tags_["f:3"].txid, tags_["f:3"].source) == ("t1", "f:2")
+
+
+def test_a_removal_that_only_weakens_a_tag_is_reported_t511() -> None:
+    # r:0 is received from exch and spent on to t1:0 at C (certain); g:0 is received from exch too and
+    # co-spent with g:1, also at C, so C's coins are inferred by the cluster. Removing (r:0, exch)
+    # leaves t1:0 only the inferred tag: the certain one it lost is reported
+    txs = [
+        Tx("r", (theirs("e:0", "E"),), (mine("r:0", "A"),)),
+        Tx("g", (theirs("e:1", "E"),), (mine("g:0", "G"), mine("g:1", "C"))),
+        Tx("t1", (mine("r:0", "A"),), (mine("t1:0", "C"),)),
+        Tx("t2", (mine("g:0", "G"), mine("g:1", "C")), (theirs("t2:0", "Y"),)),
+    ]
+    received = [Received("r:0", "exch"), Received("g:0", "exch")]
+    result = doxx(txs, K, received, [Override("r:0", "exch", False)])
+    kept = {(t.outpoint, t.entity): t.confidence for t in result.tags}
+    lost = {(t.outpoint, t.entity): t.confidence for t in result.suppressed}
+    assert kept[("t1:0", "exch")] == "inferred"
+    assert lost[("t1:0", "exch")] == "certain"
