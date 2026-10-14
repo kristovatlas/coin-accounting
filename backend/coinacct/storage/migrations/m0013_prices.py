@@ -7,7 +7,8 @@
 - `price_batch` records each refresh or import that wrote prices, in the one transaction that wrote
   them (all or nothing, T-304): when, each source's SHA-256 (a refresh's sources, or an import's
   uploaded file, T-303), the reference rate's last priced day and whether it was stale, and the
-  review flags as JSON. A `clear` batch records the user removing imported prices.
+  review flags as JSON. An import's flags record the prices it replaced, and a `clear` batch, the
+  user removing imported prices, records those it removed, so no price is lost without a trace.
 
 Prices aren't in the change log, whose kinds PLAN §2 lists; each batch is recorded here instead.
 """
@@ -22,10 +23,10 @@ CREATE TABLE price_batch (
     usd_stale INTEGER NOT NULL CHECK (usd_stale IN (0, 1)),
     hashes TEXT NOT NULL CHECK (json_valid(hashes) AND json_type(hashes) = 'object'),
     flags TEXT NOT NULL CHECK (json_valid(flags) AND json_type(flags) = 'object'),
-    CHECK (kind = 'refresh' OR (usd_through IS NULL AND usd_stale = 0 AND flags = '{}')),
+    CHECK (kind = 'refresh' OR (usd_through IS NULL AND usd_stale = 0)),
     -- an import records the uploaded file's SHA-256 (T-303); a clear records none
-    CHECK (kind != 'clear' OR hashes = '{}'),
-    CHECK (kind = 'clear' OR hashes != '{}'),
+    CHECK (kind != 'clear' OR json(hashes) = '{}'),
+    CHECK (kind = 'clear' OR json(hashes) != '{}'),
     -- a refresh whose reference rate priced no day at all is stale (`services.prices`)
     CHECK (kind != 'refresh' OR usd_through IS NOT NULL OR usd_stale = 1)
 ) STRICT;
@@ -48,8 +49,10 @@ CREATE TABLE price (
 -- the user's and outlive every refresh
 CREATE TRIGGER price_comes_from_its_kind_of_batch BEFORE INSERT ON price
 WHEN (NEW.method = 'import') != ((SELECT kind FROM price_batch WHERE id = NEW.batch_id) = 'import')
+    OR (SELECT kind FROM price_batch WHERE id = NEW.batch_id) = 'clear'
 BEGIN SELECT RAISE(ABORT, 'a price comes from the kind of batch its method says'); END;
 CREATE TRIGGER price_keeps_its_kind_of_batch BEFORE UPDATE OF method, batch_id ON price
 WHEN (NEW.method = 'import') != ((SELECT kind FROM price_batch WHERE id = NEW.batch_id) = 'import')
+    OR (SELECT kind FROM price_batch WHERE id = NEW.batch_id) = 'clear'
 BEGIN SELECT RAISE(ABORT, 'a price comes from the kind of batch its method says'); END;
 """

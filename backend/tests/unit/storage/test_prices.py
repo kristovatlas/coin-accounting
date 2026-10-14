@@ -35,7 +35,7 @@ def conn(tmp_path: Path) -> Iterator[sqlite3.Connection]:
 
 
 def p(
-    day: str, price: str, currency: str = "USD", method: Any = "reference", source: str = "coinmetrics"
+    day: str, price: str, currency: Any = "USD", method: Any = "reference", source: str = "coinmetrics"
 ) -> pr.Price:
     return pr.Price(date.fromisoformat(day), currency, D(price), method, source)
 
@@ -181,6 +181,9 @@ def test_the_schema_refuses_what_the_module_would(conn: sqlite3.Connection, sql:
         'UPDATE price_batch SET hashes = \'{"coinmetrics": "x"}\'',
         "UPDATE price_batch SET at = '2026-10-14T17:00:00+05:00'",  # not as the module writes it
         "UPDATE price_batch SET usd_through = '2008-01-01'",
+        "UPDATE price_batch SET usd_through = '20250102'",  # another ISO form, never the module's
+        "UPDATE price_batch SET hashes = '{}'",  # a refresh without its hashes
+        "UPDATE price SET day = '20250101'",
         "UPDATE price SET method = 'fx'",  # a USD price converted
     ],
 )
@@ -236,11 +239,11 @@ def test_clearing_an_import_lets_the_next_refresh_fill_the_day_again(conn: sqlit
 
 def test_the_fetch_start_never_depends_on_imported_prices_t301(conn: sqlite3.Connection) -> None:
     assert pr.fetched_through(conn) is None
-    refresh(conn, p("2025-01-01", "93000.12"))
-    pr.store_import(
-        conn, [p("2025-06-01", "1.00", method="import", source="csv-import")], file_hash=HASH, at=AT
-    )
-    assert pr.fetched_through(conn) == date(2025, 1, 1)
+    refresh(conn, p("2025-01-01", "93000.12"), usd_through=date(2025, 1, 1))
+    for day in ("2025-01-01", "2025-06-01"):  # over the last fetched day, and after it
+        imp = [p(day, "1.00", method="import", source="csv-import")]
+        pr.store_import(conn, imp, file_hash=HASH, at=AT)
+        assert pr.fetched_through(conn) == date(2025, 1, 1)
 
 
 def test_a_batchs_time_is_stored_in_utc(conn: sqlite3.Connection) -> None:
@@ -298,3 +301,117 @@ def test_a_refresh_with_no_reference_day_is_recorded_stale(conn: sqlite3.Connect
     refresh(conn, p("2025-01-01", "93000.12"), usd_through=None, usd_stale=True)
     last = pr.last_refresh(conn)
     assert last is not None and (last.usd_through, last.usd_stale) == (None, True)
+
+
+def test_an_import_and_a_clear_record_what_they_replaced_and_removed(conn: sqlite3.Connection) -> None:
+    fetched = refresh(conn, p("2025-01-01", "93000.12"))
+    first = pr.store_import(
+        conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT
+    )
+    second = pr.store_import(
+        conn, [p("2025-01-01", "2.00", method="import", source="csv")], file_hash=HASH, at=AT
+    )
+    cleared = pr.clear_import(conn, [date(2025, 1, 1)], "USD", at=AT)
+    row = {"day": "2025-01-01", "currency": "USD"}
+    first_b, second_b, cleared_b = (pr.batch(conn, b) for b in (first, second, cleared))
+    assert first_b is not None and first_b.flags == {
+        "replaced": [
+            row | {"price": "93000.12", "method": "reference", "source": "coinmetrics", "batch": fetched}
+        ]
+    }
+    assert second_b is not None and second_b.flags == {
+        "replaced": [row | {"price": "1.00", "method": "import", "source": "csv", "batch": first}]
+    }
+    assert cleared_b is not None and cleared_b.flags == {
+        "currency": "USD",
+        "removed": [row | {"price": "2.00", "method": "import", "source": "csv", "batch": second}],
+    }
+
+
+def test_each_price_names_the_batch_that_wrote_it_t303(conn: sqlite3.Connection) -> None:
+    fetched = refresh(conn, p("2025-01-01", "93000.12"))
+    imported = pr.store_import(
+        conn, [p("2025-01-02", "1.00", method="import", source="csv")], file_hash=HASH, at=AT
+    )
+    assert [x.batch for x in pr.prices(conn, "USD")] == [fetched, imported]
+    stored = pr.price_on(conn, date(2025, 1, 2), "USD")
+    assert stored is not None and stored.batch == imported
+    b = pr.batch(conn, imported)
+    assert b is not None and b.hashes == {"upload": HASH}
+    assert pr.batch(conn, 999) is None
+
+
+def test_clearing_one_currency_leaves_the_others(conn: sqlite3.Connection) -> None:
+    usd = p("2025-01-01", "1.00", method="import", source="csv")
+    eur = p("2025-01-01", "2.00", "EUR", "import", "csv")
+    pr.store_import(conn, [usd, eur], file_hash=HASH, at=AT)
+    pr.clear_import(conn, [date(2025, 1, 1)], "EUR", at=AT)
+    assert pr.prices(conn, "USD") == [usd]
+    assert pr.prices(conn, "EUR") == []
+
+
+@pytest.mark.parametrize(
+    "days", [[datetime(2025, 1, 1, tzinfo=UTC)], [date(2025, 1, 1), "2025-01-02"], "2025-01-01"]
+)
+def test_clearing_refuses_anything_but_days(conn: sqlite3.Connection, days: Any) -> None:
+    with pytest.raises(pr.PriceStoreError):
+        pr.clear_import(conn, days, "USD", at=AT)
+    with pytest.raises(pr.PriceStoreError):
+        pr.clear_import(conn, [date(2025, 1, 1)], "JPY", at=AT)
+
+
+def test_a_price_is_asked_for_by_a_day_not_a_moment(conn: sqlite3.Connection) -> None:
+    with pytest.raises(pr.PriceStoreError):
+        pr.price_on(conn, datetime(2025, 1, 1, tzinfo=UTC), "USD")
+
+
+def test_no_price_comes_from_a_clear_batch(conn: sqlite3.Connection) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    cleared = pr.clear_import(conn, [date(2025, 1, 1)], "USD", at=AT)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO price VALUES ('2025-01-02', 'USD', '1.50', 'reference', 's', ?)", (cleared,)
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE price SET batch_id = ?", (cleared,))
+    conn.execute(
+        "DROP TRIGGER price_keeps_its_kind_of_batch"
+    )  # damage that bypasses the module and the schema
+    conn.execute("UPDATE price SET batch_id = ?", (cleared,))
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.prices(conn, "USD")
+
+
+def test_an_empty_hash_object_is_refused_however_spelled(conn: sqlite3.Connection) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO price_batch (at, kind, usd_through, usd_stale, hashes, flags)"
+            " VALUES ('2026-10-14T12:00:00+00:00', 'refresh', '2025-01-01', 0, '{ }', '{}')"
+        )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "UPDATE price_batch SET at = 'not a moment at all!'",
+        'UPDATE price_batch SET hashes = \'{"coinmetrics": "x"}\'',
+    ],
+)
+def test_a_price_whose_batch_is_damaged_is_refused_t408(conn: sqlite3.Connection, damage: str) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    conn.execute("PRAGMA ignore_check_constraints = ON")  # damage that bypasses the module and the schema
+    conn.execute(damage)
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.prices(conn, "USD")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.price_on(conn, date(2025, 1, 1), "USD")
+
+
+def test_a_price_whose_batch_is_gone_is_refused_not_hidden_t408(conn: sqlite3.Connection) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    conn.execute("PRAGMA foreign_keys = OFF")  # damage that bypasses the module and the schema
+    conn.execute("DELETE FROM price_batch")
+    conn.execute("PRAGMA foreign_keys = ON")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.prices(conn, "USD")
