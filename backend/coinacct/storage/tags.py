@@ -4,7 +4,8 @@ THREAT_MODEL T-408, T-504).
 Each change is written together with a `change_log` row, in one transaction, so the log can't miss
 an edit or record one that didn't happen. The log is append-only: the schema refuses any update or
 delete (`migrations/m0006_tags`) and any insert that would replace a row or take an id below 1
-(`m0007_change_log_ids`, `m0008_change_log_positive_ids`, `m0009_change_log_no_replace`).
+(`m0007_change_log_ids`, `m0008_change_log_positive_ids`, `m0009_change_log_no_replace`). Each row
+names what made the change (`m0010_change_log_origin`); `heuristic` only on a mixing flag.
 
 An address text passed in must already be checked against the script and the chain (`services.tags`
 does it); this module only refuses private keys, whoever calls.
@@ -27,7 +28,7 @@ from typing import Any
 from coinacct.domain.chain import is_hash
 from coinacct.domain.keys import refuse_private
 from coinacct.storage.accounts import AccountsError
-from coinacct.storage.change_log import address_state, append
+from coinacct.storage.change_log import Origin, address_state, append
 from coinacct.storage.db import transaction
 
 
@@ -39,6 +40,7 @@ class Change:
     subject: str
     before: dict[str, Any] | None
     after: dict[str, Any]
+    origin: Origin | None  # what made the change (m0010); None for rows logged before it was recorded
 
 
 def tag_address(  # noqa: PLR0913 - the address, its owner and account, label, clients and the time
@@ -96,7 +98,7 @@ def tag_address(  # noqa: PLR0913 - the address, its owner and account, label, c
                 "INSERT INTO address_client (script_hex, client_id) VALUES (?, ?)",
                 [(script_hex, c) for c in clients],
             )
-            append(conn, at, ("address_tag", script_hex, before, after))
+            append(conn, at, ("address_tag", script_hex, before, after), "user")
     except sqlite3.IntegrityError:
         raise AccountsError(
             "that tag (an unknown owner, account or client; the user's address needs one self-custody"
@@ -120,7 +122,7 @@ def set_mixing(conn: sqlite3.Connection, txid: str, mixing: bool, *, at: str) ->
             " ON CONFLICT (txid) DO UPDATE SET mixing = excluded.mixing, source = 'user'",
             (txid, int(mixing)),
         )
-        append(conn, at, ("tx_flag", txid, before, after))
+        append(conn, at, ("tx_flag", txid, before, after), "user")
 
 
 def mixing(conn: sqlite3.Connection, txid: str) -> bool | None:
@@ -132,9 +134,10 @@ def mixing(conn: sqlite3.Connection, txid: str) -> bool | None:
 def changes(conn: sqlite3.Connection, of: tuple[str, str] | None = None) -> list[Change]:
     """The change log, oldest first; or one `(kind, subject)`'s. The kind matters: a 32-byte script
     and a txid look alike."""
-    sql = "SELECT id, at, kind, subject, before, after FROM change_log"
+    sql = "SELECT id, at, kind, subject, before, after, origin FROM change_log"
     where = "" if of is None else " WHERE kind = ? AND subject = ?"
     rows = conn.execute(sql + where + " ORDER BY id", () if of is None else of).fetchall()
     return [
-        Change(i, a, k, s, None if b is None else json.loads(b), json.loads(af)) for i, a, k, s, b, af in rows
+        Change(i, a, k, s, None if b is None else json.loads(b), json.loads(af), o)
+        for i, a, k, s, b, af, o in rows
     ]

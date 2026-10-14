@@ -205,6 +205,104 @@ def test_a_late_transfers_fee_is_figured_on_the_replays_lot(treatment: engine.Fe
         assert [(a.lot, a.sats, a.basis, a.proceeds) for a in fees] == [("b2", 2, D("0.40"), D("10.00"))]
 
 
+def test_the_same_coins_moved_in_other_amounts_are_the_same_lot_adr0040() -> None:
+    # b1 is 10 sats with $0.01 of basis. The deposit late-chooses 5 of b1 and 5 of b2: the user's
+    # b1@d gets half a cent, rounded to $0.00; the replay moves all of b1 ($0.01). s1 sells b2@d on
+    # time, which the replay doesn't hold, so it sells 5 of its b1@d by FIFO. Both runs then hold 5
+    # sats of b1@d, the same coins of b1 moved by d, with $0.00 and $0.01. s2's late choice of b1@d
+    # is the replay's FIFO too: not warned (ADR 0040: the lots are the same; the cent is d's, which is
+    # warned about)
+    on1, on2, on3 = date(2025, 3, 1), date(2025, 3, 2), date(2025, 3, 3)
+    events: list[Event] = [
+        Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("0.01")),
+        Acquisition("b2", "w", date(2024, 1, 2), "buy", 10, D("0.02")),
+        Transfer("d", "w", "x", on1, noon(on1), "deposit", 10,
+                 picks=(Pick("b1", 5), Pick("b2", 5)), identified_at=LATE),
+        Disposal("s1", "x", on2, noon(on2), "sell", 5, D("5.00"), (Pick("b2@d", 5),), noon(on1)),
+        Disposal("s2", "x", on3, noon(on3), "sell", 5, D("5.00"), (Pick("b1@d", 5),), LATE),
+    ]  # fmt: skip
+    result = run(events)
+    assert [w.disposal for w in result.late] == ["d"]
+    assert [(a.lot, a.basis) for a in result.allocations] == [("b2@d", D("0.01")), ("b1@d", D("0.00"))]
+
+
+def _pick(id: str, day: int, sats: int, picks: tuple[Pick, ...]) -> Disposal:
+    on = date(2025, 3, day)
+    return Disposal(id, "w", on, noon(on), "sell", sats, D("5.00"), picks, LATE)
+
+
+def test_a_lot_whose_remainder_differs_only_by_rounding_is_not_warned_adr0040() -> None:
+    # b1 is 10 sats with $0.03. s1 late-picks 3 of b1 and 2 of b2: the real b1 keeps 7 sats and $0.02,
+    # the replay's (FIFO took 5, $0.015 rounded to $0.02) 5 sats and $0.01. s2 late-picks 2 of b1, which
+    # is the replay's FIFO too: the same lot, so no warning, though a share of each remainder would
+    # differ by a cent
+    events: list[Event] = [
+        Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("0.03")),
+        Acquisition("b2", "w", date(2024, 1, 2), "buy", 10, D("0.04")),
+        _pick("s1", 1, 5, (Pick("b1", 3), Pick("b2", 2))),
+        _pick("s2", 2, 2, (Pick("b1", 2),)),
+    ]
+    assert [w.disposal for w in run(events).late] == ["s1"]
+
+
+def test_a_lot_used_differently_before_is_still_the_same_lot() -> None:
+    # b0 is 1 sat, b1 10 sats with $0.05. s1 late-picks 3 of b1: the real b1 keeps 7 sats and $0.03,
+    # the replay's (FIFO took b0 and 2 of b1) 8 sats and $0.04. s2 late-picks 7 of b1, the replay's
+    # FIFO too: not warned
+    events: list[Event] = [
+        Acquisition("b0", "w", date(2024, 1, 1), "buy", 1, D("0.00")),
+        Acquisition("b1", "w", date(2024, 1, 2), "buy", 10, D("0.05")),
+        _pick("s1", 1, 3, (Pick("b1", 3),)),
+        _pick("s2", 2, 7, (Pick("b1", 7),)),
+    ]
+    assert [w.disposal for w in run(events).late] == ["s1"]
+
+
+def test_a_lot_moved_the_same_way_in_both_runs_is_the_same_lot_after_the_move() -> None:
+    # b1 is 10 sats with $0.05. s1 late-picks 3 of b1 and 2 of b2: the real b1 keeps 7 sats and $0.03,
+    # the replay's (FIFO took 5) 5 sats and $0.03. The deposit then moves 5 of b1 on time in both runs:
+    # the real b1@d gets $0.02, the replay's $0.03, a cent inherited from s1. s2 late-picks those 5
+    # sats of b1@d, the replay's FIFO too: the same coins by the same move, so not warned
+    on = date(2025, 3, 2)
+    events: list[Event] = [
+        Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("0.05")),
+        Acquisition("b2", "w", date(2024, 1, 2), "buy", 10, D("0.04")),
+        _pick("s1", 1, 5, (Pick("b1", 3), Pick("b2", 2))),
+        Transfer("d", "w", "x", on, noon(on), "deposit", 5, picks=(Pick("b1", 5),), identified_at=noon(on)),
+        Disposal("s2", "x", date(2025, 3, 3), noon(date(2025, 3, 3)), "sell", 5, D("5.00"),
+                 (Pick("b1@d", 5),), LATE),
+    ]  # fmt: skip
+    result = run(events)
+    assert [w.disposal for w in result.late] == ["s1"]
+    assert [(a.lot, a.basis) for a in result.allocations if a.disposal == "s2"] == [("b1@d", D("0.02"))]
+
+
+def test_the_replay_follows_an_on_time_choice_of_the_same_coins_moved_in_other_amounts() -> None:
+    # x holds b0 (5 sats, the oldest). The late deposit d moves 5 of b1 and 5 of b2 to x; the replay
+    # moves 10 of b1. s1 sells 5 of b1@d on time: the replay holds 10 sats of those same coins, so it
+    # follows (ADR 0040). s2 late-picks b0, which is the replay's FIFO next as well: not warned
+    d1, d2, d3 = date(2025, 3, 1), date(2025, 3, 2), date(2025, 3, 3)
+    events: list[Event] = [
+        Acquisition("b0", "x", date(2023, 1, 1), "buy", 5, D("0.50")),
+        Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("1.00")),
+        Acquisition("b2", "w", date(2024, 1, 2), "buy", 10, D("2.00")),
+        Transfer("d", "w", "x", d1, noon(d1), "deposit", 10,
+                 picks=(Pick("b1", 5), Pick("b2", 5)), identified_at=LATE),
+        Disposal("s1", "x", d2, noon(d2), "sell", 5, D("5.00"), (Pick("b1@d", 5),), noon(d1)),
+        Disposal("s2", "x", d3, noon(d3), "sell", 5, D("5.00"), (Pick("b0", 5),), LATE),
+    ]  # fmt: skip
+    result = run(events)
+    assert [w.disposal for w in result.late] == ["d"]
+
+
+def test_the_replay_follows_an_on_time_choice_it_can_hold() -> None:
+    # s1 chooses b3 on time, and the replay follows it. s2 then chooses b2 late: the replay's FIFO is
+    # b1, so s2 is warned with b1's figures (were the replay to use FIFO for s1, it would hold b2 and
+    # b3, and s2 would match it)
+    result = run([*THREE, sale("s1", 1, "b3", ONTIME), sale("s2", 2, "b2")])
+    assert result.late == (LateIdentification("s2", LATE, (fifo("s2", 2, "b1", "1.00", 1),)),)
+
+
 def test_without_late_choices_the_replay_changes_nothing() -> None:
     events: list[Event] = [*THREE, sale("s1", 1, "b3", ONTIME), sale("s2", 2, "b1", ONTIME)]
     result = run(events)

@@ -534,6 +534,11 @@ class _Engine:
             judge = self._shadow if self._shadow is not None else self  # these lots once it has stopped
             # the same sats as the real run (_follow checks it), so never short: valid picks cover them
             standing, _ = judge._standing(e.account, e.sats)
+            # the same lots means the same coins: a lot id names a purchase and the transfers that
+            # moved it (lot@transfer), so equal ids and sats are the same coins in both runs, even when
+            # their basis differs by the rounding an earlier late choice left behind, or by how much of
+            # the source moved with them. That difference is the earlier choice's, already warned
+            # about; the warning shows the replay's own figures (ADR 0040, its "Lot ids" bullet)
             if _merged(picks) != _merged(standing):
                 return picks, 0, _Late(judge, tuple(standing), judge is not self)
         return picks, 0, None
