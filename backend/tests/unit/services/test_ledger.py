@@ -13,7 +13,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from coinacct.services.ledger import Ledger, engine_events, standing_methods
+from coinacct.services.imports import ImportRefused
+from coinacct.services.ledger import Ledger, automatic_accounts, engine_events, standing_methods
 from coinacct.storage import accounts as ac
 from coinacct.storage import events as ev
 from coinacct.storage import settings
@@ -150,3 +151,20 @@ def test_engine_events_drops_a_choice_on_an_automatic_account() -> None:
     (auto,) = engine_events([sale], chosen, NEW_YORK, frozenset({7}))
     assert isinstance(manual, Disposal) and isinstance(auto, Disposal)
     assert (manual.picks, auto.picks, auto.identified_at) == ((Pick("1", 1_000),), None, None)
+
+
+def test_automatic_mode_over_specific_identification_keeps_the_choices() -> None:
+    accounts = [
+        ac.TaxAccount(1, "a", "custodial", 2, "fifo", True, True),
+        ac.TaxAccount(2, "b", "custodial", 2, "specific", True, True),  # nothing to select automatically
+        ac.TaxAccount(3, "c", "self_custody", None, None, True, False),
+        ac.TaxAccount(4, "d", "custodial", 2, "fifo", False, True),
+    ]
+    assert automatic_accounts(accounts) == {1, 3}
+
+
+def test_a_damaged_time_zone_keeps_its_remedy(db: tuple[sqlite3.Connection, Ledger]) -> None:
+    conn, ledger = db
+    conn.execute("INSERT INTO setting (key, value) VALUES ('time_zone', 'Not/A_Zone')")
+    with pytest.raises(ImportRefused, match="set the time zone again"):
+        ledger.run()

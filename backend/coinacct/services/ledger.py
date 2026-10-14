@@ -25,7 +25,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from coinacct.services.imports import db_errors
+from coinacct.services.imports import ImportRefused, db_errors
 from coinacct.storage import accounts, events, settings
 from coinacct.storage.db import Connection
 from coinacct.storage.events import ACQUISITIONS, DISPOSALS, Choice, Stored
@@ -86,6 +86,13 @@ def engine_events(
     return out
 
 
+def automatic_accounts(tax_accounts: Sequence[accounts.TaxAccount]) -> frozenset[int]:
+    """The accounts whose lots the standing method selects automatically (ADR 0021 §1): automatic mode
+    with a standing order of FIFO, or none (the FIFO fallback). Automatic mode over a standing order
+    of specific identification selects nothing by itself, so the stored choices stand there."""
+    return frozenset(a.id for a in tax_accounts if a.automatic and a.standing_method in ("fifo", None))
+
+
 def standing_methods(tax_accounts: Sequence[accounts.TaxAccount]) -> dict[str, Method]:
     """The engine's standing method of each account that has a FIFO order on file."""
     return {str(a.id): "fifo" for a in tax_accounts if a.standing_method == "fifo"}
@@ -107,8 +114,11 @@ class Ledger:
                 chosen = events.identifications(reader)
                 tax_accounts = accounts.tax_accounts(reader)
                 methods = standing_methods(tax_accounts)
-                automatic = frozenset(a.id for a in tax_accounts if a.automatic)
-                zone = settings.time_zone(reader)
+                automatic = automatic_accounts(tax_accounts)
+                try:
+                    zone = settings.time_zone(reader)
+                except settings.SettingsError as e:  # its fixed message names the remedy (T-408)
+                    raise ImportRefused(str(e)) from None
                 reader.execute("COMMIT")
             finally:
                 reader.close()
