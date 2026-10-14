@@ -11,6 +11,9 @@ T-408, T-501, T-508).
   come in later steps.
 - `identification` holds a disposal's or movement's chosen lots, in order: the engine's lot id, the sats,
   and when the user chose them (T-508). A chosen set is replaced whole, by the app, with a change-log row.
+  Triggers keep it on a disposal or movement whose sats cover it, through inserts and edits alike. Event
+  ids are never reused (`AUTOINCREMENT`), so a choice naming a removed event's lot can't come to name
+  another's: the engine refuses it instead.
 - The change log gains the kind `event` (and `identification`), so every edit to them is logged (T-408).
   SQLite can't change a CHECK in place, so the log is rebuilt as SQLite documents: a new table with the
   same columns and every rule of the old one, the rows copied with their ids, the old one dropped, the
@@ -68,7 +71,9 @@ WHEN NEW.origin IS NULL
 BEGIN SELECT RAISE(ABORT, 'a change-log row names its origin'); END;
 
 CREATE TABLE event (
-    id INTEGER PRIMARY KEY,
+    -- AUTOINCREMENT: a removed event's id is never given to another, so a choice of lots that named it
+    -- can't come to name a different purchase (https://www.sqlite.org/autoinc.html)
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL CHECK (kind IN (
         'buy', 'p2p_buy', 'income', 'gift_in', 'inherit',
         'self_transfer', 'deposit', 'withdrawal',
@@ -108,8 +113,13 @@ CREATE TABLE event (
     -- only a withdrawal names the basis of sats its account has no lots for, and then both parts
     CHECK (kind = 'withdrawal' OR (missing_basis IS NULL AND missing_acquired IS NULL)),
     CHECK ((missing_basis IS NULL) = (missing_acquired IS NULL)),
-    -- a fee is borne by a movement or a disposal
-    CHECK (fee_sats = 0 OR kind IN ('self_transfer', 'deposit', 'withdrawal', 'sell', 'spend', 'gift_out'))
+    -- a fee is borne by a movement, a disposal, or a buy whose fee was withheld from the sats bought
+    -- (ADR 0043: the lot holds the sats credited, its basis the full cash paid)
+    CHECK (
+        fee_sats = 0 OR kind IN ('buy', 'self_transfer', 'deposit', 'withdrawal', 'sell', 'spend', 'gift_out')
+    ),
+    -- a gift given has no proceeds (ADR 0009)
+    CHECK (kind != 'gift_out' OR usd = '0.00')
 ) STRICT;
 CREATE INDEX event_by_moment ON event (at, id);
 
@@ -118,7 +128,15 @@ CREATE TABLE identification (
     position INTEGER NOT NULL CHECK (position >= 0),
     lot TEXT NOT NULL CHECK (length(lot) BETWEEN 1 AND 400),
     sats INTEGER NOT NULL CHECK (sats BETWEEN 1 AND 2100000000000000),
-    identified_at TEXT NOT NULL CHECK (length(identified_at) BETWEEN 20 AND 40),
+    -- PLAN §2's method and late flag: a stored choice is always the user's specific one (the standing
+    -- order and the FIFO fallback apply where none is stored); `late` is the engine's judgment, kept
+    -- for the audit trail once services record it (0 until then)
+    method TEXT NOT NULL DEFAULT 'specific' CHECK (method IN ('specific', 'standing_order', 'fifo_default')),
+    late INTEGER NOT NULL DEFAULT 0 CHECK (late IN (0, 1)),
+    identified_at TEXT NOT NULL CHECK (
+        length(identified_at) BETWEEN 20 AND 40
+        AND identified_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*'
+    ),
     PRIMARY KEY (event_id, position)
 ) STRICT, WITHOUT ROWID;
 CREATE TRIGGER identification_of_a_disposal_or_movement BEFORE INSERT ON identification
@@ -126,4 +144,16 @@ WHEN (SELECT kind FROM event WHERE id = NEW.event_id) NOT IN (
     'self_transfer', 'deposit', 'withdrawal', 'sell', 'spend', 'gift_out'
 )
 BEGIN SELECT RAISE(ABORT, 'only a disposal or a movement chooses lots'); END;
+CREATE TRIGGER identification_stays_on_a_disposal_or_movement BEFORE UPDATE ON identification
+WHEN (SELECT kind FROM event WHERE id = NEW.event_id) NOT IN (
+    'self_transfer', 'deposit', 'withdrawal', 'sell', 'spend', 'gift_out'
+)
+BEGIN SELECT RAISE(ABORT, 'only a disposal or a movement chooses lots'); END;
+CREATE TRIGGER event_with_chosen_lots_stays_a_disposal_or_movement BEFORE UPDATE OF kind ON event
+WHEN NEW.kind NOT IN ('self_transfer', 'deposit', 'withdrawal', 'sell', 'spend', 'gift_out')
+    AND EXISTS (SELECT 1 FROM identification WHERE event_id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'only a disposal or a movement chooses lots'); END;
+CREATE TRIGGER event_keeps_the_sats_its_lots_were_chosen_for BEFORE UPDATE OF sats ON event
+WHEN NEW.sats < (SELECT coalesce(sum(sats), 0) FROM identification WHERE event_id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'the chosen lots hold more sats than the event'); END;
 """

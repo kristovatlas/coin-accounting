@@ -11,17 +11,25 @@ a gift without its donor's date).
 - `add_event`, `update_event` and `remove_event` keep an event; a removed event's identification goes
   with it, both logged.
 - `identify` replaces an event's chosen lots whole (an empty choice removes it), with when the user chose
-  them (T-508).
+  them (T-508). A choice is checked as the engine takes it: the event's sats exactly, or a movement's less
+  its fee (ADR 0043), each lot once, never on a withdrawal with sats its account has no lots for. The
+  engine's ids are the events' own ids as text, so a lot an event made is named by that id, or by it and
+  `@…` once moved; an event other choices name can't be removed, or have its account, kind or sats
+  changed, until they change.
+- `identification`'s method is always the user's specific choice: an event without one uses the standing
+  method, or the FIFO fallback, which the engine tells apart (PLAN §2's `standing_order | fifo_default`
+  are derived, not stored).
 - `events` and `identification` read them back, events in the order of their moments.
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final, Literal
 
@@ -47,6 +55,10 @@ type EventKind = Literal[
 ACQUISITIONS: Final = frozenset({"buy", "p2p_buy", "income", "gift_in", "inherit"})
 MOVEMENTS: Final = frozenset({"self_transfer", "deposit", "withdrawal"})
 DISPOSALS: Final = frozenset({"sell", "spend", "gift_out"})
+GENESIS: Final = date(2009, 1, 3)  # no bitcoin was acquired before the genesis block
+MAX_LOT: Final = 400  # a lot id's length
+# the engine's lot ids: event ids and its separators (lot@transfer, lot@tx#vout, @@unrecorded, @@placeholder)
+_LOT: Final = re.compile(r"[0-9A-Za-z_.:@#-]+", re.ASCII)
 _COLUMNS: Final = (
     "kind, tax_account_id, to_account_id, at, sats, fee_sats, usd, valuation_source, txid, fmv,"
     " donor_acquired, donor_always_long, missing_basis, missing_acquired, note"
@@ -63,6 +75,10 @@ class EventError(ValueError):
     """An event or identification the user DB can't hold. The message names the field, never a value."""
 
 
+class EventNotFound(EventError):
+    """No stored event has that id."""
+
+
 @dataclass(frozen=True, slots=True)
 class Event:
     """An event as the user entered it. `usd` is an acquisition's basis or FMV (None: a gift's unknown
@@ -74,7 +90,7 @@ class Event:
     sats: int
     usd: Decimal | None = None
     to: int | None = None  # a movement's destination account
-    fee_sats: int = 0
+    fee_sats: int = 0  # a buy's: withheld from the sats bought (ADR 0043)
     valuation_source: str | None = None
     txid: str | None = None
     fmv: Decimal | None = None  # gift_in: the FMV at the gift
@@ -112,20 +128,31 @@ def add_event(conn: sqlite3.Connection, event: Event, *, at: str, origin: Origin
 def update_event(
     conn: sqlite3.Connection, event_id: int, event: Event, *, at: str, origin: Origin = "user"
 ) -> None:
-    """Replace stored event `event_id` with `event`. The same values again are not logged."""
+    """Replace stored event `event_id` with `event`. The same values again are not logged. An edit its
+    choice of lots no longer fits, or one that changes the account, kind or sats of a purchase other
+    events' choices name, is refused: change those choices first."""
     row = _row(_checked(event))
     with _refusals(), transaction(conn):
         before = _read(conn, event_id)
         if before == event:
             return
+        chosen, _ = identification(conn, event_id)
+        if chosen:
+            _check_choice(event, chosen)
+        moves_its_lots = (event.kind, event.account, event.sats) != (before.kind, before.account, before.sats)
+        if moves_its_lots and _named_by_others(conn, event_id):
+            raise EventError("other events' choices name this event's lots: change them first")
         conn.execute(_UPDATE, (*row, event_id))
         append(conn, at, ("event", str(event_id), _state(before), _state(event)), origin)
 
 
 def remove_event(conn: sqlite3.Connection, event_id: int, *, at: str, origin: Origin = "user") -> None:
-    """Remove stored event `event_id`, and its identification first, each logged."""
+    """Remove stored event `event_id`, and its identification first, each logged; refused while other
+    events' choices name its lots."""
     with _refusals(), transaction(conn):
         before = _read(conn, event_id)
+        if _named_by_others(conn, event_id):
+            raise EventError("other events' choices name this event's lots: change them first")
         _replace_choice(conn, event_id, (), None, at=at, origin=origin)
         conn.execute("DELETE FROM event WHERE id = ?", (event_id,))
         append(conn, at, ("event", str(event_id), _state(before), None), origin)
@@ -141,23 +168,51 @@ def identify(  # noqa: PLR0913 - the event, its choices, when they were made, an
     origin: Origin = "user",
 ) -> None:
     """The user's choice of lots for disposal or movement `event_id`, in order, made at `identified_at`
-    (timezone-aware UTC); an empty choice removes it (the standing method then applies)."""
+    (timezone-aware UTC, no later than `at`, when it is recorded); an empty choice removes it (the
+    standing method then applies). A choice covers the event's sats, or a movement's sats less its fee
+    (the fee then takes the standing method's next sats, ADR 0043), each lot once."""
     if not isinstance(choices, tuple) or not all(isinstance(c, Choice) for c in choices):
         raise EventError("a choice is a tuple of Choices")
     for c in choices:
-        if not isinstance(c.lot, str) or not 1 <= len(c.lot) <= 400:
-            raise EventError("a choice names a lot")
+        if not isinstance(c.lot, str) or not 1 <= len(c.lot) <= MAX_LOT or _LOT.fullmatch(c.lot) is None:
+            raise EventError("a choice names a lot by the engine's id")
+        refuse_private(c.lot)  # no key in any text the DB keeps (T-703)
         _check_sats(c.sats, "a choice's sats")
+    if len({c.lot for c in choices}) != len(choices):
+        raise EventError("a choice names each lot once")
     if choices and identified_at is None:
         raise EventError("a choice of lots names when it was made")
     stamp = None if identified_at is None else _moment(identified_at, "when the lots were chosen")
+    if identified_at is not None and identified_at > datetime.fromisoformat(at):
+        raise EventError("lots can't be chosen later than the choice is recorded")
     with _refusals(), transaction(conn):
         event = _read(conn, event_id)
-        if choices and event.kind not in MOVEMENTS | DISPOSALS:
-            raise EventError("only a disposal or a movement chooses lots")
-        if choices and sum(c.sats for c in choices) > event.sats:
-            raise EventError("the chosen lots hold more sats than the event")
+        if choices:
+            _check_choice(event, choices)
         _replace_choice(conn, event_id, choices, stamp, at=at, origin=origin)
+
+
+def _check_choice(event: Event, choices: tuple[Choice, ...]) -> None:
+    """A choice of lots fits `event` as the engine takes it (`tax.engine`'s picks)."""
+    if event.kind not in MOVEMENTS | DISPOSALS:
+        raise EventError("only a disposal or a movement chooses lots")
+    if event.missing_basis is not None:
+        raise EventError("a withdrawal with sats its account has no lots for chooses no lots")
+    total = sum(c.sats for c in choices)
+    arriving = event.kind in MOVEMENTS and event.fee_sats and total == event.sats - event.fee_sats
+    if total != event.sats and not arriving:
+        raise EventError("the chosen lots cover the event's sats (a movement's: or those less its fee)")
+
+
+def _named_by_others(conn: sqlite3.Connection, event_id: int) -> bool:
+    """Whether another event's choice names a lot `event_id` made: its id, or a part of it moved on
+    (`<id>@…`), as `services/` names the engine's lots."""
+    name = str(event_id)
+    row = conn.execute(
+        "SELECT 1 FROM identification WHERE event_id != ? AND (lot = ? OR substr(lot, 1, ?) = ?) LIMIT 1",
+        (event_id, name, len(name) + 1, f"{name}@"),
+    ).fetchone()
+    return row is not None
 
 
 def events(conn: sqlite3.Connection) -> list[Stored]:
@@ -189,6 +244,16 @@ def _refusals() -> Iterator[None]:
         ) from None
 
 
+def identifications(conn: sqlite3.Connection) -> dict[int, tuple[tuple[Choice, ...], datetime]]:
+    """Every stored choice of lots, by event id, in one query: its lots in order, and when it was made."""
+    out: dict[int, tuple[list[Choice], datetime]] = {}
+    for event_id, lot, sats, chosen_at in conn.execute(
+        "SELECT event_id, lot, sats, identified_at FROM identification ORDER BY event_id, position"
+    ):
+        out.setdefault(event_id, ([], datetime.fromisoformat(chosen_at)))[0].append(Choice(lot, sats))
+    return {k: (tuple(v[0]), v[1]) for k, v in out.items()}
+
+
 def _replace_choice(  # noqa: PLR0913 - as identify's
     conn: sqlite3.Connection,
     event_id: int,
@@ -218,7 +283,7 @@ def _read(conn: sqlite3.Connection, event_id: int) -> Event:
         raise EventError("an event id is an integer")
     row = conn.execute(_SELECT_ONE, (event_id,)).fetchone()
     if row is None:
-        raise EventError("no such event")
+        raise EventNotFound("no such event")
     return _event(row)
 
 
@@ -236,11 +301,17 @@ def _checked(e: Event) -> Event:  # noqa: PLR0912 - one check per field
     _check_sats(e.sats, "the sats")
     if isinstance(e.fee_sats, bool) or not isinstance(e.fee_sats, int) or not 0 <= e.fee_sats < e.sats:
         raise EventError("the fee is whole sats, fewer than the event's")
+    if e.fee_sats and e.kind in ACQUISITIONS - {"buy"}:
+        raise EventError("only a movement, a disposal or a buy bears a fee")
+    if e.to is not None and e.to == e.account:
+        raise EventError("a movement goes to another account")
     if e.kind in MOVEMENTS:
         if e.usd is not None:
             raise EventError("a movement has no USD amount")
     elif e.kind in DISPOSALS:
         _amount(e.usd, "the proceeds", signed=True)
+        if e.kind == "gift_out" and e.usd != 0:
+            raise EventError("a gift given has no proceeds (0.00)")
     elif e.usd is not None or e.kind != "gift_in":
         _amount(e.usd, "the basis", signed=False)
     gift = e.kind == "gift_in"
@@ -250,8 +321,8 @@ def _checked(e: Event) -> Event:  # noqa: PLR0912 - one check per field
         raise EventError("a gift received, and only a gift, names its FMV and the donor's date")
     if gift:
         _amount(e.fmv, "the FMV at the gift", signed=False)
-        if type(e.donor_acquired) is not date or e.donor_acquired > e.at.date():
-            raise EventError("the donor's date is a date before the gift")
+        if type(e.donor_acquired) is not date or not GENESIS <= e.donor_acquired <= _day(e.at):
+            raise EventError("the donor's date is a date from the genesis block to the gift")
     if type(e.donor_always_long) is not bool:
         raise EventError("donor_always_long is True or False")
     if (e.missing_basis is None) != (e.missing_acquired is None) or (
@@ -260,8 +331,8 @@ def _checked(e: Event) -> Event:  # noqa: PLR0912 - one check per field
         raise EventError("only a withdrawal names a missing basis, with its date")
     if e.missing_basis is not None:
         _amount(e.missing_basis, "the missing basis", signed=False)
-        if type(e.missing_acquired) is not date:
-            raise EventError("the missing basis's date is a date")
+        if type(e.missing_acquired) is not date or not GENESIS <= e.missing_acquired <= _day(e.at):
+            raise EventError("the missing basis's date is a date from the genesis block to the withdrawal")
     if e.txid is not None and not is_hash(e.txid):
         raise EventError("a txid is 64 lowercase hex digits")
     for name, text, limit in (("valuation source", e.valuation_source, 200), ("note", e.note, 2000)):
@@ -338,10 +409,18 @@ def _check_sats(value: object, what: str) -> None:
         raise EventError(f"{what} are whole sats, more than none and no more than the supply")
 
 
+def _day(moment: datetime) -> date:
+    """The latest tax date a moment can have: its UTC date plus a day (time zones run to UTC+14)."""
+    return moment.astimezone(UTC).date() + timedelta(days=1)
+
+
 def _moment(value: object, what: str) -> str:
     if not isinstance(value, datetime) or value.utcoffset() is None:
         raise EventError(f"{what} is a timezone-aware moment")
-    return value.astimezone(UTC).isoformat()
+    try:
+        return value.astimezone(UTC).isoformat()
+    except OverflowError:  # a moment at the very edge of the calendar
+        raise EventError(f"{what} is a moment within the calendar") from None
 
 
 __all__ = [
