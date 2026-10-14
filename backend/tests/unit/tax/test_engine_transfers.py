@@ -637,9 +637,9 @@ def test_an_unknown_basis_fee_lot_passes_none_and_stays_blocking_adr0043() -> No
     assert UnknownBasis("g") in result.blocking
 
 
-def test_carried_basis_skips_an_unknown_basis_part_adr0043() -> None:
-    # The unknown gift is the oldest moved part, so the all-fee lot's 1.00 goes to the next part, the buy,
-    # rather than into a figure flagged unknown
+def test_carried_basis_goes_to_the_oldest_part_even_of_unknown_basis_adr0043() -> None:
+    # The unknown gift is the oldest moved part, so it takes the all-fee lot's 1.00 (ADR 0043's oldest
+    # moved lot; it stays blocking)
     events: list[Event] = [
         Acquisition("g", "w", date(2024, 1, 1), "gift_in", 1, None, D("2.00"), date(2020, 1, 1)),
         Acquisition("b", "w", date(2024, 1, 2), "buy", 1, D("1.00")),
@@ -647,4 +647,93 @@ def test_carried_basis_skips_an_unknown_basis_part_adr0043() -> None:
         move("d", "w", "x", 3, fee_sats=1),
     ]
     moved = {m.lot: (m.basis, m.carried_from) for m in run(events).moves}
-    assert moved == {"g": (D("0.00"), ()), "b": (D("2.00"), ("c",))}
+    assert moved == {"g": (D("1.00"), ("c",)), "b": (D("1.00"), ())}
+
+
+HALVES: list[Event] = [
+    Acquisition("e1", "x", date(2024, 1, 1), "buy", 5, D("1.00")),
+    Acquisition("e2", "x", date(2024, 2, 1), "buy", 5, D("3.00")),
+]
+
+
+def test_a_late_choice_with_fifos_lots_but_other_arriving_sats_is_late_adr0043() -> None:
+    # Naming arriving e2 5 and e1 3 makes the fee e1's last 2 sats: the same lots as FIFO in all (e1 5,
+    # e2 5), but FIFO has e1's 5 arrive and 2 of e2 pay the fee. Different sats arrive, so it is late,
+    # and the warning shows FIFO's moves.
+    wd = move(
+        "wd",
+        "x",
+        "w",
+        10,
+        kind="withdrawal",
+        fee_sats=2,
+        picks=(Pick("e2", 5), Pick("e1", 3)),
+        identified_at=at(DAY, 18),
+    )
+    result = run([*HALVES, wd])
+    assert {m.lot: (m.sats, m.carried_fee) for m in result.moves} == {"e1": (3, 2), "e2": (5, 0)}
+    (late,) = result.late
+    assert late.standing == (
+        Moved("wd", "e1", "e1@wd", "w", 5, D("1.00"), date(2024, 1, 1)),
+        Moved("wd", "e2", "e2@wd", "w", 3, D("3.00"), date(2024, 2, 1), 2),
+    )
+
+
+def test_a_late_choice_naming_fifos_arriving_sats_is_not_late_adr0043() -> None:
+    wd = move(
+        "wd",
+        "x",
+        "w",
+        10,
+        kind="withdrawal",
+        fee_sats=2,
+        picks=(Pick("e1", 5), Pick("e2", 3)),
+        identified_at=at(DAY, 18),
+    )
+    assert run([*HALVES, wd]).late == ()
+
+
+def test_the_replay_follows_an_on_time_choices_fee_lots_or_falls_back_whole_adr0043() -> None:
+    # A late sale takes 3 of e2, so the real run holds e1 5, e2 2, e3 5 and the replay (FIFO) e1 2, e2 5,
+    # e3 5. The withdrawal names its arriving e3 5 on time; its 3-sat fee takes e1 3 in the real run.
+    # The replay must follow that whole identification, and holds only 2 of e1, so it falls back, whole,
+    # to FIFO: e1 2 and e2 3 arrive in w. A late sale of the user's e3@wd then differs from the replay's.
+    d2, d3 = date(2025, 1, 2), date(2025, 1, 3)
+    events: list[Event] = [
+        Acquisition("e1", "x", date(2024, 1, 1), "buy", 5, D("1.00")),
+        Acquisition("e2", "x", date(2024, 2, 1), "buy", 5, D("2.00")),
+        Acquisition("e3", "x", date(2024, 3, 1), "buy", 5, D("3.00")),
+        Disposal(
+            "s1", "x", DAY, at(DAY), "sell", 3, D("3.00"), picks=(Pick("e2", 3),), identified_at=at(DAY, 18)
+        ),
+        move(
+            "wd",
+            "x",
+            "w",
+            8,
+            on=d2,
+            kind="withdrawal",
+            fee_sats=3,
+            picks=(Pick("e3", 5),),
+            identified_at=at(d2, 9),
+        ),
+        Disposal(
+            "s2", "w", d3, at(d3), "sell", 5, D("9.00"), picks=(Pick("e3@wd", 5),), identified_at=at(d3, 18)
+        ),
+    ]
+    result = run(events)
+    assert result.replay_stopped is None
+    late = {x.disposal: x for x in result.late}
+    assert {a.lot: a.sats for a in late["s2"].standing} == {"e1@wd": 2, "e2@wd": 3}
+    assert late["s2"].replayed
+
+
+def test_the_fee_can_take_the_rest_of_a_lot_the_choice_names_adr0043() -> None:
+    # Naming 8 of e1's 10 sats: the fee's FIFO sats besides them are e1's last 2, so e1 10 in all, as
+    # FIFO's, with the same 8 arriving: not late, and the moved part keeps all of e1's 1.00
+    wd = move(
+        "wd", "x", "w", 10, kind="withdrawal", fee_sats=2, picks=(Pick("e1", 8),), identified_at=at(DAY, 18)
+    )
+    result = run([*EXCHANGE, wd])
+    assert result.moves == (Moved("wd", "e1", "e1@wd", "w", 8, D("1.00"), date(2024, 1, 1), 2),)
+    assert result.late == ()
