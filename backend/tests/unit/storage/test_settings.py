@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 import pytest
 
@@ -136,10 +136,9 @@ def test_canonical_zones_of_every_shape_are_accepted(conn: sqlite3.Connection, n
     assert settings.time_zone(conn) == ZoneInfo(name)
 
 
-def test_every_accepted_name_fits_the_pattern_and_the_schema() -> None:
-    zones = settings._zones()
-    assert len(zones) > 100 and "UTC" in zones
-    assert all(settings._ZONE_NAME.fullmatch(z) and len(z) <= 64 for z in zones)
+def test_every_place_this_machine_has_fits_the_pattern_and_the_schema() -> None:
+    places = [n for n in available_timezones() if n.split("/", 1)[0] in settings._AREAS]
+    assert all(settings._ZONE_NAME.fullmatch(n) and len(n) <= 64 for n in places)
 
 
 @pytest.mark.parametrize("name", ["Europe/Amsterdam", "Europe/Oslo", "America/St_Thomas"])
@@ -148,21 +147,21 @@ def test_zones_merged_into_links_upstream_are_still_accepted(conn: sqlite3.Conne
     assert settings.time_zone(conn) == ZoneInfo(name)
 
 
-def test_the_allow_list_keeps_places_and_utc_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    listed = {
-        "America/New_York",
-        "US/Eastern",
-        "Etc/GMT+5",
-        "EST5EDT",
-        "GMT",
-        "localtime",
-        "Factory",
-        "Europe/Oslo",
-    }
-    monkeypatch.setattr(settings, "available_timezones", lambda: listed)
-    settings._zones.cache_clear()
-    try:
-        assert settings._zones() == {"America/New_York", "Europe/Oslo", "UTC"}
-    finally:
-        monkeypatch.undo()
-        settings._zones.cache_clear()
+@pytest.mark.parametrize("error", [ZoneInfoNotFoundError, ValueError, OSError])
+def test_a_zone_that_wont_load_is_refused_with_a_fixed_message(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    def broken(name: str) -> ZoneInfo:
+        raise error("a damaged or missing file")
+
+    monkeypatch.setattr(settings, "ZoneInfo", broken)
+    with pytest.raises(settings.SettingsError, match="doesn't have that zone"):
+        settings.set_time_zone(conn, "America/New_York")
+    conn.execute("INSERT INTO setting (key, value) VALUES ('time_zone', 'America/New_York')")
+    with pytest.raises(settings.SettingsError, match="set the time zone again"):
+        settings.time_zone(conn)
+
+
+def test_an_alias_is_refused_with_the_rule() -> None:
+    with pytest.raises(settings.SettingsError, match="UTC or a place"):
+        settings._zone("US/Eastern")

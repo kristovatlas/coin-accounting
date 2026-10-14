@@ -5,27 +5,27 @@ it used instead (PLAN §8, T-503).
 - **`time_zone`:** the IANA zone (such as `America/New_York`) an event's tax date is taken in (PLAN §7).
   Its default is `UTC` until the user sets one. A name must be `UTC` or an `Area/Location` zone in
   one of IANA's geographic areas (`America/New_York`, `Europe/Amsterdam`, `America/Argentina/Salta`),
-  as the standard library lists the system's zones, spelled as listed. That leaves out what doesn't
-  mean the same on every machine: `localtime` (the machine's own zone), the backward-compatibility
-  aliases outside those areas (`US/Eastern`, `EST5EDT`, `GMT`), the sign-inverted `Etc/GMT+5` and the
-  `posix/` and `right/` variants. The module opens no file of the system database itself; `zoneinfo`
-  reads it, as it does wherever a zone is used. A stored name is checked again when read: a damaged
-  one, or one this machine's database lacks, is refused with the remedy (T-408).
+  each part capitalised as IANA spells it, that this machine's database has. That leaves out
+  `localtime` (the machine's own zone), the aliases outside those areas (`US/Eastern`, `EST5EDT`,
+  `GMT`), the sign-inverted `Etc/GMT+5` and the `posix/` and `right/` variants. Some links inside the
+  areas (`Asia/Calcutta`) are packaged separately on some systems, so a name another machine lacks
+  is refused when read there, with the remedy. Loading the zone reads its one file of the system
+  database, as using any zone does; the module lists no directory. A stored name is checked again
+  when read: a damaged one, or one this machine's database lacks, is refused with the remedy (T-408).
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
-from functools import cache
 from typing import Final
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from coinacct.storage.db import DbError, transaction
 
 DEFAULT_TIME_ZONE: Final = "UTC"
-# an IANA name: `UTC`, `Area/Location`, or `Area/Region/Location`; never a path
-_ZONE_NAME: Final = re.compile(r"[A-Za-z][A-Za-z0-9_+-]{0,30}(?:/[A-Za-z0-9][A-Za-z0-9_+-]{0,30}){0,2}")
+# an IANA name: `UTC`, `Area/Location`, or `Area/Region/Location`, each part capitalised; never a path
+_ZONE_NAME: Final = re.compile(r"[A-Z][A-Za-z0-9_+-]{0,30}(?:/[A-Z][A-Za-z0-9_+-]{0,30}){0,2}")
 
 
 class SettingsError(DbError):
@@ -52,23 +52,16 @@ _AREAS: Final = frozenset(
 )
 
 
-@cache
-def _zones() -> frozenset[str]:
-    """`UTC` and the system's zones in IANA's geographic areas; a restart picks up a database update."""
-    return frozenset(n for n in available_timezones() if n.split("/", 1)[0] in _AREAS and "/" in n) | {
-        DEFAULT_TIME_ZONE
-    }
-
-
 def _zone(name: str) -> ZoneInfo:
     if not isinstance(name, str) or not _ZONE_NAME.fullmatch(name):
-        raise SettingsError("the time zone is an IANA name, such as America/New_York")
-    if name not in _zones():
-        raise SettingsError("the time zone isn't one the system's time-zone database lists")
+        raise SettingsError("the time zone is UTC or a place, such as America/New_York")
+    area, slash, _ = name.partition("/")
+    if name != DEFAULT_TIME_ZONE and not (slash and area in _AREAS):
+        raise SettingsError("the time zone is UTC or a place, such as America/New_York")
     try:
         return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError, OSError):  # pragma: no cover - listed but unreadable
-        raise SettingsError("the time zone isn't one the system's time-zone database has") from None
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        raise SettingsError("this machine's time-zone database doesn't have that zone") from None
 
 
 def time_zone_name(conn: sqlite3.Connection) -> str:
