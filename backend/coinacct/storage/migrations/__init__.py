@@ -20,6 +20,7 @@ from coinacct.storage.migrations import (
     m0009_change_log_no_replace,
     m0010_change_log_origin,
     m0011_events,
+    m0012_settings,
 )
 
 STEPS: Final[tuple[tuple[int, str], ...]] = (
@@ -34,4 +35,5 @@ STEPS: Final[tuple[tuple[int, str], ...]] = (
     (9, m0009_change_log_no_replace.SQL),
     (10, m0010_change_log_origin.SQL),
     (11, m0011_events.SQL),
+    (12, m0012_settings.SQL),
 )
