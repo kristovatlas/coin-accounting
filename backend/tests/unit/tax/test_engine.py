@@ -324,7 +324,7 @@ WITHDRAWAL = Disposal("s", "exch", date(2024, 1, 1), at(date(2024, 1, 1)), "with
         ([buy("b", date(2024, 1, 1), 1, "1.00", account="")], "names its id"),
         ([Acquisition("b", "exch", "2024-01-01", "buy", 1, D("1.00"))], "must be a date"),  # type: ignore[arg-type]
         ([Acquisition("b", "exch", at(date(2024, 1, 1)), "buy", 1, D("1.00"))], "must be a date"),
-        (["not an event"], "an Acquisition, a Disposal, a Transfer, a WalletTx or a Received"),
+        (["not an event"], "an Acquisition, a Disposal, a Transfer, a WalletTx, a Received or an opening"),
     ],
 )
 def test_invalid_events_are_refused(events: list[object], message: str) -> None:
