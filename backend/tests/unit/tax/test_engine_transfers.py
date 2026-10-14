@@ -577,14 +577,16 @@ def test_a_late_alternative_moves_dust_basis_onto_a_gifts_part_adr0008() -> None
 
 
 @pytest.mark.parametrize("picks", [None, (Pick("b1", 5),)])
-def test_a_self_transfer_is_refused_until_utxo_tracing_exists(picks: tuple[Pick, ...] | None) -> None:
+def test_a_self_transfer_comes_only_as_a_wallet_tx(picks: tuple[Pick, ...] | None) -> None:
     # #243, the owner's decision: between the user's own wallets the spent outputs identify the lots, so
-    # the account's FIFO order (or a choice of lots) must not stand in for them
+    # the account's FIFO order (or a choice of lots) must not stand in for them (ADR 0041)
     events: list[Event] = [
         Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("1.00")),
         move("t1", "w", "v", 5, kind="self_transfer", picks=picks),
     ]
-    with pytest.raises(EngineError, match=r"transfer 't1': .* needs UTXO tracing \(not built yet, #243\)"):
+    with pytest.raises(
+        EngineError, match=r"transfer 't1': a self-transfer's lots follow the outputs .* WalletTx"
+    ):
         run(events)
 
 

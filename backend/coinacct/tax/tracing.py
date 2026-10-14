@@ -49,7 +49,7 @@ from datetime import UTC, datetime
 from typing import Final, Literal
 
 from coinacct.domain.chain import MAX_SATS
-from coinacct.tax.engine import EngineError
+from coinacct.tax.errors import EngineError
 
 type LeavingKind = Literal["sell", "spend", "gift_out", "deposit", "transfer"]
 type BlockReason = Literal[
