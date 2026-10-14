@@ -9,8 +9,17 @@ both timezone-aware UTC (ENGINEERING §5.2). A disposal's tax date is within a d
 date (time zones run from UTC-12 to UTC+14), and disposals come in the order of their moments.
 
 - **Acquisitions** (`buy`, `p2p_buy`, `income`, `inherit`, `gift_in`) each create one lot: its sats, its
-  basis (cost plus fees, or the FMV the caller computed) and its date. The 2025 opening allocation comes
-  in a later slice.
+  basis (cost plus fees, or the FMV the caller computed) and its date.
+- **The 2025 opening allocation** (`OpeningAllocation`; ADR 0008 §6, Rev. Proc. 2024-28 §5.02), dated
+  2025-01-01 and before every other 2025 event, replaces an account's lots with the lots the user
+  allocated its unattached basis to: each with its sats, basis and date (`Result.replaced` keeps the
+  lots it replaced, for the audit trail). Allocating fewer sats than the account holds leaves a
+  placeholder of unknown basis for the rest (blocking, T-509); allocating more blocks
+  (`OpeningMismatch`). It is late (`Result.opening_late`, a warning, T-508) if the user recorded it after
+  their first sale, disposition or transfer of BTC from any account on or after 2025-01-01, or after the
+  2025 return's due date if that is earlier (ADR 0041 §5; the due date counts from the start of
+  2026-04-15 UTC, the earliest reading). A coin-traced wallet's allocation (ADR 0041 §5: the pool and
+  the fragments drawn from it) isn't built yet: it blocks (`Untraced`, `opening_allocation`).
 - **A gift received** (`gift_in`; IRC §1015(a), Treas. Reg. §1.1015-1(a)) has a **dual basis**. Its gain
   basis is the donor's basis, held from the donor's date (tacked, IRC §1223(2)). If the FMV at the gift
   was lower, that FMV is its loss basis, held from the gift date. At a disposal, proceeds above the
@@ -166,6 +175,8 @@ METHODS: Final[frozenset[str]] = frozenset({"fifo"})
 TRANSFER_KINDS: Final[frozenset[str]] = frozenset({"deposit", "withdrawal", "self_transfer"})
 ZERO: Final = Decimal("0.00")
 GENESIS: Final = date(2009, 1, 3)  # no bitcoin was acquired before the genesis block
+OPENING_DAY: Final = date(2025, 1, 1)  # the 2025 opening allocation's date (Rev. Proc. 2024-28)
+RETURN_DUE_2025: Final = datetime(2026, 4, 15, tzinfo=UTC)  # the 2025 return's due date, its earliest moment
 RESERVED: Final = ("@", "#")  # the separators in the lot ids the engine builds (lot@transfer, lot@tx#vout)
 SPLIT: Final = "#"  # in a per-output moved or split-off lot's id: lot@event#vout
 UNRECORDED: Final = "@@unrecorded"  # a created lot's suffix: no event or moved lot id can contain "@@"
@@ -298,7 +309,35 @@ class Wallet:
     tracking_start: datetime | None
 
 
-type Event = Acquisition | Disposal | Transfer | WalletTx | Received
+@dataclass(frozen=True)
+class OpeningLot:
+    """A lot of a 2025 opening allocation: the sats the user allocated basis to, that basis (USD) and the
+    date the holding period runs from; `always_long` for an inherited lot."""
+
+    sats: int
+    basis: Decimal
+    acquired: date
+    always_long: bool = False
+
+
+@dataclass(frozen=True)
+class OpeningAllocation:
+    """The 2025 opening allocation of an account (ADR 0008 §6): its lots on 2025-01-01, the moment the
+    user recorded it (`recorded_at`, timezone-aware UTC) and the method they state they used."""
+
+    id: str
+    account: str
+    on: date
+    lots: tuple[OpeningLot, ...]
+    recorded_at: datetime
+    method: str
+
+    @property
+    def sats(self) -> int:
+        return sum(lot.sats for lot in self.lots) if isinstance(self.lots, tuple) else 0
+
+
+type Event = Acquisition | Disposal | Transfer | WalletTx | Received | OpeningAllocation
 
 
 @dataclass(frozen=True)
@@ -409,12 +448,33 @@ class UnknownBasis:
 
 
 @dataclass(frozen=True)
+class OpeningMismatch:
+    """Blocking: an opening allocation of more sats than its account held on 2025-01-01, not applied."""
+
+    event: str
+    held: int
+    allocated: int
+
+
+@dataclass(frozen=True)
+class LateOpening:
+    """A warning (T-508): an opening allocation recorded after its deadline, the user's first sale,
+    disposition or transfer from 2025-01-01 (`first`, None if the due date came first) or the 2025
+    return's due date (ADR 0041 §5). The allocation is used all the same."""
+
+    event: str
+    recorded_at: datetime
+    deadline: datetime
+    first: str | None
+
+
+@dataclass(frozen=True)
 class Result:
     allocations: tuple[Allocation, ...]
     gifts: tuple[GiftGiven, ...]
     holdings: tuple[Lot, ...]  # the lots left, in the order they were created or moved in, without empty ones
     late: tuple[LateIdentification, ...]
-    blocking: tuple[MissingLots | UnknownBasis | Untraced, ...]
+    blocking: tuple[MissingLots | UnknownBasis | Untraced | OpeningMismatch, ...]
     moves: tuple[Moved, ...] = ()
     created: tuple[Lot, ...] = ()  # lots created for a withdrawal from an account without lots (ADR 0009)
     replay_stopped: str | None = None  # the event the late choices' replay couldn't follow (#238)
@@ -422,6 +482,8 @@ class Result:
     draws: tuple[Drawn, ...] = ()  # each received coin's draws from its wallet's pool (ADR 0041 §4)
     placeholders: tuple[Lot, ...] = ()  # unknown-basis lots for received coins the pool fell short of
     pool: tuple[PoolLot, ...] = ()  # wallet lots on no coin at the end: probably a duplicate or a sale
+    replaced: tuple[Lot, ...] = ()  # the lots the 2025 opening allocations replaced (ADR 0008 §6)
+    opening_late: tuple[LateOpening, ...] = ()  # opening allocations recorded late (warnings)
 
 
 @dataclass(frozen=True)
@@ -434,7 +496,13 @@ class CoinLot:
 type UntracedReason = (
     tracing.BlockReason
     | Literal[
-        "after_untraced", "uncovered", "mixed_transfer", "bad_link", "unrecorded_receipt", "no_tracking_start"
+        "after_untraced",
+        "uncovered",
+        "mixed_transfer",
+        "bad_link",
+        "unrecorded_receipt",
+        "no_tracking_start",
+        "opening_allocation",
     ]
 )
 
@@ -562,10 +630,12 @@ class _Engine:
         self._allocations: list[Allocation] = []
         self._gifts: list[GiftGiven] = []
         self._late: list[LateIdentification] = []
-        self._blocking: list[MissingLots | UnknownBasis | Untraced] = []
+        self._blocking: list[MissingLots | UnknownBasis | Untraced | OpeningMismatch] = []
         self._moves: list[Moved] = []
         self._created: list[Lot] = []
         self._recorded: set[str] = set()  # accounts holding lots the user recorded (not created lots)
+        self._openings: dict[str, OpeningAllocation] = {}  # each account's 2025 opening allocation
+        self._replaced: list[Lot] = []
         self._keys: dict[str, list[date]] = {}  # account -> its lots' FIFO keys, in step with _open
         # The replay (#238): the same events with every late choice disregarded. Only the real run has
         # one; the replay itself is `replay=True` and records no warnings.
@@ -594,6 +664,8 @@ class _Engine:
             self._blocking.append(Untraced(wallet, "no_tracking_start", f"{wallet!r} has no tracking start"))
         last: date | None = None
         last_moment: datetime | None = None
+        in_2025 = False  # an event other than an opening allocation dated 2025-01-01 or later came
+        first: tuple[str, datetime] | None = None  # the first sale, disposition or transfer from 2025
         for event in events:
             _check_common(event)
             if event.id in self._seen:
@@ -602,40 +674,25 @@ class _Engine:
             if last is not None and event.on < last:
                 raise EngineError(f"event {event.id!r} is out of date order")
             last = event.on
-            if isinstance(event, Acquisition):
-                self._acquire(event)
-                self._follow(event)
-                continue
-            _check_moment(event.at, f"event {event.id!r}: its moment")
-            if abs((event.on - event.at.date()).days) > 1:
-                raise EngineError(f"event {event.id!r}: its tax date is more than a day from its moment")
-            if last_moment is not None and event.at < last_moment:
-                raise EngineError(f"event {event.id!r} is out of time order")
-            last_moment = event.at
-            if isinstance(event, WalletTx):
-                self._wallet_tx(event)
-            elif isinstance(event, Received):
-                self._receive(event)
-            elif isinstance(event, Transfer):
-                self._transfer(event)
-            else:
-                self._dispose(event)
+            if isinstance(event, OpeningAllocation) and in_2025:
+                raise EngineError(f"opening allocation {event.id!r} comes before every other 2025 event")
+            in_2025 = in_2025 or (not isinstance(event, OpeningAllocation) and event.on >= OPENING_DAY)
+            if not isinstance(event, Acquisition | OpeningAllocation):
+                last_moment = _checked_moment(event, last_moment)
+                leaving = event.leaving if isinstance(event, WalletTx) else event
+                disposes = not isinstance(event, Received) and leaving is not None
+                if first is None and disposes and event.on >= OPENING_DAY:
+                    first = (event.id, event.at)
+            self._apply(event)
             self._follow(event)
-        holdings = tuple(
-            Lot(
-                o.lot.id,
-                o.lot.account,
-                o.lot.acquired,
-                o.sats,
-                o.basis,
-                o.lot.always_long,
-                o.loss_basis,
-                None if o.loss_basis is None else o.lot.loss_from,
-                o.lot.unknown_basis,
-            )
-            for o in self._lots.values()
-            if o.sats > 0
-        )
+        holdings = tuple(_left(o) for o in self._lots.values() if o.sats > 0)
+        early = first is not None and first[1] < RETURN_DUE_2025
+        deadline, named = (first[1], first[0]) if first is not None and early else (RETURN_DUE_2025, None)
+        opening_late = [
+            LateOpening(o.id, o.recorded_at, deadline, named)
+            for o in self._openings.values()
+            if o.recorded_at > deadline
+        ]
         return Result(
             tuple(self._allocations),
             tuple(self._gifts),
@@ -658,6 +715,8 @@ class _Engine:
                 for wallet in sorted(self._wallets - self._untraced)
                 for lot, sats in self._pool(wallet)
             ),
+            tuple(self._replaced),
+            tuple(opening_late),
         )
 
     def _follow(self, event: Event) -> None:
@@ -672,16 +731,7 @@ class _Engine:
         if identified is not None:
             shadow._given[event.id] = identified
         try:
-            if isinstance(event, Acquisition):
-                shadow._acquire(event)
-            elif isinstance(event, WalletTx):
-                shadow._wallet_tx(event)
-            elif isinstance(event, Received):
-                shadow._receive(event)
-            elif isinstance(event, Transfer):
-                shadow._transfer(event)
-            else:
-                shadow._dispose(event)
+            shadow._apply(event)
         except EngineError:
             self._shadow, self._replay_stopped = None, event.id
             return
@@ -690,12 +740,30 @@ class _Engine:
             return
         accounts = {event.account}
         leaving = (
-            event.leaving if isinstance(event, WalletTx) else None if isinstance(event, Received) else event
+            event.leaving
+            if isinstance(event, WalletTx)
+            else None
+            if isinstance(event, Received | OpeningAllocation)
+            else event
         )
         if isinstance(leaving, Transfer):
             accounts.add(leaving.to)
         if any(shadow._held(a) != self._held(a) for a in accounts):
             self._shadow, self._replay_stopped = None, event.id
+
+    def _apply(self, event: Event) -> None:
+        if isinstance(event, Acquisition):
+            self._acquire(event)
+        elif isinstance(event, OpeningAllocation):
+            self._opening(event)
+        elif isinstance(event, WalletTx):
+            self._wallet_tx(event)
+        elif isinstance(event, Received):
+            self._receive(event)
+        elif isinstance(event, Transfer):
+            self._transfer(event)
+        else:
+            self._dispose(event)
 
     def _held(self, account: str) -> int:
         return sum(o.sats for o in self._open.get(account, []))
@@ -737,6 +805,36 @@ class _Engine:
         self._insert(a.account, entry)
         self._recorded.add(a.account)
         self._link(a.id, a.account, [(a.id, a.sats)], a.coins, a.sats)
+
+    def _opening(self, e: OpeningAllocation) -> None:
+        """The 2025 opening allocation (ADR 0008 §6): the account's lots replaced by the allocated ones;
+        a shortfall is a placeholder of unknown basis, a surplus blocks and changes nothing."""
+        bases = _checked_opening(e)
+        if e.account in self._openings:
+            raise EngineError(f"opening allocation {e.id!r}: {e.account!r} has one already")
+        self._openings[e.account] = e
+        if e.account in self._wallets:
+            detail = "a coin-traced wallet's opening allocation isn't supported yet (ADR 0041 §5)"
+            self._blocking.append(Untraced(e.id, "opening_allocation", detail))
+            return
+        held = self._held(e.account)
+        if e.sats > held:
+            self._blocking.append(OpeningMismatch(e.id, held, e.sats))
+            return
+        for o in self._open.get(e.account, []):
+            if o.sats > 0:
+                self._replaced.append(_left(o))
+                o.sats, o.basis, o.loss_basis = 0, ZERO, None
+        for i, (lot, basis) in enumerate(zip(e.lots, bases, strict=True), start=1):
+            new = Lot(f"{e.id}@{i}", e.account, lot.acquired, lot.sats, basis, lot.always_long)
+            self._insert(e.account, _Open(new, lot.sats, basis, None, False, lot.acquired))
+        if held > e.sats:
+            lot_id = f"{e.id}{PLACEHOLDER}"
+            placeholder = Lot(lot_id, e.account, e.on, held - e.sats, ZERO, False, None, None, True)
+            self._insert(e.account, _Open(placeholder, held - e.sats, ZERO, None, False, e.on, created=True))
+            self._placeholders.append(placeholder)
+            self._blocking.append(UnknownBasis(lot_id))
+        self._recorded.add(e.account)
 
     def _standing(self, account: str, sats: int) -> tuple[list[Pick], int]:
         """FIFO's picks for `sats`, and the sats it couldn't cover. FIFO is the only standing method so
@@ -1729,16 +1827,64 @@ def _merged(picks: Sequence[Pick]) -> dict[str, int]:
     return merged
 
 
+def _checked_opening(e: OpeningAllocation) -> list[Decimal]:
+    """An opening allocation's checks; its lots' bases."""
+    if e.on != OPENING_DAY:
+        raise EngineError(f"opening allocation {e.id!r}: it is dated {OPENING_DAY}")
+    _check_moment(e.recorded_at, f"opening allocation {e.id!r}: when it was recorded")
+    if not isinstance(e.method, str) or not e.method.strip():
+        raise EngineError(f"opening allocation {e.id!r}: it states the method used")
+    if not isinstance(e.lots, tuple) or not e.lots or not all(isinstance(lot, OpeningLot) for lot in e.lots):
+        raise EngineError(f"opening allocation {e.id!r}: its lots are a tuple of OpeningLots")
+    bases = []
+    for lot in e.lots:
+        _check_sats(lot.sats, f"opening allocation {e.id!r}")
+        if type(lot.acquired) is not date or not GENESIS <= lot.acquired < OPENING_DAY:
+            raise EngineError(f"opening allocation {e.id!r}: a lot's date is from genesis to 2024-12-31")
+        if type(lot.always_long) is not bool:
+            raise EngineError(f"opening allocation {e.id!r}: always_long is True or False")
+        bases.append(_usd(lot.basis, e.id))
+    return bases
+
+
+def _checked_moment(event: Disposal | Transfer | WalletTx | Received, last: datetime | None) -> datetime:
+    """An event's moment, checked against its tax date and the last moment; it becomes the last."""
+    _check_moment(event.at, f"event {event.id!r}: its moment")
+    if abs((event.on - event.at.date()).days) > 1:
+        raise EngineError(f"event {event.id!r}: its tax date is more than a day from its moment")
+    if last is not None and event.at < last:
+        raise EngineError(f"event {event.id!r} is out of time order")
+    return event.at
+
+
+def _left(o: _Open) -> Lot:
+    """What is left of an open lot."""
+    loss_from = None if o.loss_basis is None else o.lot.loss_from
+    return Lot(
+        o.lot.id,
+        o.lot.account,
+        o.lot.acquired,
+        o.sats,
+        o.basis,
+        o.lot.always_long,
+        o.loss_basis,
+        loss_from,
+        o.lot.unknown_basis,
+    )
+
+
 def _check_common(event: Event) -> None:
-    if not isinstance(event, Acquisition | Disposal | Transfer | WalletTx | Received):
-        raise EngineError("an event is an Acquisition, a Disposal, a Transfer, a WalletTx or a Received")
+    if not isinstance(event, Acquisition | Disposal | Transfer | WalletTx | Received | OpeningAllocation):
+        raise EngineError(
+            "an event is an Acquisition, a Disposal, a Transfer, a WalletTx, a Received or an opening"
+        )
     if not (isinstance(event.id, str) and event.id and isinstance(event.account, str) and event.account):
         raise EngineError("an event names its id and its account")
     if any(c in event.id for c in RESERVED):  # the engine builds lot ids with them (lot@transfer)
         raise EngineError(f"event {event.id!r}: an id can't contain {' or '.join(RESERVED)}")
     if type(event.on) is not date:  # a datetime is a date too, but not a tax date
         raise EngineError(f"event {event.id!r}: its tax date must be a date")
-    if not isinstance(event, WalletTx):  # a wallet transaction's sats are its inputs', checked with them
+    if not isinstance(event, WalletTx | OpeningAllocation):  # their sats are their parts', checked there
         _check_sats(event.sats, f"event {event.id!r}")
 
 
