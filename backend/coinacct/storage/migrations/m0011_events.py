@@ -11,22 +11,30 @@ T-408, T-501, T-508).
   come in later steps.
 - `identification` holds a disposal's or movement's chosen lots, in order: the engine's lot id, the sats,
   and when the user chose them (T-508). A chosen set is replaced whole, by the app, with a change-log row.
-  Triggers keep it on a disposal or movement whose sats cover it, through inserts and edits alike. Event
+  Triggers keep it on a disposal or movement, holding no more sats than the event, through inserts and
+  edits alike; that it covers them exactly is the module's check. Event
   ids are never reused (`AUTOINCREMENT`), so a choice naming a removed event's lot can't come to name
   another's: the engine refuses it instead.
-- The change log gains the kind `event` (and `identification`), so every edit to them is logged (T-408).
+- The change log gains the kinds `event` and `identification`, so every edit to them is logged (T-408),
+  and, so that it needn't be rebuilt again, the other kinds PLAN §2 says it records: `override` (a doxx
+  override), `lot_link`, `tracking_start` and `wallet_fifo` (ADR 0041's links, tracking start dates and
+  whole-wallet FIFO setting) and `setting` (a tax-affecting setting, such as the time zone, T-503), for
+  their later steps.
   SQLite can't change a CHECK in place, so the log is rebuilt as SQLite documents: a new table with the
   same columns and every rule of the old one, the rows copied with their ids, the old one dropped, the
   new one renamed, and m0006 to m0010's triggers recreated unchanged. Every value is kept (ADR 0038: a
   rebuild that keeps every value is no alteration), and the rules together refuse as much as before, plus
-  nothing but the two new kinds.
+  nothing but the new kinds.
 """
 
 SQL = """
 CREATE TABLE change_log_m0011 (
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL CHECK (length(at) BETWEEN 20 AND 40),
-    kind TEXT NOT NULL CHECK (kind IN ('address_tag', 'tx_flag', 'event', 'identification')),
+    kind TEXT NOT NULL CHECK (kind IN (
+        'address_tag', 'tx_flag', 'event', 'identification',
+        'override', 'lot_link', 'tracking_start', 'wallet_fifo', 'setting'
+    )),
     subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 20000),
     before TEXT CHECK (before IS NULL OR json_valid(before)),
     after TEXT NOT NULL CHECK (json_valid(after)),
@@ -144,6 +152,10 @@ WHEN (SELECT kind FROM event WHERE id = NEW.event_id) NOT IN (
     'self_transfer', 'deposit', 'withdrawal', 'sell', 'spend', 'gift_out'
 )
 BEGIN SELECT RAISE(ABORT, 'only a disposal or a movement chooses lots'); END;
+CREATE TRIGGER identification_within_its_events_sats BEFORE INSERT ON identification
+WHEN NEW.sats + (SELECT coalesce(sum(sats), 0) FROM identification WHERE event_id = NEW.event_id)
+    > (SELECT sats FROM event WHERE id = NEW.event_id)
+BEGIN SELECT RAISE(ABORT, 'the chosen lots hold more sats than the event'); END;
 CREATE TRIGGER identification_stays_on_a_disposal_or_movement BEFORE UPDATE ON identification
 WHEN (SELECT kind FROM event WHERE id = NEW.event_id) NOT IN (
     'self_transfer', 'deposit', 'withdrawal', 'sell', 'spend', 'gift_out'

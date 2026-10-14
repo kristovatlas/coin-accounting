@@ -13,13 +13,15 @@ a gift without its donor's date).
 - `identify` replaces an event's chosen lots whole (an empty choice removes it), with when the user chose
   them (T-508). A choice is checked as the engine takes it: the event's sats exactly, or a movement's less
   its fee (ADR 0043), each lot once, never on a withdrawal with sats its account has no lots for. The
-  engine's ids are the events' own ids as text, so a lot an event made is named by that id, or by it and
-  `@…` once moved; an event other choices name can't be removed, or have its account, kind or sats
-  changed, until they change.
+  engine's ids are the events' own ids as text, so a lot an event made or moved is named by that id as one
+  segment of the lot id (moves stack: `<buy>@<deposit>@<withdrawal>`); an event other choices name can't
+  be removed, or have what its lots depend on changed (kind, accounts, moment, sats, fee, missing basis),
+  until they change.
 - `identification`'s method is always the user's specific choice: an event without one uses the standing
   method, or the FIFO fallback, which the engine tells apart (PLAN §2's `standing_order | fifo_default`
   are derived, not stored).
-- `events` and `identification` read them back, events in the order of their moments.
+- `events`, `identification` and `identifications` read them back, events in the order of their
+  moments.
 """
 
 from __future__ import annotations
@@ -90,7 +92,9 @@ class Event:
     sats: int
     usd: Decimal | None = None
     to: int | None = None  # a movement's destination account
-    fee_sats: int = 0  # a buy's: withheld from the sats bought (ADR 0043)
+    # of `sats`, the fee (ADR 0043): a buy's, withheld from the sats bought; a movement's, of the sats that
+    # leave; a disposal's, of the sats disposed of, its basis joining the disposal's
+    fee_sats: int = 0
     valuation_source: str | None = None
     txid: str | None = None
     fmv: Decimal | None = None  # gift_in: the FMV at the gift
@@ -139,7 +143,11 @@ def update_event(
         chosen, _ = identification(conn, event_id)
         if chosen:
             _check_choice(event, chosen)
-        moves_its_lots = (event.kind, event.account, event.sats) != (before.kind, before.account, before.sats)
+            if (event.account, event.at) != (before.account, before.at):  # its lots are another account's
+                raise EventError(
+                    "an event with a choice of lots keeps its account and moment: clear it first"
+                )
+        moves_its_lots = _lot_shape(event) != _lot_shape(before)
         if moves_its_lots and _named_by_others(conn, event_id):
             raise EventError("other events' choices name this event's lots: change them first")
         conn.execute(_UPDATE, (*row, event_id))
@@ -183,13 +191,25 @@ def identify(  # noqa: PLR0913 - the event, its choices, when they were made, an
     if choices and identified_at is None:
         raise EventError("a choice of lots names when it was made")
     stamp = None if identified_at is None else _moment(identified_at, "when the lots were chosen")
-    if identified_at is not None and identified_at > datetime.fromisoformat(at):
+    try:
+        recorded = datetime.fromisoformat(at)
+    except (TypeError, ValueError):
+        raise EventError("the log's time is an ISO 8601 moment") from None
+    if recorded.utcoffset() is None:
+        raise EventError("the log's time is timezone-aware")
+    if identified_at is not None and identified_at > recorded:
         raise EventError("lots can't be chosen later than the choice is recorded")
     with _refusals(), transaction(conn):
         event = _read(conn, event_id)
         if choices:
             _check_choice(event, choices)
         _replace_choice(conn, event_id, choices, stamp, at=at, origin=origin)
+
+
+def _lot_shape(e: Event) -> tuple[object, ...]:
+    """What an event's lots, or the parts it moves, depend on: which lots exist, where, from when, and how
+    many sats (a buy's fee comes off the sats credited, ADR 0043)."""
+    return (e.kind, e.account, e.to, e.at, e.sats, e.fee_sats, e.missing_basis, e.missing_acquired)
 
 
 def _check_choice(event: Event, choices: tuple[Choice, ...]) -> None:
@@ -205,14 +225,11 @@ def _check_choice(event: Event, choices: tuple[Choice, ...]) -> None:
 
 
 def _named_by_others(conn: sqlite3.Connection, event_id: int) -> bool:
-    """Whether another event's choice names a lot `event_id` made: its id, or a part of it moved on
-    (`<id>@…`), as `services/` names the engine's lots."""
-    name = str(event_id)
-    row = conn.execute(
-        "SELECT 1 FROM identification WHERE event_id != ? AND (lot = ? OR substr(lot, 1, ?) = ?) LIMIT 1",
-        (event_id, name, len(name) + 1, f"{name}@"),
-    ).fetchone()
-    return row is not None
+    """Whether another event's choice names a lot `event_id` made or moved: its id as any segment of the
+    engine's lot id (`<id>`, `<id>@…`, `…@<id>`, `…@<id>@…`, `…@<id>#<vout>`), as `services/` names lots."""
+    name = re.compile(rf"(?:^|@){event_id}(?:$|[@#])")
+    lots = conn.execute("SELECT lot FROM identification WHERE event_id != ?", (event_id,))
+    return any(name.search(lot) for (lot,) in lots)
 
 
 def events(conn: sqlite3.Connection) -> list[Stored]:
@@ -292,12 +309,15 @@ def _checked(e: Event) -> Event:  # noqa: PLR0912 - one check per field
         raise EventError("an event is an Event")
     if e.kind not in ACQUISITIONS | MOVEMENTS | DISPOSALS:
         raise EventError("unknown kind of event")
-    for name, account in (("account", e.account), ("destination", e.to)):
-        if account is not None and (isinstance(account, bool) or not isinstance(account, int)):
-            raise EventError(f"the {name} is an account id")
+    if isinstance(e.account, bool) or not isinstance(e.account, int):
+        raise EventError("the account is an account id")
+    if e.to is not None and (isinstance(e.to, bool) or not isinstance(e.to, int)):
+        raise EventError("the destination is an account id")
     if (e.kind in MOVEMENTS) != (e.to is not None):
         raise EventError("a movement, and only a movement, has a destination")
     _moment(e.at, "the moment")
+    if e.at.astimezone(UTC).date() < GENESIS:
+        raise EventError("the moment is no earlier than the genesis block")
     _check_sats(e.sats, "the sats")
     if isinstance(e.fee_sats, bool) or not isinstance(e.fee_sats, int) or not 0 <= e.fee_sats < e.sats:
         raise EventError("the fee is whole sats, fewer than the event's")
@@ -426,15 +446,19 @@ def _moment(value: object, what: str) -> str:
 __all__ = [
     "ACQUISITIONS",
     "DISPOSALS",
+    "GENESIS",
+    "MAX_LOT",
     "MOVEMENTS",
     "Choice",
     "Event",
     "EventError",
     "EventKind",
+    "EventNotFound",
     "Stored",
     "add_event",
     "events",
     "identification",
+    "identifications",
     "identify",
     "remove_event",
     "update_event",

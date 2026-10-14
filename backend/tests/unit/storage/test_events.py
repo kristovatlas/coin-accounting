@@ -15,8 +15,8 @@ import pytest
 
 from coinacct.domain.keys import PrivateKeyError
 from coinacct.storage import accounts as ac
+from coinacct.storage import change_log, tags
 from coinacct.storage import events as ev
-from coinacct.storage import tags
 from coinacct.storage.chain_state import record_chain
 from coinacct.storage.datadir import open_data_dir
 from coinacct.storage.db import open_db
@@ -189,6 +189,7 @@ def test_every_kind_round_trips(conn: sqlite3.Connection, accounts: tuple[int, i
             "genesis block to the withdrawal",
         ),
         (ev.Event("buy", True, WHEN, 10, D("1.00")), "account id"),
+        (ev.Event("buy", None, WHEN, 10, D("1.00")), "account id"),  # type: ignore[arg-type]
         (ev.Event("swap", 1, WHEN, 10, D("1.00")), "unknown kind"),  # type: ignore[arg-type]
     ],
 )
@@ -515,3 +516,116 @@ def test_a_stored_choice_is_the_users_specific_one(
     sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
     ev.identify(conn, sale, (ev.Choice("e1", 1_000),), WHEN, at=AT)
     assert conn.execute("SELECT method, late FROM identification").fetchall() == [("specific", 0)]
+
+
+@pytest.mark.parametrize(
+    "lot", ["{m}", "{b}@{m}", "{b}@{m}@99", "{b}@{m}#1", "{b}@99@{m}", "{m}@@unrecorded"]
+)
+def test_a_movement_whose_moved_lots_are_named_keeps_them(
+    conn: sqlite3.Connection, accounts: tuple[int, int], lot: str
+) -> None:
+    wallet, exchange = accounts
+    bought = ev.add_event(conn, buy(wallet), at=AT)
+    deposit = ev.add_event(conn, ev.Event("deposit", wallet, WHEN, 1_000, to=exchange), at=AT)
+    sale = ev.add_event(conn, ev.Event("sell", exchange, WHEN, 1_000, D("50.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice(lot.format(b=bought, m=deposit), 1_000),), WHEN, at=AT)
+    with pytest.raises(ev.EventError, match="other events' choices name"):
+        ev.remove_event(conn, deposit, at=AT)
+
+
+def test_a_named_purchase_keeps_its_moment_fee_and_destination(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, _ = accounts
+    bought = ev.add_event(conn, buy(wallet), at=AT)
+    sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice(str(bought), 1_000),), WHEN, at=AT)
+    for edited in (buy(wallet, at=WHEN + timedelta(days=1)), buy(wallet, fee_sats=10)):
+        with pytest.raises(ev.EventError, match="other events' choices name"):
+            ev.update_event(conn, bought, edited, at=AT)
+
+
+def test_an_id_that_only_contains_the_events_digits_doesnt_name_it(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, _ = accounts
+    bought = ev.add_event(conn, buy(wallet), at=AT)
+    sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice(f"{bought}0@{bought}1", 1_000),), WHEN, at=AT)  # other ids
+    ev.remove_event(conn, bought, at=AT)
+
+
+@pytest.mark.parametrize("at", ["not a time", "2026-10-14T12:00:00"])
+def test_the_logs_time_is_checked(conn: sqlite3.Connection, accounts: tuple[int, int], at: str) -> None:
+    wallet, _ = accounts
+    sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
+    with pytest.raises(ev.EventError, match="the log's time"):
+        ev.identify(conn, sale, (ev.Choice("e1", 1_000),), WHEN, at=at)
+
+
+def test_an_event_with_a_choice_keeps_its_account_and_moment(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, exchange = accounts
+    sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice("e1", 1_000),), WHEN, at=AT)
+    for edited in (
+        ev.Event("sell", exchange, WHEN, 1_000, D("50.00")),
+        ev.Event("sell", wallet, WHEN + timedelta(days=1), 1_000, D("50.00")),
+    ):
+        with pytest.raises(ev.EventError, match="keeps its account and moment"):
+            ev.update_event(conn, sale, edited, at=AT)
+
+
+def test_a_fee_change_its_arriving_choice_no_longer_fits_is_refused(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, exchange = accounts
+    deposit = ev.add_event(conn, ev.Event("deposit", wallet, WHEN, 1_000, to=exchange, fee_sats=100), at=AT)
+    ev.identify(conn, deposit, (ev.Choice("e1", 900),), WHEN, at=AT)
+    with pytest.raises(ev.EventError, match="cover the event's sats"):
+        ev.update_event(
+            conn, deposit, ev.Event("deposit", wallet, WHEN, 1_000, to=exchange, fee_sats=50), at=AT
+        )
+
+
+def test_an_unknown_event_is_not_found_for_every_write(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, _ = accounts
+    with pytest.raises(ev.EventNotFound):
+        ev.update_event(conn, 12345, buy(wallet), at=AT)
+    with pytest.raises(ev.EventNotFound):
+        ev.identify(conn, 12345, (), None, at=AT)
+
+
+def test_the_schema_refuses_choices_over_the_events_sats(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, _ = accounts
+    sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
+    insert = (
+        "INSERT INTO identification (event_id, position, lot, sats, identified_at) VALUES (?, ?, 'e1', ?, ?)"
+    )
+    conn.execute(insert, (sale, 0, 600, AT))
+    with pytest.raises(sqlite3.IntegrityError, match="more sats than the event"):
+        conn.execute(insert, (sale, 1, 500, AT))
+
+
+def test_an_event_before_the_genesis_block_is_refused(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, _ = accounts
+    with pytest.raises(ev.EventError, match="genesis"):
+        ev.add_event(conn, buy(wallet, at=datetime(2008, 12, 31, tzinfo=UTC)), at=AT)
+
+
+@pytest.mark.parametrize("kind", ["override", "lot_link", "tracking_start", "wallet_fifo", "setting"])
+def test_the_log_accepts_the_kinds_later_steps_record(conn: sqlite3.Connection, kind: str) -> None:
+    change_log.append(conn, AT, (kind, "s", None, "x"), "user")
+    assert conn.execute("SELECT kind FROM change_log").fetchall() == [(kind,)]
+
+
+def test_the_log_still_refuses_an_unknown_kind(conn: sqlite3.Connection) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        change_log.append(conn, AT, ("price", "s", None, "x"), "user")
