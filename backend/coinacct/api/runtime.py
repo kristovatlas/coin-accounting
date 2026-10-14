@@ -16,7 +16,7 @@ from typing import Any
 from coinacct.api.app import create_app
 from coinacct.api.security import ASGIApp
 from coinacct.api.session import BOOTSTRAP_TTL_SECONDS, Sessions
-from coinacct.services import discovery, events, graph, history, imports, jobs, startup, tags
+from coinacct.services import discovery, events, graph, history, imports, jobs, ledger, startup, tags
 from coinacct.services.lifecycle import Shutdown
 from coinacct.services.startup import NodeStatus, StorageRefused
 
@@ -84,6 +84,7 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
     graph_service = None
     tag_service = None
     event_service = None
+    ledger_service = None
     if open_reader is not None:
         import_service = imports.service(
             db, open_reader, rpc.host, rpc.port, rpc.user, rpc.password, online=status.online
@@ -92,6 +93,7 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
         graph_service = graph.Graph(db, open_reader, import_service.node())
         tag_service = tags.Tagging(db, open_reader, import_service)
         event_service = events.Events(db, open_reader)
+        ledger_service = ledger.Ledger(open_reader)
     app = create_app(
         port=port,
         sessions=sessions,
@@ -103,6 +105,7 @@ def build(  # noqa: PLR0913 - each value comes from a different part of start-up
         graph=graph_service,
         tagging=tag_service,
         events=event_service,
+        ledger=ledger_service,
     )
     starter = None
     if status.online:
