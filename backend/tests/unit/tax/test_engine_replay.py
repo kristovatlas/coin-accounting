@@ -6,8 +6,6 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
-import pytest
-
 from coinacct.tax import engine
 from coinacct.tax.engine import (
     Acquisition,
@@ -184,25 +182,15 @@ def test_a_late_gift_given_is_figured_in_the_replay() -> None:
     assert (record.lot, record.basis, record.acquired) == ("b2", D("2.00"), date(2024, 1, 2))
 
 
-@pytest.mark.parametrize("treatment", ["carry", "dispose"])
-def test_a_late_transfers_fee_is_figured_on_the_replays_lot(treatment: engine.FeeTreatment) -> None:
+def test_a_late_transfers_fee_is_figured_on_the_replays_lot() -> None:
     # s1 chooses b3 late (the replay sells b1). A deposit of 10 with a 2-sat fee then chooses b1 late:
-    # in the replay FIFO moves b2 (basis 2.00). Carry: 8 sats arrive with all of b2's basis; dispose:
-    # the fee is a disposal of 2 of b2's sats (basis 0.40) and 8 arrive with 1.60
+    # in the replay FIFO moves b2 (basis 2.00): 8 sats arrive with all of b2's basis (ADR 0043)
     on = date(2025, 3, 2)
     deposit = Transfer(
-        "d", "w", "x", on, noon(on), "deposit", 10, fee_sats=2, fee_value=D("10.00"),
-        picks=(Pick("b1", 10),), identified_at=LATE,
-    )  # fmt: skip
-    standing = run([*THREE, sale("s1", 1, "b3"), deposit], fee_treatment=treatment).late[1].standing
-    moved = [m for m in standing if isinstance(m, Moved)]
-    fees = [a for a in standing if isinstance(a, Allocation)]
-    assert [(m.lot, m.sats) for m in moved] == [("b2", 8)]
-    if treatment == "carry":
-        assert (moved[0].basis, moved[0].carried_fee, fees) == (D("2.00"), 2, [])
-    else:
-        assert moved[0].basis == D("1.60")
-        assert [(a.lot, a.sats, a.basis, a.proceeds) for a in fees] == [("b2", 2, D("0.40"), D("10.00"))]
+        "d", "w", "x", on, noon(on), "deposit", 10, fee_sats=2, picks=(Pick("b1", 10),), identified_at=LATE
+    )
+    standing = run([*THREE, sale("s1", 1, "b3"), deposit]).late[1].standing
+    assert standing == (Moved("d", "b2", "b2@d", "x", 8, D("2.00"), date(2024, 1, 2), 2),)
 
 
 def test_the_same_coins_moved_in_other_amounts_are_the_same_lot_adr0040() -> None:
@@ -308,27 +296,3 @@ def test_without_late_choices_the_replay_changes_nothing() -> None:
     result = run(events)
     assert result.late == () and result.replay_stopped is None
     assert [a.lot for a in result.allocations] == ["b3", "b1"]
-
-
-def test_a_late_choice_at_the_event_the_replay_stops_at_is_still_figured_in_the_replay() -> None:
-    # w holds b1 (2 sats), a gift g1 (1 sat) and b2. A late carry deposit of 3 sats with a 2-sat fee
-    # chooses b2: fine for the user. In the replay FIFO takes b1 and g1, and the fee would use up g1's
-    # only sat: the replay can't carry a gift's basis, so it stops at d. The warning is figured on the
-    # replay's lots just before d (replayed): g1 shows as its own part with nothing arriving
-    gift = Acquisition(
-        "g1", "w", date(2024, 1, 2), "gift_in", 1, D("1.00"), fmv=D("1.00"), donor_acquired=date(2023, 1, 1)
-    )
-    on = date(2025, 3, 2)
-    deposit = Transfer(
-        "d", "w", "x", on, noon(on), "deposit", 3, fee_sats=2, picks=(Pick("b2", 3),), identified_at=LATE
-    )
-    events: list[Event] = [lot("b1", 1, "1.00"), gift, lot("b2", 3, "3.00"), deposit]
-    events[0] = Acquisition("b1", "w", date(2024, 1, 1), "buy", 2, D("1.00"))
-    result = run(events)
-    assert result.replay_stopped == "d"
-    assert len(result.late) == 1 and result.late[0].replayed
-    assert [(m.lot, m.sats) for m in result.late[0].standing if isinstance(m, Moved)] == [
-        ("b1", 1),
-        ("g1", 0),
-    ]
-    assert [m.lot for m in result.moves] == ["b2"]  # the user's choice moved b2
