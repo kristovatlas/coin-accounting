@@ -20,10 +20,9 @@ this module decides. One call traces one transaction that spends coins of one co
   basis isn't recovered. Nothing is carried for either.
 - **Zero-value outputs** (an OP_RETURN, say) carry no sats and get no lots.
 - **Who owns what:** a change output belongs to the wallet's account; a deposit's outputs to the one
-  custodial (exchange) account of the user's its event names, a transfer's to the one other self-custody
-  wallet it names; a
-  sale's, spend's or gift's to nobody the user records. An input the user doesn't own carries no lots
-  (`fragments=()`). A zero-value coin carries none either.
+  custodial (exchange) account its event names; a transfer's to the one other self-custody wallet its
+  event names; a sale's, spend's or gift's to nobody the user records. An input the user doesn't own
+  carries no lots (`fragments=()`). A zero-value coin carries none either.
 - **The caller resolves links and the pool first** (ADR 0041 §1, §4): each of the wallet's inputs must
   carry exactly its value in lots. Uncovered sats are a block or a pool draw there, never an input here.
 - **Not decided here:** whether the receiving wallet is coin-traced or on whole-wallet FIFO (§3's mixed
@@ -173,9 +172,12 @@ def trace(tx: WalletTx) -> Traced | Blocked:
         carries = tuple(_carry(f, destination) for f in fee_parts)
     same = set(_identical(filled) or ())
     twins = set(_twins(filled, {c.vout for c in carries}) or ())
-    if same or twins:  # every ambiguous output, both kinds named
-        what = " and ".join(w for w, hit in (("lots", same), ("basis from the fee", twins)) if hit)
-        detail = f"outputs {_list(sorted(same | twins))} would get different {what}"
+    if same or twins:  # every ambiguous output, each kind with its own outputs
+        if same == twins:
+            detail = f"outputs {_list(sorted(same))} would get different lots and basis from the fee"
+        else:
+            kinds = (("lots", same), ("basis from the fee", twins))
+            detail = "; ".join(f"outputs {_list(sorted(v))} would get different {w}" for w, v in kinds if v)
         return Blocked(tx.txid, "identical_outputs", detail)
     return Traced(tuple(sorted((o.vout, parts) for o, parts in filled)), fee_parts, carries)
 
@@ -220,7 +222,9 @@ def _unsupported_outputs(tx: WalletTx) -> Blocked | None:
     paid_out = sum(o.value for o in leaving)
     if paid_out != tx.leaving.sats:
         vouts = sorted(o.vout for o in leaving)
-        detail = f"event {tx.leaving.id!r} has {tx.leaving.sats} sats, its outputs {_list(vouts)} {paid_out}"
+        have = "has" if len(vouts) == 1 else "have"
+        outs = _named("output", vouts)
+        detail = f"event {tx.leaving.id!r} has {tx.leaving.sats} sats, its {outs} {have} {paid_out}"
         return Blocked(tx.txid, "amount_mismatch", detail)
     return None
 
@@ -326,8 +330,8 @@ def _check(tx: object) -> None:
         raise EngineError(f"tx {tx.txid}: the inputs and outputs must be tuples, with at least one input")
     for i in tx.inputs:
         _check_input(i, tx)
-    if len({i.vin for i in tx.inputs}) != len(tx.inputs):
-        raise EngineError(f"tx {tx.txid}: two inputs have the same vin (a coin is spent once)")
+    if sorted(i.vin for i in tx.inputs) != list(range(len(tx.inputs))):  # every input, each once (§6)
+        raise EngineError(f"tx {tx.txid}: the inputs' vins must be 0 to {len(tx.inputs) - 1}, each once")
     _check_outputs(tx)
     if tx.leaving is not None:
         if not isinstance(tx.leaving, Leaving) or not _name(tx.leaving.id):

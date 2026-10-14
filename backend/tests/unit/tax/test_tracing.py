@@ -656,7 +656,7 @@ def test_a_deposit_pays_only_its_own_account() -> None:
 
 
 def test_a_coin_spent_twice_raises() -> None:
-    with pytest.raises(EngineError, match="same vin"):
+    with pytest.raises(EngineError, match="vins must be 0 to 1, each once"):
         trace(
             tx(
                 [coin(frag("L1", 5_000), vin=0), coin(frag("L2", 5_000), vin=0)],
@@ -666,25 +666,56 @@ def test_a_coin_spent_twice_raises() -> None:
 
 
 def test_block_messages_name_inputs_by_vin_whatever_their_order() -> None:
-    inputs = [coin(frag("L1", 5_000), vin=3), Input(None, 5_000, (), 7), Input(None, 1_000, (), 1)]
+    inputs = [coin(frag("L1", 5_000), vin=0), Input(None, 5_000, (), 2), Input(None, 1_000, (), 1)]
     outs = [Output(0, 10_000, CHANGE, account="w", kind="self_custody")]
     blocked = trace(tx(inputs, outs))
-    assert blocked == Blocked("t1", "shared", "inputs 1, 7 aren't the user's")
+    assert blocked == Blocked("t1", "shared", "inputs 1, 2 aren't the user's")
     assert trace(tx(inputs[::-1], outs[::-1])) == blocked
 
 
+CARRIED_TO: dict[str, tuple[str, Any]] = {"deposit": ("x", "custodial"), "transfer": ("w2", "self_custody")}
+
+
 @pytest.mark.parametrize(
-    "leaving",
+    ("kind", "account", "match"),
     [
-        Leaving("e", "sell", 9_000, account="x"),  # a sale goes to nobody the user records
-        Leaving("e", "deposit", 9_000, account="w"),  # a deposit leaves the wallet
-        Leaving("e", "transfer", 9_000, account=""),
+        ("sell", "x", "goes to nobody the user records"),
+        ("gift_out", "w2", "goes to nobody the user records"),
+        ("deposit", "w", "names the one other account"),  # the wallet itself
+        ("deposit", None, "names the one other account"),
+        ("transfer", "", "names the one other account"),
+        ("transfer", 5, "names the one other account"),
     ],
 )
-def test_a_leaving_events_account_is_checked(leaving: Leaving) -> None:
-    out = Output(0, 9_000, PAY, account=None if leaving.kind == "sell" else "x", event="e")
-    with pytest.raises(EngineError):
-        trace(WalletTx("t1", "w", (coin(frag("L1", 10_000), vin=0),), (out,), leaving))
+def test_a_leaving_events_account_is_checked(kind: Any, account: Any, match: str) -> None:
+    # each output is consistent on its own, so only the event's account can raise
+    to, to_kind = CARRIED_TO.get(kind, (None, None))
+    out = Output(0, 9_000, PAY, account=to, kind=to_kind, event="e")
+    t = WalletTx(
+        "t1", "w", (coin(frag("L1", 10_000), vin=0),), (out,), Leaving("e", kind, 9_000, account=account)
+    )
+    with pytest.raises(EngineError, match=match):
+        trace(t)
+
+
+@pytest.mark.parametrize("vins", [(-1,), (True,), ("0",), (1,), (0, 2), (1, 1)])
+def test_vins_are_the_inputs_indexes(vins: tuple[Any, ...]) -> None:
+    inputs = tuple(Input("w", 1_000, (frag(f"L{n}", 1_000, n),), v) for n, v in enumerate(vins))
+    out = Output(0, 900 * len(vins), CHANGE, account="w", kind="self_custody")
+    with pytest.raises(EngineError, match="vin"):
+        trace(WalletTx("t1", "w", inputs, (out,), None))
+
+
+def test_each_kind_of_ambiguity_names_its_own_outputs() -> None:
+    # outputs 0 and 1 get different lots (L1, L2); outputs 2 and 3 the same lot, L3, but L3's fee basis
+    # would go to whichever comes first
+    c = coin(frag("L1", 3_000), frag("L2", 3_000, 1), frag("L3", 2_100, 2))
+    outs = [
+        Output(v, 3_000 if v < 2 else 1_000, DEST, account="x", kind="custodial", event="d") for v in range(4)
+    ]
+    blocked = trace(tx([c], outs, Leaving("d", "deposit", 8_000)))
+    detail = "outputs 0, 1 would get different lots; outputs 2, 3 would get different basis from the fee"
+    assert blocked == Blocked("t1", "identical_outputs", detail)
 
 
 def test_an_output_naming_another_event_raises() -> None:
