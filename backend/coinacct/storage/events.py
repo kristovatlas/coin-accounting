@@ -24,14 +24,15 @@ a gift without its donor's date).
   method, or the FIFO fallback, which the engine tells apart (PLAN §2's `standing_order | fifo_default`
   are derived, not stored).
 - `events`, `identification` and `identifications` read them back, events in the order of their
-  moments.
+  moments. A stored choice is checked on read by `identify`'s rules (T-408), so a damaged one is
+  refused with the remedy, never half-used.
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -219,11 +220,10 @@ def identify(  # noqa: PLR0913 - the event, its choices, when they were made, an
         if choices:
             _check_choice(event, choices)
             _check_lots_exist(conn, choices)
-        before, _ = identification(conn, event_id)
+        before, before_at = identification(conn, event_id)
         # a movement's choice names the lots it moves, which later choices can name in turn; the same
         # lots in another order move the same lots (the engine takes picks in FIFO order)
         changed = sorted((c.lot, c.sats) for c in choices) != sorted((c.lot, c.sats) for c in before)
-        _, before_at = identification(conn, event_id)
         if identified_at is not None and before_at is not None and identified_at < before_at:
             # a choice is made after the one it replaces: never re-dated earlier, so a late choice can't
             # be made to look timely (T-508)
@@ -315,13 +315,17 @@ def events(conn: sqlite3.Connection) -> list[Stored]:
 def identification(conn: sqlite3.Connection, event_id: int) -> tuple[tuple[Choice, ...], datetime | None]:
     """Event `event_id`'s chosen lots, in order, and when they were chosen; `((), None)` if none."""
     rows = conn.execute(
-        "SELECT lot, sats, identified_at FROM identification WHERE event_id = ? ORDER BY position",
+        "SELECT position, lot, sats, identified_at, method, late FROM identification"
+        " WHERE event_id = ? ORDER BY position",
         (event_id,),
     ).fetchall()
     if not rows:
         return (), None
     with _damaged():
-        return tuple(Choice(lot, sats) for lot, sats, _ in rows), datetime.fromisoformat(rows[0][2])
+        event = _read(conn, event_id)
+        choice = _stored_choice(event, rows)
+        _check_lots_exist(conn, choice[0])
+        return choice
 
 
 @contextmanager
@@ -336,15 +340,66 @@ def _refusals() -> Iterator[None]:
         ) from None
 
 
-def identifications(conn: sqlite3.Connection) -> dict[int, tuple[tuple[Choice, ...], datetime]]:
-    """Every stored choice of lots, by event id, in one query: its lots in order, and when it was made."""
-    out: dict[int, tuple[list[Choice], datetime]] = {}
+def identifications(
+    conn: sqlite3.Connection, stored: Sequence[Stored] | None = None
+) -> dict[int, tuple[tuple[Choice, ...], datetime]]:
+    """Every stored choice of lots, by event id, in one query: its lots in order, and when it was made.
+    Each is checked as `identify` would write it (T-408): a damaged one is refused, never half-used.
+    `stored` must be every event, read in the same snapshot (`events`): a choice of an event missing
+    from it is refused as damage. Without it they are read here, which needs a read transaction."""
+    rows: dict[int, list[tuple[Any, ...]]] = {}
+    for event_id, *row in conn.execute(
+        "SELECT event_id, position, lot, sats, identified_at, method, late FROM identification"
+        " ORDER BY event_id, position"
+    ):
+        rows.setdefault(event_id, []).append(tuple(row))
+    if not rows:
+        return {}
+    known = {s.id: s.event for s in (events(conn) if stored is None else stored)}
     with _damaged():
-        for event_id, lot, sats, chosen_at in conn.execute(
-            "SELECT event_id, lot, sats, identified_at FROM identification ORDER BY event_id, position"
-        ):
-            out.setdefault(event_id, ([], datetime.fromisoformat(chosen_at)))[0].append(Choice(lot, sats))
-    return {k: (tuple(v[0]), v[1]) for k, v in out.items()}
+        out = {}
+        for event_id, picks in rows.items():
+            if event_id not in known:
+                raise EventError("a stored choice is damaged")
+            out[event_id] = choice = _stored_choice(known[event_id], picks)
+            if any((o := _origin(c.lot)) is not None and o not in known for c in choice[0]):
+                raise EventError("a stored choice is damaged")  # a lot of an event that isn't stored
+        return out
+
+
+def _stored_choice(event: Event, rows: Sequence[tuple[Any, ...]]) -> tuple[tuple[Choice, ...], datetime]:
+    """One stored choice, held to `identify`'s rules: lots by the engine's id, positions 0 to n-1, each
+    lot once, none holding a key, the user's specific choice not yet judged late (the only method and
+    flag the module writes), whole sats, at most `MAX_CHOICES`, one UTC moment from genesis on, and
+    a fit for `event` (`_check_choice`). The caller checks that each lot starts from a stored event when
+    it starts from one. The one rule a read can't check is that the choice wasn't dated after it was
+    recorded."""
+    stamps = {chosen_at for _, _, _, chosen_at, _, _ in rows}
+    if [p for p, *_ in rows] != list(range(len(rows))):
+        raise EventError("a stored choice is damaged")
+    if any(method != "specific" or late != 0 for *_, method, late in rows):
+        raise EventError("a stored choice is damaged")
+    if len(stamps) != 1 or len(rows) > MAX_CHOICES:
+        raise EventError("a stored choice is damaged")
+    (stamp,) = stamps
+    chosen_at = datetime.fromisoformat(stamp)
+    if chosen_at.utcoffset() != timedelta(0) or _moment(chosen_at, "a choice") != stamp:
+        raise EventError("a stored choice is damaged")
+    if chosen_at.date() < GENESIS:
+        raise EventError("a stored choice is damaged")
+    choices = []
+    for _, lot, sats, *_ in rows:
+        if not isinstance(lot, str) or not 1 <= len(lot) <= MAX_LOT or _LOT.fullmatch(lot) is None:
+            raise EventError("a stored choice is damaged")
+        refuse_private(lot)  # a key planted in the DB never reaches the ledger's output (T-703)
+        _check_sats(sats, "a choice's sats")
+        choices.append(Choice(lot, sats))
+    if len({c.lot for c in choices}) != len(choices):
+        raise EventError("a stored choice is damaged")
+    for c in choices:
+        _origin(c.lot)  # an event id is written without a leading zero
+    _check_choice(event, tuple(choices))
+    return tuple(choices), chosen_at
 
 
 def _replace_choice(  # noqa: PLR0913 - as identify's

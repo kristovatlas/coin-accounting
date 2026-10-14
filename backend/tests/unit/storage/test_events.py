@@ -489,10 +489,19 @@ def test_every_choice_reads_back_in_one_query(conn: sqlite3.Connection, accounts
     deposit = ev.add_event(conn, ev.Event("deposit", wallet, WHEN, 500, to=exchange), at=AT)
     ev.identify(conn, sale, (ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN, at=AT)
     ev.identify(conn, deposit, (ev.Choice("e2", 500),), WHEN, at=AT)
-    assert ev.identifications(conn) == {
+    expected = {
         sale: ((ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN),
         deposit: ((ev.Choice("e2", 500),), WHEN),
     }
+    assert ev.identifications(conn) == expected  # reading the events itself
+    stored = ev.events(conn)
+    queries: list[str] = []
+    conn.set_trace_callback(queries.append)
+    try:
+        assert ev.identifications(conn, stored) == expected
+    finally:
+        conn.set_trace_callback(None)
+    assert len(queries) == 1  # however many choices: checked against the events already read
 
 
 def test_an_unknown_event_is_not_found(conn: sqlite3.Connection) -> None:
@@ -904,12 +913,15 @@ def test_damaged_rows_are_refused_when_read_t408(
     ):
         conn.execute(f"DROP TRIGGER {trigger}")  # damage that bypasses the module and the schema's rules
     conn.execute(damage)
+    if damage.startswith("UPDATE event"):
+        with pytest.raises(ev.EventError, match="damaged"):
+            ev.events(conn)
+    else:
+        ev.events(conn)  # a damaged choice is the choice readers' to refuse
     with pytest.raises(ev.EventError, match="damaged"):
-        ev.events(conn)
         ev.identifications(conn)
     with pytest.raises(ev.EventError, match="damaged"):
-        ev.identifications(conn)
-        ev.events(conn)
+        ev.identification(conn, sale)  # the one-event read too, which identify's checks rely on
 
 
 @pytest.mark.parametrize("kind", ["opening_allocation_2025", "fee"])
@@ -963,3 +975,70 @@ def test_lot_ids_the_engine_builds_are_accepted(
     bought = ev.add_event(conn, buy(wallet), at=AT)
     sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
     ev.identify(conn, sale, (ev.Choice(lot.format(b=bought), 1_000),), WHEN, at=AT)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "UPDATE identification SET lot = 'e 1' WHERE position = 0",  # outside the engine's id alphabet
+        "UPDATE identification SET lot = 'e2' WHERE position = 0",  # the same lot twice
+        "UPDATE identification SET sats = 300 WHERE position = 0",  # no longer covers the sale
+        # two times for one choice
+        "UPDATE identification SET identified_at = '2025-03-01T12:00:01+00:00' WHERE position = 1",
+        "UPDATE identification SET identified_at = '2025-03-01T17:00:00+05:00'",  # not UTC
+        "UPDATE identification SET identified_at = '2025-03-01T12:00:00Z'",  # not as the module writes it
+        "UPDATE identification SET identified_at = '2008-01-01T00:00:00+00:00'",  # before genesis
+        "UPDATE identification SET lot = '01' WHERE position = 0",  # an event id with a leading zero
+        "UPDATE identification SET lot = '999@5' WHERE position = 0",  # from an event that isn't stored
+        # a private key (the well-known example key), which identify refuses (T-703)
+        "UPDATE identification SET lot = '5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ' "
+        "WHERE position = 0",
+        "UPDATE identification SET identified_at = '2025-03-01T12:00:00.000000'",  # no offset
+        "UPDATE identification SET position = 5 WHERE position = 1",  # a gap in the order
+        "UPDATE identification SET method = 'standing_order'",  # a method the module never writes
+        "UPDATE identification SET late = 1 WHERE position = 1",  # a flag the module doesn't set yet
+    ],
+)
+def test_a_stored_choice_is_checked_as_identify_would_write_it_t408(
+    conn: sqlite3.Connection, accounts: tuple[int, int], damage: str
+) -> None:
+    wallet, _ = accounts
+    sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN, at=AT)
+    assert ev.identifications(conn) == {sale: ((ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN)}
+    conn.execute("DROP TRIGGER identification_is_replaced_never_edited")  # damage that bypasses the module
+    conn.execute(damage)
+    with pytest.raises(ev.EventError, match="damaged"):
+        ev.identifications(conn)
+    with pytest.raises(ev.EventError, match="damaged"):
+        ev.identification(conn, sale)  # the one-event read too, which identify's checks rely on
+
+
+def test_a_choice_of_an_event_not_among_those_read_is_refused_t408(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, _ = accounts
+    sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice("e1", 1_000),), WHEN, at=AT)
+    with pytest.raises(ev.EventError, match="damaged"):
+        ev.identifications(conn, [s for s in ev.events(conn) if s.id != sale])
+
+
+def test_a_stored_choice_of_more_than_the_most_lots_is_refused_t408(
+    conn: sqlite3.Connection, accounts: tuple[int, int]
+) -> None:
+    wallet, _ = accounts
+    n = ev.MAX_CHOICES + 1
+    sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, n, D("50.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice("e0", n),), WHEN, at=AT)
+    conn.execute("DROP TRIGGER identification_is_replaced_never_edited")  # damage that bypasses the module
+    stamp = conn.execute("SELECT identified_at FROM identification").fetchone()[0]
+    conn.execute("UPDATE identification SET sats = 1")
+    conn.executemany(
+        "INSERT INTO identification (event_id, position, lot, sats, identified_at) VALUES (?, ?, ?, 1, ?)",
+        [(sale, i, f"e{i}", stamp) for i in range(1, n)],
+    )
+    with pytest.raises(ev.EventError, match="damaged"):
+        ev.identifications(conn)
+    with pytest.raises(ev.EventError, match="damaged"):
+        ev.identification(conn, sale)

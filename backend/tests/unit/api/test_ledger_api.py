@@ -317,3 +317,18 @@ def test_a_busy_db_is_a_503(tmp_path: Path) -> None:
     session = call(app, "POST", "/api/session", json_body={"bootstrap": TOKEN}).json()["session"]
     reply = call(app, "GET", "/api/ledger", headers={"Authorization": f"Bearer {session}"})
     assert reply.status == 503 and "busy" in reply.json()["error"]
+
+
+def test_a_held_inheritance_is_always_long_and_a_late_gift_shows_the_standing_lots(world: World) -> None:
+    inherited = world.add("inherit", world.manual, "2024-01-02T12:00:00Z", 1_000, usd="40.00")
+    later = world.add("buy", world.manual, "2024-02-02T12:00:00Z", 1_000, usd="20.00")
+    (first, second) = world.ledger().json()["holdings"]
+    assert (first["lot"], first["always_long"], second["always_long"]) == (str(inherited), True, False)
+    gift = world.add("gift_out", world.manual, "2024-03-02T12:00:00Z", 1_000, usd="0.00")
+    world.identify(gift, (later, 1_000))  # now: late, and not FIFO's
+    out = world.ledger().json()
+    assert [(g["event"], g["lot"]) for g in out["gifts"]] == [(gift, str(later))]
+    (late,) = out["late"]
+    assert [(p["event"], p["lot"], p["always_long"], p["unknown_basis"]) for p in late["standing"]] == [
+        (gift, str(inherited), True, False)
+    ]

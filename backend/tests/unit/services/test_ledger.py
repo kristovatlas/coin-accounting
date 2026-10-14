@@ -397,6 +397,7 @@ def test_only_the_stale_refusals_count_as_stale(message: str) -> None:
     chosen = {4: ((ev.Choice("1@3", 10),), datetime(2025, 1, 1, tzinfo=UTC))}
     assert _stale_choice(engine.EngineError(message), chosen, set()) == 4
     assert _stale_choice(engine.EngineError(message + " and more"), chosen, set()) is None  # anchored
+    assert _stale_choice(engine.EngineError(message + "\n"), chosen, set()) is None  # to the very end
     assert _stale_choice(engine.EngineError(message), chosen, {4}) is None  # once only
 
 
@@ -410,3 +411,23 @@ def test_a_lot_id_cant_make_another_refusal_look_stale() -> None:
     chosen = {4: ((ev.Choice("x", 10),), datetime(2025, 1, 1, tzinfo=UTC))}
     forged = "event '4': lot 'x' isn't held in account '2' was named, and the chosen lots don't add up"
     assert _stale_choice(engine.EngineError(forged), chosen, set()) is None
+
+
+@pytest.mark.parametrize("automatic", [True, False])
+def test_a_damaged_stored_choice_is_refused_with_its_remedy_t408(
+    db: tuple[sqlite3.Connection, Ledger], automatic: bool
+) -> None:
+    """Whether the account would use the choice or not, a damaged one is never dropped or half-used."""
+    conn, ledger = db
+    wallet = ac.add_tax_account(conn, "Wallet", "self_custody", automatic=automatic)
+    a = ev.add_event(
+        conn, ev.Event("buy", wallet, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT
+    )
+    sale = ev.add_event(
+        conn, ev.Event("sell", wallet, datetime(2025, 3, 1, tzinfo=UTC), 1_000, D("60.00")), at=AT
+    )
+    ev.identify(conn, sale, (ev.Choice(str(a), 1_000),), datetime(2025, 3, 1, tzinfo=UTC), at=AT)
+    conn.execute("DROP TRIGGER identification_is_replaced_never_edited")  # damage that bypasses the module
+    conn.execute("UPDATE identification SET sats = 999")
+    with pytest.raises(ImportRefused, match="damaged"):
+        ledger.run()
