@@ -386,9 +386,13 @@ class Imports:
         with _db_errors():
             return accounts.add_entity(self._writer, name, kind)
 
-    def add_tax_account(self, name: str, kind: accounts.AccountKind, *, entity_id: int | None = None) -> int:
+    def add_tax_account(
+        self, name: str, kind: accounts.AccountKind, *, entity_id: int | None = None, automatic: bool = True
+    ) -> int:
         with _db_errors():
-            return accounts.add_tax_account(self._writer, name, kind, entity_id=entity_id)
+            return accounts.add_tax_account(
+                self._writer, name, kind, entity_id=entity_id, automatic=automatic
+            )
 
     def add_client(self, name: str, kind: accounts.ClientKind) -> int:
         with _db_errors():

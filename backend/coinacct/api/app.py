@@ -104,6 +104,8 @@ class NewTaxAccount(Strict):
     name: str = Field(min_length=1, max_length=200)
     kind: Literal["self_custody", "custodial"]
     entity_id: int | None = None
+    # ADR 0021 §1: whether the standing method selects the account's lots (the default), or the user does
+    automatic: Annotated[bool, Field(strict=True)] = True
 
 
 class NewClient(Strict):
@@ -367,7 +369,11 @@ def _import_routes(app: FastAPI, imports: Imports, authenticated: list[Any]) -> 
 
     @app.post("/api/tax-accounts", status_code=201, dependencies=authenticated)
     def add_tax_account(body: NewTaxAccount) -> dict[str, int]:
-        return {"id": imports.add_tax_account(body.name, body.kind, entity_id=body.entity_id)}
+        return {
+            "id": imports.add_tax_account(
+                body.name, body.kind, entity_id=body.entity_id, automatic=body.automatic
+            )
+        }
 
     @app.post("/api/clients", status_code=201, dependencies=authenticated)
     def add_client(body: NewClient) -> dict[str, int]:

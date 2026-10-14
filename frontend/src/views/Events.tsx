@@ -158,7 +158,10 @@ export function Events({ session }: { session: string }) {
   }
 
   const current = events.find((e) => e.id === choosing);
-  const currentText = current ? current.choices.map((c) => `${c.lot} ${btc(c.sats)}`).join("\n") : "";
+  // the same lots, however typed: saving them again would re-date the choice (ADR 0008 §3)
+  const key = (cs: Choice[]) => cs.map((c) => `${c.lot}:${c.sats}`).sort().join(",");
+  const typed = choicesOf(lots);
+  const unchanged = current !== undefined && typed !== null && key(typed) === key(current.choices);
 
   async function onChoose(id: number) {
     const choices = choicesOf(lots);
@@ -329,7 +332,7 @@ export function Events({ session }: { session: string }) {
           <button
             id="choose-lots-save"
             type="button"
-            disabled={busy || lots.trim() === currentText}
+            disabled={busy || unchanged}
             onClick={() => void onChoose(current.id)}
           >
             Save choice

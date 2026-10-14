@@ -72,8 +72,8 @@ export type TaxAccount = {
   name: string;
   kind: "self_custody" | "custodial";
   entity_id: number | null;
-  standing_method?: string | null;
-  automatic?: boolean;
+  standing_method: "fifo" | "specific" | null;
+  automatic: boolean;
 };
 export type WalletClient = { id: number; name: string; kind: string };
 export type Accounts = { online: boolean; entities: Entity[]; tax_accounts: TaxAccount[]; clients: WalletClient[] };
@@ -129,8 +129,13 @@ async function call<T>(session: string, method: "GET" | "POST", path: string, bo
 
 export const getAccounts = (session: string) => call<Accounts>(session, "GET", "/api/accounts");
 
-export const addTaxAccount = (session: string, name: string, kind: TaxAccount["kind"], entityId?: number) =>
-  call<{ id: number }>(session, "POST", "/api/tax-accounts", { name, kind, entity_id: entityId ?? null });
+export const addTaxAccount = (
+  session: string,
+  name: string,
+  kind: TaxAccount["kind"],
+  entityId?: number,
+  automatic = true, // ADR 0021 §1: the standing method selects its lots; false: the user chooses them
+) => call<{ id: number }>(session, "POST", "/api/tax-accounts", { name, kind, entity_id: entityId ?? null, automatic });
 
 export const addClient = (session: string, name: string, kind: string) =>
   call<{ id: number }>(session, "POST", "/api/clients", { name, kind });
