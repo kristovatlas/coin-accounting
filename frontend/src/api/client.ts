@@ -67,7 +67,14 @@ export async function quit(session: string): Promise<void> {
 // --- Accounts and imports (PLAN §3; the routes in backend/coinacct/api/app.py) ----------------------
 
 export type Entity = { id: number; name: string; kind: string; knows_identity: boolean };
-export type TaxAccount = { id: number; name: string; kind: "self_custody" | "custodial"; entity_id: number | null };
+export type TaxAccount = {
+  id: number;
+  name: string;
+  kind: "self_custody" | "custodial";
+  entity_id: number | null;
+  standing_method?: string | null;
+  automatic?: boolean;
+};
 export type WalletClient = { id: number; name: string; kind: string };
 export type Accounts = { online: boolean; entities: Entity[]; tax_accounts: TaxAccount[]; clients: WalletClient[] };
 

@@ -32,7 +32,8 @@ const KINDS: { kind: EventKind; label: string }[] = [
   { kind: "self_transfer", label: "Transfer between wallets" },
 ];
 const MOVEMENTS: EventKind[] = ["deposit", "withdrawal", "self_transfer"];
-const NO_USD: EventKind[] = [...MOVEMENTS, "gift_in", "gift_out"]; // a gift given's proceeds are 0.00
+const NO_USD: EventKind[] = [...MOVEMENTS, "gift_out"]; // a gift given's proceeds are 0.00
+const USD = /^-?\d{1,15}(\.\d{1,2})?$/; // the API's USD text: exact cents
 const FEE: EventKind[] = [...MOVEMENTS, "buy"]; // a BTC fee on a sale, spend or gift isn't supported yet
 const CHOOSES: EventKind[] = [...MOVEMENTS, "sell", "spend", "gift_out"];
 
@@ -70,6 +71,9 @@ export function Events({ session }: { session: string }) {
   const [note, setNote] = useState("");
   const [fmv, setFmv] = useState("");
   const [donorDate, setDonorDate] = useState("");
+  const [alwaysLong, setAlwaysLong] = useState(false);
+  const [missingBasis, setMissingBasis] = useState("");
+  const [missingDate, setMissingDate] = useState("");
   const [choosing, setChoosing] = useState<number | null>(null);
   const [lots, setLots] = useState("");
 
@@ -105,19 +109,34 @@ export function Events({ session }: { session: string }) {
 
   async function onAdd() {
     const sats = satsOf(amount);
-    const feeSats = !FEE.includes(kind) || fee.trim() === "" ? 0 : satsOf(fee);
+    const feeSats = !FEE.includes(kind) || fee.trim() === "" || /^0*\.?0*$/.test(fee.trim()) ? 0 : satsOf(fee);
     if (sats === null || feeSats === null) return setError("Enter BTC amounts such as 0.015.");
-    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(at)) return setError("Enter when it happened, in UTC.");
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(at)) return setError("Enter when it happened, in UTC.");
+    if (kind === "withdrawal" && (missingBasis.trim() !== "" || missingDate !== "")) {
+      if (!USD.test(missingBasis.trim()) || missingDate === "")
+        return setError("For sats the account has no lots for, enter both their USD basis and when they were acquired.");
+    }
+    if (MOVEMENTS.includes(kind) && to === "") return setError("Choose the account it went to.");
+    if (!NO_USD.includes(kind) && usd.trim() !== "" && !USD.test(usd.trim()))
+      return setError("Enter USD amounts such as 1250.50, without $ or commas.");
+    if (!NO_USD.includes(kind) && kind !== "gift_in" && usd.trim() === "") return setError("Enter the USD amount.");
+    if (kind === "gift_in" && (!USD.test(fmv.trim()) || donorDate === ""))
+      return setError("Enter the gift's USD value and when the donor acquired it.");
     const event: EventInput = {
       kind,
       account: Number(account),
-      at: `${at}:00Z`,
+      at: `${at.length === 16 ? `${at}:00` : at}Z`, // seconds kept when given
       sats,
       usd: kind === "gift_out" ? "0.00" : NO_USD.includes(kind) || usd.trim() === "" ? null : usd.trim(),
       to: MOVEMENTS.includes(kind) ? Number(to) : null,
       fee_sats: feeSats,
       note: note.trim() === "" ? null : note.trim(),
-      ...(kind === "gift_in" ? { fmv: fmv.trim(), donor_acquired: donorDate } : {}),
+      // a gift received's USD amount is the donor's basis; empty means unknown, which blocks reports
+      ...(kind === "gift_in" ? { fmv: fmv.trim(), donor_acquired: donorDate, donor_always_long: alwaysLong } : {}),
+      // a withdrawal of sats its account has no lots for names their basis and date (PLAN §7)
+      ...(kind === "withdrawal" && missingBasis.trim() !== ""
+        ? { missing_basis: missingBasis.trim(), missing_acquired: missingDate }
+        : {}),
     };
     if (await run(() => addEvent(session, event))) {
       setAmount("");
@@ -126,8 +145,20 @@ export function Events({ session }: { session: string }) {
       setNote("");
       setFmv("");
       setDonorDate("");
+      setAlwaysLong(false);
+      setMissingBasis("");
+      setMissingDate("");
     }
   }
+
+  /** Open the choice panel on `e`, filled with its current choice, so saving unchanged changes nothing. */
+  function openChoice(e: StoredEvent) {
+    setChoosing(e.id);
+    setLots(e.choices.map((c) => `${c.lot} ${btc(c.sats)}`).join("\n"));
+  }
+
+  const current = events.find((e) => e.id === choosing);
+  const currentText = current ? current.choices.map((c) => `${c.lot} ${btc(c.sats)}`).join("\n") : "";
 
   async function onChoose(id: number) {
     const choices = choicesOf(lots);
@@ -135,8 +166,24 @@ export function Events({ session }: { session: string }) {
     if (await run(() => identifyLots(session, id, choices))) setChoosing(null);
   }
 
-  if (!accounts) return <section id="events">{error ? <p>{error}</p> : <p>Loading…</p>}</section>;
+  if (!accounts)
+    return (
+      <section id="events">
+        {error ? <p id="events-error">{error}</p> : <p>Loading…</p>}
+        {error && (
+          <button id="events-refresh" type="button" onClick={() => void load()}>
+            Refresh
+          </button>
+        )}
+      </section>
+    );
   const name = (id: number | null) => accounts.tax_accounts.find((t) => t.id === id)?.name ?? "";
+  // an account whose standing method selects its lots (ADR 0021 §1) shows no lot picker
+  const selectsItself = (id: number) => {
+    const a = accounts.tax_accounts.find((t) => t.id === id);
+    return a !== undefined && a.automatic !== false && (a.standing_method ?? "fifo") === "fifo";
+  };
+  const custodial = (id: number) => accounts.tax_accounts.find((t) => t.id === id)?.kind === "custodial";
   const options = accounts.tax_accounts.map((t) => (
     <option key={t.id} value={t.id}>
       {t.name}
@@ -169,21 +216,52 @@ export function Events({ session }: { session: string }) {
             {options}
           </select>
         )}
-        <input id="event-at" type="datetime-local" aria-label="When (UTC)" value={at} onChange={(e) => setAt(e.target.value)} />
-        <input id="event-btc" aria-label="BTC" placeholder="BTC" value={amount} onChange={(e) => setAmount(e.target.value)} />
+        <input autoComplete="off" id="event-at" type="datetime-local" step={1} aria-label="When (UTC)" value={at} onChange={(e) => setAt(e.target.value)} />
+        <input autoComplete="off" id="event-btc" aria-label="BTC" placeholder="BTC" value={amount} onChange={(e) => setAmount(e.target.value)} />
         {!NO_USD.includes(kind) && (
-          <input id="event-usd" aria-label="USD" placeholder="USD" value={usd} onChange={(e) => setUsd(e.target.value)} />
+          <input
+            autoComplete="off"
+            id="event-usd"
+            aria-label={kind === "gift_in" ? "Donor's basis (USD), empty if unknown" : "USD"}
+            placeholder={kind === "gift_in" ? "Donor's basis (USD), empty if unknown" : "USD"}
+            value={usd}
+            onChange={(e) => setUsd(e.target.value)}
+          />
         )}
         {kind === "gift_in" && (
           <>
-            <input id="event-fmv" aria-label="USD value at the gift" placeholder="USD value at the gift" value={fmv} onChange={(e) => setFmv(e.target.value)} />
-            <input id="event-donor-date" type="date" aria-label="When the donor acquired it" value={donorDate} onChange={(e) => setDonorDate(e.target.value)} />
+            <input autoComplete="off" id="event-fmv" aria-label="USD value at the gift" placeholder="USD value at the gift" value={fmv} onChange={(e) => setFmv(e.target.value)} />
+            <input autoComplete="off" id="event-donor-date" type="date" aria-label="When the donor acquired it" value={donorDate} onChange={(e) => setDonorDate(e.target.value)} />
+            <label>
+              <input id="event-always-long" type="checkbox" checked={alwaysLong} onChange={(e) => setAlwaysLong(e.target.checked)} />
+              The donor's lot was always long-term
+            </label>
+          </>
+        )}
+        {kind === "withdrawal" && (
+          <>
+            <input
+              autoComplete="off"
+              id="event-missing-basis"
+              aria-label="USD basis of sats the account has no lots for (optional)"
+              placeholder="Basis of sats without lots (USD, optional)"
+              value={missingBasis}
+              onChange={(e) => setMissingBasis(e.target.value)}
+            />
+            <input
+              autoComplete="off"
+              id="event-missing-date"
+              type="date"
+              aria-label="When those sats were acquired"
+              value={missingDate}
+              onChange={(e) => setMissingDate(e.target.value)}
+            />
           </>
         )}
         {FEE.includes(kind) && (
-          <input id="event-fee" aria-label="Fee (BTC)" placeholder="Fee (BTC)" value={fee} onChange={(e) => setFee(e.target.value)} />
+          <input autoComplete="off" id="event-fee" aria-label="Fee (BTC)" placeholder="Fee (BTC)" value={fee} onChange={(e) => setFee(e.target.value)} />
         )}
-        <input id="event-note" aria-label="Note" placeholder="Note" value={note} onChange={(e) => setNote(e.target.value)} />
+        <input autoComplete="off" id="event-note" aria-label="Note" placeholder="Note" value={note} onChange={(e) => setNote(e.target.value)} />
         <button id="event-add" type="button" disabled={busy || account === ""} onClick={() => void onAdd()}>
           Add
         </button>
@@ -219,8 +297,8 @@ export function Events({ session }: { session: string }) {
                 {e.identified_at !== null ? ` (chosen ${e.identified_at})` : ""}
               </td>
               <td>
-                {CHOOSES.includes(e.kind) && (
-                  <button type="button" className="choose" disabled={busy} onClick={() => setChoosing(e.id)}>
+                {CHOOSES.includes(e.kind) && !selectsItself(e.account) && (
+                  <button type="button" className="choose" disabled={busy} onClick={() => openChoice(e)}>
                     Choose lots
                   </button>
                 )}
@@ -233,13 +311,31 @@ export function Events({ session }: { session: string }) {
         </tbody>
       </table>
 
-      {choosing !== null && (
+      {current !== undefined && (
         <section id="choose-lots">
-          <h3>Choose lots for event {choosing}</h3>
-          <p>One lot per line: its id (the event that bought it) and the BTC taken from it. Leave it empty to use the account's standing method.</p>
-          <textarea id="choose-lots-text" value={lots} onChange={(e) => setLots(e.target.value)} />
-          <button id="choose-lots-save" type="button" disabled={busy} onClick={() => void onChoose(choosing)}>
+          <h3>Choose lots for event {current.id}</h3>
+          <p>
+            One lot per line: its id (the event that bought it) and the BTC taken from it. Leave it empty to use the
+            account's standing method. The app records when you save a change: one made after the event may count
+            as late.
+          </p>
+          {custodial(current.account) && current.at >= "2027" && (
+            <p id="choose-lots-broker">
+              From 2027 your broker must have this identification by the time of the sale: tell them, not only this
+              app (ADR 0008).
+            </p>
+          )}
+          <textarea autoComplete="off" id="choose-lots-text" value={lots} onChange={(e) => setLots(e.target.value)} />
+          <button
+            id="choose-lots-save"
+            type="button"
+            disabled={busy || lots.trim() === currentText}
+            onClick={() => void onChoose(current.id)}
+          >
             Save choice
+          </button>
+          <button id="choose-lots-cancel" type="button" onClick={() => setChoosing(null)}>
+            Cancel
           </button>
         </section>
       )}

@@ -348,7 +348,15 @@ def _import_routes(app: FastAPI, imports: Imports, authenticated: list[Any]) -> 
                 for e in o.entities
             ],
             "tax_accounts": [
-                {"id": a.id, "name": a.name, "kind": a.kind, "entity_id": a.entity_id} for a in o.tax_accounts
+                {
+                    "id": a.id,
+                    "name": a.name,
+                    "kind": a.kind,
+                    "entity_id": a.entity_id,
+                    "standing_method": a.standing_method,
+                    "automatic": a.automatic,
+                }
+                for a in o.tax_accounts
             ],
             "clients": [{"id": c.id, "name": c.name, "kind": c.kind} for c in o.clients],
         }
