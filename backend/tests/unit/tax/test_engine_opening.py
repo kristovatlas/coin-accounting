@@ -8,23 +8,29 @@ from typing import Any
 
 import pytest
 
+from coinacct.domain.money import share
 from coinacct.tax.engine import (
     Acquisition,
+    Coin,
     Disposal,
     EngineError,
     Event,
     LateOpening,
     Lot,
     OpeningAllocation,
+    OpeningDiffers,
     OpeningLot,
     OpeningMismatch,
     Pick,
+    Spent,
     Transfer,
     UnknownBasis,
     Untraced,
     Wallet,
+    WalletTx,
     run,
 )
+from coinacct.tax.tracing import Output
 
 D = Decimal
 DAY = date(2025, 1, 1)
@@ -209,9 +215,10 @@ def test_the_replay_follows_the_allocation() -> None:
         (opening(OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), on=date(2025, 1, 2)), "dated 2025-01-01"),
         (opening(OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), method=" "), "states the method"),
         (opening(), "a tuple of OpeningLots"),
-        (opening(OpeningLot(0, D("12.00"), date(2023, 1, 1))), "open"),
+        (opening(OpeningLot(0, D("12.00"), date(2023, 1, 1))), "sats must be a positive whole number"),
         (opening(OpeningLot(1_000, D("12.00"), date(2025, 1, 1))), "from genesis to 2024-12-31"),
-        (opening(OpeningLot(1_000, D("-1.00"), date(2023, 1, 1))), "open"),
+        (opening(OpeningLot(1_000, D("-1.00"), date(2023, 1, 1))), "can't be negative"),
+        (opening(OpeningLot(1_000, D("1.00"), date(2024, 12, 21))), "made before a lot it allocates"),
         (opening(OpeningLot(1_000, D("1.00"), date(2023, 1, 1), always_long=1)), "True or False"),  # type: ignore[arg-type]
         (
             opening(OpeningLot(1_000, D("1.00"), date(2023, 1, 1)), recorded_at=datetime(2024, 1, 1)),
@@ -239,3 +246,128 @@ def test_the_allocation_comes_before_every_other_2025_event() -> None:
 def test_a_lot_left_is_a_lot() -> None:
     (lot,) = [lot for lot in run([*HELD, SPLIT]).holdings if lot.id == "open@2"]
     assert lot == Lot("open@2", "x", date(2024, 6, 1), 300, D("9.00"), False)
+
+
+def test_an_allocation_recorded_at_the_first_sales_moment_is_late() -> None:
+    # Rev. Proc. 2024-28 §5.02(4): complete *before* the first sale; at its very moment is too late
+    sale = sell("s", date(2025, 3, 1), 10, "1.00")
+    recorded = opening(OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), recorded_at=sale.at)
+    (warning,) = run([*HELD, recorded, sale]).opening_late
+    assert (warning.first, warning.deadline) == ("s", sale.at)
+
+
+def test_an_allocation_recorded_on_the_due_date_is_late() -> None:
+    recorded = opening(
+        OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), recorded_at=datetime(2026, 4, 15, tzinfo=UTC)
+    )
+    assert len(run([*HELD, recorded]).opening_late) == 1
+
+
+def test_a_wallets_first_transaction_counts_and_is_named_by_its_leaving_event() -> None:
+    # a coin-traced wallet's sale is the first 2025 disposition: the warning names the sale, not the
+    # wallet transaction; and a consolidation counts too (any spend)
+    coin = Acquisition(
+        "c", "w", date(2024, 1, 1), "buy", 1_000, D("1.00"), coins=(Coin("c0:0", 1_000, 1_000),)
+    )
+    sale = Disposal("ws", "w", date(2025, 2, 1), datetime(2025, 2, 1, 9, tzinfo=UTC), "spend", 900, D("9.00"))
+    tx = WalletTx(
+        "wtx",
+        "w",
+        date(2025, 2, 1),
+        datetime(2025, 2, 1, 9, tzinfo=UTC),
+        "t1",
+        (Spent("c0:0", 1_000, "w"),),
+        (Output(0, 900, b"\x00\x14pay", event="ws"),),
+        sale,
+    )
+    late_at = datetime(2025, 2, 2, tzinfo=UTC)
+    events = [
+        HELD[0],
+        coin,
+        HELD[1],
+        opening(OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), recorded_at=late_at),
+        tx,
+    ]
+    (warning,) = run(events, wallets={"w": Wallet(datetime(2024, 1, 1, tzinfo=UTC))}).opening_late
+    assert warning.first == "ws"
+    consolidation = WalletTx(
+        "wtx",
+        "w",
+        date(2025, 2, 1),
+        datetime(2025, 2, 1, 9, tzinfo=UTC),
+        "t1",
+        (Spent("c0:0", 1_000, "w"),),
+        (Output(0, 900, b"\x00\x14chg", account="w", kind="self_custody"),),
+    )
+    events = [
+        HELD[0],
+        coin,
+        HELD[1],
+        opening(OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), recorded_at=late_at),
+        consolidation,
+    ]
+    (warning,) = run(events, wallets={"w": Wallet(datetime(2024, 1, 1, tzinfo=UTC))}).opening_late
+    assert warning.first == "wtx"
+
+
+def test_an_allocation_that_moves_the_unused_basis_raises_no_warning() -> None:
+    # the same units of unused basis, each with its date, reallocated: nothing differs
+    same = opening(OpeningLot(600, D("6.00"), date(2023, 5, 1)), OpeningLot(400, D("8.00"), date(2024, 5, 1)))
+    assert run([*HELD, same]).opening_differs == ()
+
+
+def test_an_allocation_that_adds_basis_or_backdates_warns() -> None:
+    # SPLIT puts 700 sats with $5 on 2022-01-01 and 300 with $9 on 2024-06-01; the replaced lots were
+    # 600 ($6) from 2023-05-01 and 400 ($8) from 2024-05-01: every date differs
+    assert run([*HELD, SPLIT]).opening_differs == (
+        OpeningDiffers(date(2022, 1, 1), False, 700, D("5.00"), 0, D("0.00")),
+        OpeningDiffers(date(2023, 5, 1), False, 0, D("0.00"), 600, D("6.00")),
+        OpeningDiffers(date(2024, 5, 1), False, 0, D("0.00"), 400, D("8.00")),
+        OpeningDiffers(date(2024, 6, 1), False, 300, D("9.00"), 0, D("0.00")),
+    )
+
+
+def test_basis_moved_between_accounts_is_compared_across_them() -> None:
+    # x holds 600 sats (2023, $6), y 400 (2024, $8). The allocations move the units across accounts:
+    # x gets all of 2024's $8 on 400 sats and 200 of 2023's ($2), y the other 400 of 2023's ($4).
+    # Across both accounts the units, by date, are the same: no warning
+    events: list[Event] = [
+        HELD[0],
+        Acquisition("c", "y", date(2024, 5, 1), "buy", 400, D("8.00")),
+        opening(
+            OpeningLot(400, D("8.00"), date(2024, 5, 1)),
+            OpeningLot(200, D("2.00"), date(2023, 5, 1)),
+            id="ox",
+        ),
+        opening(OpeningLot(400, D("4.00"), date(2023, 5, 1)), id="oy", account="y"),
+    ]
+    result = run(events)
+    assert (result.opening_differs, result.blocking) == ((), ())
+
+
+def test_the_replay_judges_a_late_choice_against_the_allocated_lots() -> None:
+    # a late 2025 pick of open@2: the replay's alternative (FIFO) is open@1, the allocation's lot
+    late = Disposal(
+        "s",
+        "x",
+        date(2025, 3, 1),
+        datetime(2025, 3, 1, 12, tzinfo=UTC),
+        "sell",
+        100,
+        D("2.00"),
+        picks=(Pick("open@2", 100),),
+        identified_at=datetime(2025, 3, 2, tzinfo=UTC),
+    )
+    (warning,) = run([*HELD, SPLIT, late]).late
+    assert [a.lot for a in warning.standing] == ["open@1"]
+    assert warning.standing[0].basis == share(D("5.00"), 100, 700)
+
+
+def test_an_allocation_that_inflates_basis_on_the_same_units_warns() -> None:
+    # the same sats on the same dates, with $1,000,000 of basis instead of $6: basis from nothing
+    inflated = opening(
+        OpeningLot(600, D("1000000.00"), date(2023, 5, 1)), OpeningLot(400, D("8.00"), date(2024, 5, 1))
+    )
+    assert run([*HELD, inflated]).opening_differs == (
+        OpeningDiffers(date(2023, 5, 1), False, 600, D("1000000.00"), 600, D("6.00")),
+    )

@@ -12,14 +12,18 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   basis (cost plus fees, or the FMV the caller computed) and its date.
 - **The 2025 opening allocation** (`OpeningAllocation`; ADR 0008 §6, Rev. Proc. 2024-28 §5.02), dated
   2025-01-01 and before every other 2025 event, replaces an account's lots with the lots the user
-  allocated its unattached basis to: each with its sats, basis and date (`Result.replaced` keeps the
-  lots it replaced, for the audit trail). Allocating fewer sats than the account holds leaves a
-  placeholder of unknown basis for the rest (blocking, T-509); allocating more blocks
-  (`OpeningMismatch`). It is late (`Result.opening_late`, a warning, T-508) if the user recorded it after
-  their first sale, disposition or transfer of BTC from any account on or after 2025-01-01, or after the
-  2025 return's due date if that is earlier (ADR 0041 §5; the due date counts from the start of
-  2026-04-15 UTC, the earliest reading). A coin-traced wallet's allocation (ADR 0041 §5: the pool and
-  the fragments drawn from it) isn't built yet: it blocks (`Untraced`, `opening_allocation`).
+  allocated its unattached basis to: each with its sats, basis and date (`Result.replaced` keeps the lots
+  it replaced, for the audit trail). Allocating fewer sats than the account holds leaves a placeholder of
+  unknown basis for the rest (blocking, T-509); allocating more blocks (`OpeningMismatch`). An unknown
+  basis the account had before stays blocking, though the allocation replaces its lot: the user resolves
+  it (fails closed). Where the allocations' sats and basis, by acquisition date, differ from those of the
+  lots they replaced, `Result.opening_differs` warns: the allocation moves the unused basis, each unit
+  keeping its date, and adds none. It is late (`Result.opening_late`, a warning, T-508) if the user's
+  attested completion isn't before their first sale, disposition or transfer of BTC from any account on or
+  after 2025-01-01 (any wallet transaction counts), or the 2025 return's due date if that is earlier (ADR
+  0041 §5; Rev. Proc. 2024-28 §5.02(4): "before"; the due date from the start of 2026-04-15 UTC, without
+  extensions, so only ever warning more). A coin-traced wallet's allocation (ADR 0041 §5: the pool and the
+  fragments drawn from it) isn't built yet: it blocks (`Untraced`, `opening_allocation`).
 - **A gift received** (`gift_in`; IRC §1015(a), Treas. Reg. §1.1015-1(a)) has a **dual basis**. Its gain
   basis is the donor's basis, held from the donor's date (tacked, IRC §1223(2)). If the FMV at the gift
   was lower, that FMV is its loss basis, held from the gift date. At a disposal, proceeds above the
@@ -154,7 +158,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, localcontext
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 from coinacct.domain.chain import MAX_SATS
 from coinacct.domain.money import CONTEXT, add, share, signed_usd, subtract, usd
@@ -176,7 +180,9 @@ TRANSFER_KINDS: Final[frozenset[str]] = frozenset({"deposit", "withdrawal", "sel
 ZERO: Final = Decimal("0.00")
 GENESIS: Final = date(2009, 1, 3)  # no bitcoin was acquired before the genesis block
 OPENING_DAY: Final = date(2025, 1, 1)  # the 2025 opening allocation's date (Rev. Proc. 2024-28)
-RETURN_DUE_2025: Final = datetime(2026, 4, 15, tzinfo=UTC)  # the 2025 return's due date, its earliest moment
+# the 2025 return's due date (2026-04-15), from the start of the day in UTC: an allocation must be complete
+# before it (Rev. Proc. 2024-28 §5.02(4)), and an extension isn't counted: both only warn more
+RETURN_DUE_2025: Final = datetime(2026, 4, 15, tzinfo=UTC)
 RESERVED: Final = ("@", "#")  # the separators in the lot ids the engine builds (lot@transfer, lot@tx#vout)
 SPLIT: Final = "#"  # in a per-output moved or split-off lot's id: lot@event#vout
 UNRECORDED: Final = "@@unrecorded"  # a created lot's suffix: no event or moved lot id can contain "@@"
@@ -323,7 +329,8 @@ class OpeningLot:
 @dataclass(frozen=True)
 class OpeningAllocation:
     """The 2025 opening allocation of an account (ADR 0008 §6): its lots on 2025-01-01, the moment the
-    user recorded it (`recorded_at`, timezone-aware UTC) and the method they state they used."""
+    user attests they completed it (`recorded_at`, timezone-aware UTC: an attestation; when the app
+    stored it is the change log's) and the method they state they used."""
 
     id: str
     account: str
@@ -457,6 +464,21 @@ class OpeningMismatch:
 
 
 @dataclass(frozen=True)
+class OpeningDiffers:
+    """A warning: the opening allocations move the unused basis onto the held sats (Rev. Proc. 2024-28
+    §5.02(2), (5)), each unit keeping the date it was acquired, so for each acquisition date (and
+    inheritance) the sats and basis allocated should be those the allocations replaced. These differ;
+    the allocations are used all the same."""
+
+    acquired: date
+    always_long: bool
+    allocated_sats: int
+    allocated_basis: Decimal
+    replaced_sats: int
+    replaced_basis: Decimal
+
+
+@dataclass(frozen=True)
 class LateOpening:
     """A warning (T-508): an opening allocation recorded after its deadline, the user's first sale,
     disposition or transfer from 2025-01-01 (`first`, None if the due date came first) or the 2025
@@ -484,6 +506,7 @@ class Result:
     pool: tuple[PoolLot, ...] = ()  # wallet lots on no coin at the end: probably a duplicate or a sale
     replaced: tuple[Lot, ...] = ()  # the lots the 2025 opening allocations replaced (ADR 0008 §6)
     opening_late: tuple[LateOpening, ...] = ()  # opening allocations recorded late (warnings)
+    opening_differs: tuple[OpeningDiffers, ...] = ()  # allocated basis by date not the replaced (warnings)
 
 
 @dataclass(frozen=True)
@@ -636,6 +659,7 @@ class _Engine:
         self._recorded: set[str] = set()  # accounts holding lots the user recorded (not created lots)
         self._openings: dict[str, OpeningAllocation] = {}  # each account's 2025 opening allocation
         self._replaced: list[Lot] = []
+        self._allocated: list[Lot] = []  # the lots the applied opening allocations made
         self._keys: dict[str, list[date]] = {}  # account -> its lots' FIFO keys, in step with _open
         # The replay (#238): the same events with every late choice disregarded. Only the real run has
         # one; the replay itself is `replay=True` and records no warnings.
@@ -679,10 +703,10 @@ class _Engine:
             in_2025 = in_2025 or (not isinstance(event, OpeningAllocation) and event.on >= OPENING_DAY)
             if not isinstance(event, Acquisition | OpeningAllocation):
                 last_moment = _checked_moment(event, last_moment)
-                leaving = event.leaving if isinstance(event, WalletTx) else event
-                disposes = not isinstance(event, Received) and leaving is not None
-                if first is None and disposes and event.on >= OPENING_DAY:
-                    first = (event.id, event.at)
+                # any spend counts, a consolidation too: the conservative reading of "transfer"
+                if first is None and not isinstance(event, Received) and event.on >= OPENING_DAY:
+                    leaving = event.leaving if isinstance(event, WalletTx) else None
+                    first = (leaving.id if isinstance(leaving, Disposal | Transfer) else event.id, event.at)
             self._apply(event)
             self._follow(event)
         holdings = tuple(_left(o) for o in self._lots.values() if o.sats > 0)
@@ -691,7 +715,7 @@ class _Engine:
         opening_late = [
             LateOpening(o.id, o.recorded_at, deadline, named)
             for o in self._openings.values()
-            if o.recorded_at > deadline
+            if o.recorded_at >= deadline  # Rev. Proc. 2024-28 §5.02(4): complete "before" it
         ]
         return Result(
             tuple(self._allocations),
@@ -717,6 +741,7 @@ class _Engine:
             ),
             tuple(self._replaced),
             tuple(opening_late),
+            self._opening_differs(),
         )
 
     def _follow(self, event: Event) -> None:
@@ -827,6 +852,7 @@ class _Engine:
                 o.sats, o.basis, o.loss_basis = 0, ZERO, None
         for i, (lot, basis) in enumerate(zip(e.lots, bases, strict=True), start=1):
             new = Lot(f"{e.id}@{i}", e.account, lot.acquired, lot.sats, basis, lot.always_long)
+            self._allocated.append(new)
             self._insert(e.account, _Open(new, lot.sats, basis, None, False, lot.acquired))
         if held > e.sats:
             lot_id = f"{e.id}{PLACEHOLDER}"
@@ -835,6 +861,21 @@ class _Engine:
             self._placeholders.append(placeholder)
             self._blocking.append(UnknownBasis(lot_id))
         self._recorded.add(e.account)
+
+    def _opening_differs(self) -> tuple[OpeningDiffers, ...]:
+        """Where the applied allocations' sats and basis, by acquisition date and inheritance, aren't
+        those of the lots they replaced (a shortfall's placeholder isn't counted: it blocks)."""
+        sums: dict[tuple[date, bool], list[Any]] = {}
+        for side, lots in ((0, self._allocated), (1, self._replaced)):
+            for lot in lots:
+                entry = sums.setdefault((lot.acquired, lot.always_long), [0, ZERO, 0, ZERO])
+                entry[2 * side] += lot.sats
+                entry[2 * side + 1] = add(entry[2 * side + 1], lot.basis)
+        return tuple(
+            OpeningDiffers(when, long, *figures)
+            for (when, long), figures in sorted(sums.items())
+            if (figures[0], figures[1]) != (figures[2], figures[3])
+        )
 
     def _standing(self, account: str, sats: int) -> tuple[list[Pick], int]:
         """FIFO's picks for `sats`, and the sats it couldn't cover. FIFO is the only standing method so
@@ -1843,6 +1884,10 @@ def _checked_opening(e: OpeningAllocation) -> list[Decimal]:
             raise EngineError(f"opening allocation {e.id!r}: a lot's date is from genesis to 2024-12-31")
         if type(lot.always_long) is not bool:
             raise EngineError(f"opening allocation {e.id!r}: always_long is True or False")
+        if e.recorded_at.date() < lot.acquired:
+            raise EngineError(
+                f"opening allocation {e.id!r}: it was made before a lot it allocates was bought"
+            )
         bases.append(_usd(lot.basis, e.id))
     return bases
 
