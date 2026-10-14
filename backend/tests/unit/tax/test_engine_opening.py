@@ -321,10 +321,10 @@ def test_an_allocation_that_adds_basis_or_backdates_warns() -> None:
     # SPLIT puts 700 sats with $5 on 2022-01-01 and 300 with $9 on 2024-06-01; the replaced lots were
     # 600 ($6) from 2023-05-01 and 400 ($8) from 2024-05-01: every date differs
     assert run([*HELD, SPLIT]).opening_differs == (
-        OpeningDiffers(date(2022, 1, 1), False, 700, D("5.00"), 0, D("0.00")),
-        OpeningDiffers(date(2023, 5, 1), False, 0, D("0.00"), 600, D("6.00")),
-        OpeningDiffers(date(2024, 5, 1), False, 0, D("0.00"), 400, D("8.00")),
-        OpeningDiffers(date(2024, 6, 1), False, 300, D("9.00"), 0, D("0.00")),
+        OpeningDiffers(date(2022, 1, 1), False, 700, D("5.00"), 0, D("0.00"), fifo=date(2022, 1, 1)),
+        OpeningDiffers(date(2023, 5, 1), False, 0, D("0.00"), 600, D("6.00"), fifo=date(2023, 5, 1)),
+        OpeningDiffers(date(2024, 5, 1), False, 0, D("0.00"), 400, D("8.00"), fifo=date(2024, 5, 1)),
+        OpeningDiffers(date(2024, 6, 1), False, 300, D("9.00"), 0, D("0.00"), fifo=date(2024, 6, 1)),
     )
 
 
@@ -370,7 +370,7 @@ def test_an_allocation_that_inflates_basis_on_the_same_units_warns() -> None:
         OpeningLot(600, D("1000000.00"), date(2023, 5, 1)), OpeningLot(400, D("8.00"), date(2024, 5, 1))
     )
     assert run([*HELD, inflated]).opening_differs == (
-        OpeningDiffers(date(2023, 5, 1), False, 600, D("1000000.00"), 600, D("6.00")),
+        OpeningDiffers(date(2023, 5, 1), False, 600, D("1000000.00"), 600, D("6.00"), fifo=date(2023, 5, 1)),
     )
 
 
@@ -396,11 +396,22 @@ def test_a_gifts_dual_basis_is_carried_through_the_allocation_t509() -> None:
 
 def test_dropping_a_gifts_loss_basis_warns() -> None:
     dropped = opening(OpeningLot(1_000, D("10.00"), date(2020, 1, 1)))
-    # by gift date the two differ: the allocated lot has none (loss basis $0), the replaced had $6
+    # the allocated lot has no loss basis and the donor's FIFO place; the replaced gift had $6, from
+    # 2024-03-01, its FIFO place
     assert run([GIFT, dropped]).opening_differs == (
-        OpeningDiffers(date(2020, 1, 1), False, 1_000, D("10.00"), 0, D("0.00")),
+        OpeningDiffers(date(2020, 1, 1), False, 1_000, D("10.00"), 0, D("0.00"), fifo=date(2020, 1, 1)),
         OpeningDiffers(
-            date(2020, 1, 1), False, 0, D("0.00"), 1_000, D("10.00"), date(2024, 3, 1), D("0.00"), D("6.00")
+            date(2020, 1, 1),
+            False,
+            0,
+            D("0.00"),
+            1_000,
+            D("10.00"),
+            date(2024, 3, 1),
+            D("0.00"),
+            D("6.00"),
+            fifo=date(2024, 3, 1),
+            gift=True,
         ),
     )
 
@@ -409,7 +420,10 @@ def test_an_allocation_that_adds_basis_in_all_blocks() -> None:
     inflated = opening(
         OpeningLot(600, D("1000000.00"), date(2023, 5, 1)), OpeningLot(400, D("8.00"), date(2024, 5, 1))
     )
-    assert OpeningBasisAdded(D("1000008.00"), D("14.00")) in run([*HELD, inflated]).blocking
+    assert (
+        OpeningBasisAdded(D("1000008.00"), D("14.00"), D("1000008.00"), D("14.00"))
+        in run([*HELD, inflated]).blocking
+    )
     # less basis in all is no block (a warning by date only): the user may allocate conservatively
     lower = opening(
         OpeningLot(600, D("1.00"), date(2023, 5, 1)), OpeningLot(400, D("8.00"), date(2024, 5, 1))
@@ -420,7 +434,7 @@ def test_an_allocation_that_adds_basis_in_all_blocks() -> None:
 def test_an_unknown_basis_replaced_stays_blocking_and_is_compared_by_sats_t509() -> None:
     unknown = Acquisition("u", "x", date(2024, 3, 1), "gift_in", 1_000, None, D("6.00"), date(2020, 1, 1))
     # its donor basis is unknown, so no dual basis is on record either: the allocation gives it $9
-    allocated = opening(OpeningLot(1_000, D("9.00"), date(2020, 1, 1)))
+    allocated = opening(OpeningLot(1_000, D("9.00"), date(2020, 1, 1), received=date(2024, 3, 1)))
     result = run([unknown, allocated])
     assert UnknownBasis("u") in result.blocking
     assert [lot.id for lot in result.replaced] == ["u"]
@@ -477,3 +491,66 @@ def test_the_due_date_begins_at_its_earliest_moment_anywhere() -> None:
         OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), recorded_at=datetime(2026, 4, 14, 9, 59, tzinfo=UTC)
     )
     assert run([*HELD, before]).opening_late == ()
+
+
+def test_dropping_a_gifts_loss_basis_blocks_as_basis_added_t509() -> None:
+    # with no loss basis, a sale under the FMV would be a loss against the donor's $10: $4 of loss-side
+    # basis from nothing
+    dropped = opening(OpeningLot(1_000, D("10.00"), date(2020, 1, 1), received=date(2024, 3, 1)))
+    assert OpeningBasisAdded(D("10.00"), D("10.00"), D("10.00"), D("6.00")) in run([GIFT, dropped]).blocking
+    raised = opening(
+        OpeningLot(1_000, D("10.00"), date(2020, 1, 1), loss_basis=D("9.00"), received=date(2024, 3, 1))
+    )
+    assert OpeningBasisAdded(D("10.00"), D("10.00"), D("9.00"), D("6.00")) in run([GIFT, raised]).blocking
+
+
+def test_moving_a_lots_fifo_place_warns() -> None:
+    # a 2023 buy given a 2024 "received" date moves behind newer lots in FIFO, and reads as a gift
+    moved = opening(
+        OpeningLot(600, D("6.00"), date(2023, 5, 1), received=date(2024, 12, 1)),
+        OpeningLot(400, D("8.00"), date(2024, 5, 1)),
+    )
+    # by FIFO place: the replaced lot at 2023-05-01, then the allocated one at 2024-12-01, a "gift"
+    replaced, allocated = run([*HELD, moved]).opening_differs
+    assert (replaced.fifo, replaced.replaced_sats, replaced.allocated_sats, replaced.gift) == (
+        date(2023, 5, 1),
+        600,
+        0,
+        False,
+    )
+    assert (allocated.fifo, allocated.allocated_sats, allocated.replaced_sats, allocated.gift) == (
+        date(2024, 12, 1),
+        600,
+        0,
+        True,
+    )
+
+
+def test_an_allocation_made_before_a_gift_was_received_is_refused() -> None:
+    gift = OpeningLot(1_000, D("10.00"), date(2020, 1, 1), received=date(2024, 12, 22))
+    with pytest.raises(EngineError, match="made before a lot it allocates"):
+        run([GIFT, opening(gift)])
+
+
+def test_an_unknown_basis_elsewhere_doesnt_hide_basis_added_in_another_group() -> None:
+    unknown = Acquisition("u", "y", date(2024, 3, 1), "gift_in", 1_000, None, D("6.00"), date(2020, 1, 1))
+    events: list[Event] = [
+        HELD[0],
+        unknown,
+        HELD[1],
+        opening(OpeningLot(1_000, D("999.00"), date(2023, 5, 1)), id="ox"),
+        opening(
+            OpeningLot(1_000, D("1.00"), date(2020, 1, 1), received=date(2024, 3, 1)), id="oy", account="y"
+        ),
+    ]
+    blocking = run(events).blocking
+    assert UnknownBasis("u") in blocking
+    assert any(isinstance(b, OpeningBasisAdded) for b in blocking)
+
+
+def test_an_allocation_into_an_empty_account_and_a_refused_one_are_still_judged_late() -> None:
+    late_at = datetime(2025, 3, 2, tzinfo=UTC)
+    empty = opening(OpeningLot(10, D("1.00"), date(2023, 1, 1)), account="z", recorded_at=late_at)
+    result = run([*HELD, empty, sell("s", date(2025, 3, 1), 10, "1.00")])
+    assert OpeningMismatch("open", 0, 10) in result.blocking
+    assert [w.event for w in result.opening_late] == ["open"]

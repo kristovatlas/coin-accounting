@@ -477,6 +477,8 @@ class OpeningBasisAdded:
 
     allocated: Decimal
     replaced: Decimal
+    allocated_loss_side: Decimal = ZERO  # the loss basis where a lot has one, else its gain basis
+    replaced_loss_side: Decimal = ZERO
 
 
 @dataclass(frozen=True)
@@ -496,6 +498,8 @@ class OpeningDiffers:
     allocated_loss_basis: Decimal = ZERO
     replaced_loss_basis: Decimal = ZERO
     unknown: bool = False  # a replaced lot had an unknown basis: only the sats are compared
+    fifo: date | None = None  # the FIFO place: the date the lots reached the user
+    gift: bool = False
 
 
 @dataclass(frozen=True)
@@ -680,6 +684,9 @@ class _Engine:
         self._openings: dict[str, OpeningAllocation] = {}  # each account's 2025 opening allocation
         self._replaced: list[Lot] = []
         self._allocated: list[Lot] = []  # the lots the applied opening allocations made
+        # each allocated and replaced lot's FIFO place and whether it is a gift's, in step with the lists
+        self._allocated_places: list[tuple[date, bool]] = []
+        self._replaced_places: list[tuple[date, bool]] = []
         self._keys: dict[str, list[date]] = {}  # account -> its lots' FIFO keys, in step with _open
         # The replay (#238): the same events with every late choice disregarded. Only the real run has
         # one; the replay itself is `replay=True` and records no warnings.
@@ -872,6 +879,7 @@ class _Engine:
         for o in self._open.get(e.account, []):
             if o.sats > 0:
                 self._replaced.append(_left(o))
+                self._replaced_places.append((o.fifo, o.gift))
                 o.sats, o.basis, o.loss_basis = 0, ZERO, None
         for i, (lot, basis) in enumerate(zip(e.lots, bases, strict=True), start=1):
             loss = None if lot.loss_basis is None else _usd(lot.loss_basis, e.id)
@@ -881,6 +889,7 @@ class _Engine:
                 f"{e.id}@{i}", e.account, lot.acquired, lot.sats, basis, lot.always_long, loss, loss_from
             )
             self._allocated.append(new)
+            self._allocated_places.append((received, lot.received is not None))
             self._insert(e.account, _Open(new, lot.sats, basis, loss, lot.received is not None, received))
         if held > e.sats:
             lot_id = f"{e.id}{PLACEHOLDER}"
@@ -890,45 +899,72 @@ class _Engine:
             self._blocking.append(UnknownBasis(lot_id))
         self._recorded.add(e.account)
 
+    def _opening_groups(self) -> dict[tuple[date, bool, date | None, date, bool], list[Any]]:
+        """The applied allocations' and the replaced lots' sats, gain basis, loss basis and effective
+        loss basis (the loss basis, or the gain basis without one), by acquisition date, inheritance,
+        gift date, FIFO place and gift; and whether a replaced lot there had an unknown basis."""
+        groups: dict[tuple[date, bool, date | None, date, bool], list[Any]] = {}
+        sides = ((0, self._allocated, self._allocated_places), (1, self._replaced, self._replaced_places))
+        for side, lots, places in sides:
+            for lot, (fifo, gift) in zip(lots, places, strict=True):
+                key = (lot.acquired, lot.always_long, lot.loss_from, fifo, gift)
+                g = groups.setdefault(key, [0, ZERO, ZERO, ZERO, 0, ZERO, ZERO, ZERO, False])
+                loss = ZERO if lot.loss_basis is None else lot.loss_basis
+                effective = lot.basis if lot.loss_basis is None else lot.loss_basis
+                g[4 * side] += lot.sats
+                g[4 * side + 1] = add(g[4 * side + 1], lot.basis)
+                g[4 * side + 2] = add(g[4 * side + 2], loss)
+                g[4 * side + 3] = add(g[4 * side + 3], effective)
+                g[8] = g[8] or lot.unknown_basis
+        return groups
+
     def _opening_differs(self) -> tuple[OpeningDiffers, ...]:
-        """Where the applied allocations' sats and bases, by acquisition date, inheritance and gift date,
-        aren't those of the lots they replaced (a shortfall's placeholder isn't counted: it blocks). A
-        replaced lot of unknown basis is compared by its sats only."""
-        sums: dict[tuple[date, bool, date | None], list[Any]] = {}
-        for side, lots in ((0, self._allocated), (1, self._replaced)):
-            for lot in lots:
-                key = (lot.acquired, lot.always_long, lot.loss_from)
-                entry = sums.setdefault(key, [0, ZERO, ZERO, 0, ZERO, ZERO, False])
-                entry[3 * side] += lot.sats
-                entry[3 * side + 1] = add(entry[3 * side + 1], lot.basis)
-                entry[3 * side + 2] = add(
-                    entry[3 * side + 2], ZERO if lot.loss_basis is None else lot.loss_basis
-                )
-                entry[6] = entry[6] or lot.unknown_basis
+        """Where the applied allocations' sats and bases, by acquisition date, inheritance, gift date, FIFO
+        place and gift, aren't those of the lots they replaced (a shortfall's placeholder isn't counted:
+        it blocks). A group holding a replaced lot of unknown basis is compared by its sats only."""
         out = []
-        for (when, long, loss_from), (a_sats, a_basis, a_loss, r_sats, r_basis, r_loss, unknown) in sorted(
-            sums.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or date.min)
-        ):
+        groups = self._opening_groups()
+        for key in sorted(groups, key=lambda k: (k[0], k[1], k[2] or date.min, k[3], k[4])):
+            a_sats, a_basis, a_loss, _, r_sats, r_basis, r_loss, _, unknown = groups[key]
+            when, long, loss_from, fifo, gift = key
             if a_sats != r_sats or (not unknown and (a_basis, a_loss) != (r_basis, r_loss)):
                 out.append(
                     OpeningDiffers(
-                        when, long, a_sats, a_basis, r_sats, r_basis, loss_from, a_loss, r_loss, unknown
+                        when,
+                        long,
+                        a_sats,
+                        a_basis,
+                        r_sats,
+                        r_basis,
+                        loss_from,
+                        a_loss,
+                        r_loss,
+                        unknown,
+                        fifo,
+                        gift,
                     )
                 )
         return tuple(out)
 
     def _basis_added(self) -> OpeningBasisAdded | None:
-        """A block: the allocations hold more basis in all than the lots they replaced, none of which had
-        an unknown basis (Rev. Proc. 2024-28 §5.02(2): an allocation moves unused basis, it adds none)."""
-        if not self._allocated or any(lot.unknown_basis for lot in self._replaced):
+        """A block: outside the groups holding an unknown basis, the allocations hold more basis in all,
+        on the gain side or the loss side (a lot's loss basis, or its gain basis without one), than the
+        lots they replaced (Rev. Proc. 2024-28 §5.02(2): an allocation moves unused basis, it adds none)."""
+        known = [g for g in self._opening_groups().values() if not g[8]]
+        if not known:
             return None
-        allocated = ZERO
-        for lot in self._allocated:
-            allocated = add(allocated, lot.basis)
-        replaced = ZERO
-        for lot in self._replaced:
-            replaced = add(replaced, lot.basis)
-        return OpeningBasisAdded(allocated, replaced) if allocated > replaced else None
+        totals = [
+            ZERO,
+            ZERO,
+            ZERO,
+            ZERO,
+        ]  # allocated gain, allocated loss side, replaced gain, replaced loss side
+        for g in known:
+            for i, at in enumerate((1, 3, 5, 7)):
+                totals[i] = add(totals[i], g[at])
+        if totals[0] > totals[2] or totals[1] > totals[3]:
+            return OpeningBasisAdded(totals[0], totals[2], totals[1], totals[3])
+        return None
 
     def _standing(self, account: str, sats: int) -> tuple[list[Pick], int]:
         """FIFO's picks for `sats`, and the sats it couldn't cover. FIFO is the only standing method so
@@ -1948,7 +1984,10 @@ def _checked_opening(e: OpeningAllocation) -> list[Decimal]:
                 )
             if _usd(lot.loss_basis, e.id) >= _usd(lot.basis, e.id):
                 raise EngineError(f"opening allocation {e.id!r}: a loss basis is below the donor's basis")
-        if (e.recorded_at.date() - lot.acquired).days < -1:  # a day's slack: a UTC moment against a tax date
+        held_from = (
+            lot.acquired if lot.received is None else lot.received
+        )  # a gift: from when it was received
+        if (e.recorded_at.date() - held_from).days < -1:  # a day's slack: a UTC moment against a tax date
             raise EngineError(
                 f"opening allocation {e.id!r}: it was made before a lot it allocates was bought"
             )
