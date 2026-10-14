@@ -294,6 +294,7 @@ class Result:
     moves: tuple[Moved, ...] = ()
     created: tuple[Lot, ...] = ()  # lots created for a withdrawal from an account without lots (ADR 0009)
     replay_stopped: str | None = None  # the event the late choices' replay couldn't follow (#238)
+    through: date | None = None  # the last event's tax date: the run is of the events up to it
 
 
 @dataclass(frozen=True)
@@ -415,6 +416,7 @@ class _Engine:
             tuple(self._moves),
             tuple(self._created),
             self._replay_stopped,
+            last,
         )
 
     def _follow(self, event: Event) -> None:
