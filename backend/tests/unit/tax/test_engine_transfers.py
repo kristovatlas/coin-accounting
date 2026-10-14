@@ -23,6 +23,7 @@ from coinacct.tax.engine import (
     Pick,
     Transfer,
     UnknownBasis,
+    Untraced,
     run,
 )
 
@@ -576,18 +577,17 @@ def test_a_late_alternative_moves_dust_basis_onto_a_gifts_part_adr0008() -> None
     assert late.standing == (Moved("d", "g", "g@d", "x", 1, D("11.00"), date(2020, 1, 1), 1, ("b",)),)
 
 
-@pytest.mark.parametrize("picks", [None, (Pick("b1", 5),)])
-def test_a_self_transfer_comes_only_as_a_wallet_tx(picks: tuple[Pick, ...] | None) -> None:
+def test_a_self_transfer_between_accounts_that_arent_coin_traced_blocks() -> None:
     # #243, the owner's decision: between the user's own wallets the spent outputs identify the lots, so
-    # the account's FIFO order (or a choice of lots) must not stand in for them (ADR 0041)
+    # the account's FIFO order must not stand in for them: it blocks (ADR 0041 §3), FIFO provisionally
     events: list[Event] = [
         Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("1.00")),
-        move("t1", "w", "v", 5, kind="self_transfer", picks=picks),
+        move("t1", "w", "v", 5, kind="self_transfer"),
     ]
-    with pytest.raises(
-        EngineError, match=r"transfer 't1': a self-transfer's lots follow the outputs .* WalletTx"
-    ):
-        run(events)
+    result = run(events)
+    assert [(b.event, b.reason) for b in result.blocking if isinstance(b, Untraced)] == [
+        ("t1", "mixed_transfer")
+    ]
 
 
 EXCHANGE: list[Event] = [

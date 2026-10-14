@@ -17,6 +17,7 @@ from coinacct.tax.engine import (
     EngineError,
     Event,
     Moved,
+    Pick,
     Spent,
     Transfer,
     Untraced,
@@ -37,10 +38,10 @@ WALLETS = frozenset({"w", "v"})
 # ADR 0041 §2's coin: 1 BTC, holding L1 (0.4, oldest, $10,000) and L2 (0.6, $30,000)
 COIN: list[Event] = [
     Acquisition(
-        "L1", "w", date(2024, 1, 1), "buy", 40_000_000, D("10000.00"), coins=(Coin("c0:0", 40_000_000),)
+        "L1", "w", date(2024, 1, 1), "buy", 40_000_000, D("10000.00"), coins=(Coin("c0:0", 40_000_000, BTC),)
     ),
     Acquisition(
-        "L2", "w", date(2024, 2, 1), "buy", 60_000_000, D("30000.00"), coins=(Coin("c0:0", 60_000_000),)
+        "L2", "w", date(2024, 2, 1), "buy", 60_000_000, D("30000.00"), coins=(Coin("c0:0", 60_000_000, BTC),)
     ),
 ]
 FEE = 10_000  # 0.0001 BTC
@@ -67,17 +68,16 @@ def change(vout: int, sats: int, account: str = "w") -> Output:
 @pytest.mark.parametrize("change_first", [False, True])
 def test_adr0041_first_example_a_spend_takes_the_oldest_lots_and_the_fee(change_first: bool) -> None:
     # 0.5 BTC for goods worth $50,000, 0.4999 change, a 0.0001 fee: the payment gets L1 0.4 and L2 0.1,
-    # the fee L2 0.0001 (part of the disposal), the change keeps L2 0.4999. Basis $15,005, whichever
-    # output comes first.
+    # the fee L2 0.0001, the change keeps L2 0.4999. The fee's $5 joins the L2 row (ADR 0043): basis
+    # $15,005, proceeds $50,000 split by the sats received, whichever output comes first.
     pay_v, chg_v = (1, 0) if change_first else (0, 1)
     spend = Disposal("s", "w", DAY, AT, "spend", BTC // 2, D("50000.00"))
     outs = [Output(pay_v, BTC // 2, PAY, event="s"), change(chg_v, 49_990_000)]
     result = run([*COIN, wtx(spend, outs)], wallets=WALLETS)
-    assert [(a.lot, a.sats, a.basis) for a in result.allocations] == [
-        ("L1", 40_000_000, D("10000.00")),
-        ("L2", 10_010_000, D("5005.00")),
+    assert [(a.lot, a.sats, a.basis, a.proceeds, a.carried_fee) for a in result.allocations] == [
+        ("L1", 40_000_000, D("10000.00"), D("40000.00"), 0),
+        ("L2", 10_000_000, D("5005.00"), D("10000.00"), FEE),
     ]
-    assert sum((a.proceeds for a in result.allocations), D("0")) == D("50000.00")
     assert result.coins == (CoinLot(f"t1:{chg_v}", "L2", 49_990_000),)
     assert result.blocking == ()
 
@@ -119,10 +119,10 @@ def test_the_moved_coin_is_spent_from_the_destination_with_its_lots() -> None:
         inputs=(Spent("t1:0", BTC // 2, "v"),),
     )
     result = run([*COIN, wtx(move, outs), second], wallets=WALLETS)
-    # the sale and its fee take all of v's coin: L1@x then L2@x, with all their basis
-    assert [(a.lot, a.sats, a.basis) for a in result.allocations] == [
-        ("L1@x", 40_000_000, D("10000.00")),
-        ("L2@x", 10_000_000, D("5005.00")),
+    # the sale and its fee take all of v's coin: L1@x then L2@x, the fee's L2@x sats joining that row
+    assert [(a.lot, a.sats, a.basis, a.carried_fee) for a in result.allocations] == [
+        ("L1@x", 40_000_000, D("10000.00"), 0),
+        ("L2@x", 9_990_000, D("5005.00"), FEE),
     ]
     assert [c.outpoint for c in result.coins] == ["t1:1"]
 
@@ -142,8 +142,12 @@ def test_a_consolidation_keeps_the_fee_basis_in_the_wallet() -> None:
     # two coins, one change output: the fee takes L1's first sats (oldest first, the fee before the
     # change); its basis stays with L1 on the change, and nothing is disposed of
     events: list[Event] = [
-        Acquisition("L1", "w", date(2024, 1, 1), "buy", 1_000, D("10.00"), coins=(Coin("a:0", 1_000),)),
-        Acquisition("L2", "w", date(2024, 2, 1), "buy", 1_000, D("30.00"), coins=(Coin("b:0", 1_000),)),
+        Acquisition(
+            "L1", "w", date(2024, 1, 1), "buy", 1_000, D("10.00"), coins=(Coin("a:0", 1_000, 1_000),)
+        ),
+        Acquisition(
+            "L2", "w", date(2024, 2, 1), "buy", 1_000, D("30.00"), coins=(Coin("b:0", 1_000, 1_000),)
+        ),
         wtx(None, [change(0, 1_900)], inputs=(Spent("a:0", 1_000, "w"), Spent("b:0", 1_000, "w"))),
     ]
     result = run(events, wallets=WALLETS)
@@ -158,7 +162,7 @@ def test_a_consolidation_keeps_the_fee_basis_in_the_wallet() -> None:
 def test_a_withdrawal_links_its_moved_lots_to_the_wallets_coin() -> None:
     events: list[Event] = [
         Acquisition("e1", "x", date(2024, 1, 1), "buy", 1_000, D("10.00")),
-        Transfer("wd", "x", "w", DAY, AT, "withdrawal", 1_000, 100, coins=(Coin("c:0", 900),)),
+        Transfer("wd", "x", "w", DAY, AT, "withdrawal", 1_000, 100, coins=(Coin("c:0", 900, 900),)),
     ]
     result = run(events, wallets=WALLETS)
     assert result.coins == (CoinLot("c:0", "e1@wd", 900),)
@@ -211,7 +215,13 @@ def test_a_self_transfer_to_an_untraced_wallet_blocks() -> None:
 
 def test_links_over_the_sats_that_arrived_block() -> None:
     bad = Acquisition(
-        "L1", "w", date(2024, 1, 1), "buy", 1_000, D("1.00"), coins=(Coin("a:0", 600), Coin("b:0", 600))
+        "L1",
+        "w",
+        date(2024, 1, 1),
+        "buy",
+        1_000,
+        D("1.00"),
+        coins=(Coin("a:0", 600, 600), Coin("b:0", 600, 600)),
     )
     result = run([bad], wallets=WALLETS)
     assert result.blocking == (
@@ -233,7 +243,7 @@ def test_a_coin_holding_more_lots_than_its_value_blocks() -> None:
         ([*COIN, Disposal("s", "w", DAY, AT, "sell", 1, D("1.00"))], "come as its WalletTx"),
         ([*COIN, Transfer("d", "w", "x", DAY, AT, "deposit", 1_000, 0)], "come as its WalletTx"),
         (
-            [Acquisition("a", "x", DAY, "buy", 1, D("1.00"), coins=(Coin("a:0", 1),))],
+            [Acquisition("a", "x", DAY, "buy", 1, D("1.00"), coins=(Coin("a:0", 1, 1),))],
             "only a coin-traced wallet",
         ),
         ([*COIN, wtx(None, [change(0, BTC)], account="x")], "isn't a coin-traced wallet"),
@@ -285,8 +295,8 @@ def test_wallet_transactions_dont_stop_the_replay() -> None:
 
 
 TWO: list[Event] = [
-    Acquisition("L1", "w", date(2024, 1, 1), "buy", 500, D("10.00"), coins=(Coin("c0:0", 500),)),
-    Acquisition("L2", "w", date(2024, 2, 1), "buy", 500, D("30.00"), coins=(Coin("c0:0", 500),)),
+    Acquisition("L1", "w", date(2024, 1, 1), "buy", 500, D("10.00"), coins=(Coin("c0:0", 500, 1_000),)),
+    Acquisition("L2", "w", date(2024, 2, 1), "buy", 500, D("30.00"), coins=(Coin("c0:0", 500, 1_000),)),
 ]
 
 
@@ -307,8 +317,10 @@ def test_a_consolidations_fee_lot_off_the_change_passes_its_basis_onto_it() -> N
     # The fee takes L1 first (all 100 of it); the change holds only L2, whose oldest fragment takes
     # L1's $10.00: L2 1,000 sats, $40.00. No disposal.
     events: list[Event] = [
-        Acquisition("L1", "w", date(2024, 1, 1), "buy", 100, D("10.00"), coins=(Coin("a:0", 100),)),
-        Acquisition("L2", "w", date(2024, 2, 1), "buy", 1_000, D("30.00"), coins=(Coin("b:0", 1_000),)),
+        Acquisition("L1", "w", date(2024, 1, 1), "buy", 100, D("10.00"), coins=(Coin("a:0", 100, 100),)),
+        Acquisition(
+            "L2", "w", date(2024, 2, 1), "buy", 1_000, D("30.00"), coins=(Coin("b:0", 1_000, 1_000),)
+        ),
         wtx(None, [change(0, 1_000)], inputs=(Spent("a:0", 100, "w"), Spent("b:0", 1_000, "w"))),
     ]
     result = run(events, wallets=WALLETS)
@@ -359,7 +371,7 @@ def bad_wallet_tx(**kw: Any) -> WalletTx:
             "a deposit or a self-transfer",
         ),
         (
-            Transfer("d", "x", "y", DAY, AT, "deposit", 1, 0, coins=(Coin("a:0", 1),)),
+            Transfer("d", "x", "y", DAY, AT, "deposit", 1, 0, coins=(Coin("a:0", 1, 1),)),
             "only a withdrawal links",
         ),
     ],
@@ -372,10 +384,10 @@ def test_malformed_wallet_events_raise(event: Event, match: str) -> None:
 @pytest.mark.parametrize(
     ("coins", "match"),
     [
-        ([Coin("a:0", 1)], "a tuple of Coins"),
+        ([Coin("a:0", 1, 1)], "a tuple of Coins"),
         (("a:0",), "a Coin naming an outpoint"),
-        ((Coin("a", 1),), "a Coin naming an outpoint"),
-        ((Coin("a:0", 1), Coin("a:0", 1)), "linked once per event"),
+        ((Coin("a", 1, 1),), "a Coin naming an outpoint"),
+        ((Coin("a:0", 1, 1), Coin("a:0", 1, 1)), "linked once per event"),
     ],
 )
 def test_malformed_links_raise(coins: Any, match: str) -> None:
@@ -386,3 +398,208 @@ def test_malformed_links_raise(coins: Any, match: str) -> None:
 def test_wallets_is_a_frozenset_of_names() -> None:
     with pytest.raises(EngineError, match="frozenset"):
         run([], wallets={"w"})  # type: ignore[arg-type]
+
+
+def test_a_fee_lot_with_no_row_joins_the_oldest_row_which_keeps_its_date_adr0043() -> None:
+    # The payment takes all of L1 (long-term); the fee takes L2 100 ($6.00, short-term), which has no
+    # row: no row of its own, its basis joins L1's row, long-term, and the proceeds stay L1's
+    events: list[Event] = [
+        Acquisition("L1", "w", date(2023, 1, 1), "buy", 500, D("10.00"), coins=(Coin("c0:0", 500, 1_000),)),
+        Acquisition("L2", "w", date(2025, 2, 1), "buy", 500, D("30.00"), coins=(Coin("c0:0", 500, 1_000),)),
+    ]
+    sale = Disposal("s", "w", DAY, AT, "sell", 500, D("50.00"))
+    tx = wtx(sale, [Output(0, 500, PAY, event="s"), change(1, 400)], inputs=(Spent("c0:0", 1_000, "w"),))
+    (row,) = run([*events, tx], wallets=WALLETS).allocations
+    assert (row.lot, row.sats, row.basis, row.proceeds, row.long_term) == (
+        "L1",
+        500,
+        D("16.00"),
+        D("50.00"),
+        True,
+    )
+    assert (row.carried_fee, row.carried_from) == (100, ("L2",))
+
+
+def test_a_gift_fee_lots_lower_basis_joins_another_lots_row_adr0043() -> None:
+    # The fee lot is a gift with donor basis $20 and FMV $8 at the gift: the lower, $8, joins the buy's row
+    events: list[Event] = [
+        Acquisition("L1", "w", date(2023, 1, 1), "buy", 500, D("10.00"), coins=(Coin("c0:0", 500, 600),)),
+        Acquisition(
+            "G",
+            "w",
+            date(2023, 2, 1),
+            "gift_in",
+            100,
+            D("20.00"),
+            D("8.00"),
+            date(2020, 1, 1),
+            coins=(Coin("c0:0", 100, 600),),
+        ),
+    ]
+    sale = Disposal("s", "w", DAY, AT, "sell", 500, D("50.00"))
+    tx = wtx(sale, [Output(0, 500, PAY, event="s")], inputs=(Spent("c0:0", 600, "w"),))
+    (row,) = run([*events, tx], wallets=WALLETS).allocations
+    assert (row.lot, row.basis, row.carried_from) == ("L1", D("18.00"), ("G",))
+
+
+@pytest.mark.parametrize("dest_first", [False, True])
+def test_adr0041_second_example_with_the_outputs_swapped(dest_first: bool) -> None:
+    move = Transfer("x", "w", "v", DAY, AT, "self_transfer", BTC // 2 + FEE, FEE)
+    d, c = (0, 1) if dest_first else (1, 0)
+    outs = [Output(d, BTC // 2, DEST, account="v", kind="self_custody", event="x"), change(c, 49_990_000)]
+    result = run([*COIN, wtx(move, outs)], wallets=WALLETS)
+    assert [(m.into, m.sats, m.basis) for m in result.moves] == [
+        ("L1@x", 40_000_000, D("10000.00")),
+        ("L2@x", 10_000_000, D("5005.00")),
+    ]
+
+
+def test_a_withdrawals_linked_coin_is_spent_with_its_moved_lots() -> None:
+    events: list[Event] = [
+        Acquisition("e1", "x", date(2024, 1, 1), "buy", 1_000, D("10.00")),
+        Transfer("wd", "x", "w", DAY, AT, "withdrawal", 1_000, 100, coins=(Coin("c:0", 900, 900),)),
+        wtx(
+            Disposal("s", "w", DAY, AT, "sell", 800, D("20.00")),
+            [Output(0, 800, PAY, event="s")],
+            inputs=(Spent("c:0", 900, "w"),),
+        ),
+    ]
+    (row,) = run(events, wallets=WALLETS).allocations
+    assert (row.lot, row.sats, row.basis, row.carried_fee) == ("e1@wd", 800, D("10.00"), 100)
+
+
+def test_an_untraced_spend_leaves_its_fee_too_and_drops_the_wallets_coins() -> None:
+    # the second coin isn't linked: the spend blocks, takes 900 by FIFO for the payment and 100 for the
+    # fee, and the wallet's coin records go (they no longer match its lots)
+    events: list[Event] = [
+        Acquisition(
+            "L1", "w", date(2024, 1, 1), "buy", 2_000, D("20.00"), coins=(Coin("a:0", 1_000, 1_000),)
+        ),
+        wtx(
+            Disposal("s", "w", DAY, AT, "spend", 900, D("9.00")),
+            [Output(0, 900, PAY, event="s")],
+            inputs=(Spent("b:0", 1_000, "w"),),
+        ),
+    ]
+    result = run(events, wallets=WALLETS)
+    assert [lot.sats for lot in result.holdings] == [1_000]
+    assert result.coins == ()
+
+
+def test_a_self_transfer_from_an_account_that_isnt_coin_traced_blocks() -> None:
+    events: list[Event] = [
+        Acquisition("b1", "z", date(2024, 1, 1), "buy", 10, D("1.00")),
+        Transfer("t1", "z", "v", DAY, AT, "self_transfer", 5, 0),
+    ]
+    result = run(events, wallets=WALLETS)
+    assert [(b.event, b.reason) for b in result.blocking if isinstance(b, Untraced)] == [
+        ("t1", "mixed_transfer")
+    ]
+    assert [m.into for m in result.moves] == ["b1@t1"]  # figured by FIFO, provisionally
+
+
+def test_a_lot_on_two_destination_outputs_moves_as_one_lot_per_output_and_the_fee_basis_stays_on_one() -> (
+    None
+):
+    # L1 (1,000 sats, $10) pays 400 to each of v's two outputs, 100 change, 100 fee. The fee's $1
+    # belongs to the first destination output in the canonical order (same value: by script, d1, at
+    # vout 1), so each output is its own moved lot: $4.00 on vout 0, $5.00 on vout 1
+    events: list[Event] = [
+        Acquisition(
+            "L1", "w", date(2024, 1, 1), "buy", 1_000, D("10.00"), coins=(Coin("c0:0", 1_000, 1_000),)
+        ),
+    ]
+    move = Transfer("x", "w", "v", DAY, AT, "self_transfer", 900, 100)
+    outs = [
+        Output(0, 400, b"\x00\x14d2", account="v", kind="self_custody", event="x"),
+        Output(1, 400, b"\x00\x14d1", account="v", kind="self_custody", event="x"),
+        change(2, 100),
+    ]
+    result = run([*events, wtx(move, outs, inputs=(Spent("c0:0", 1_000, "w"),))], wallets=WALLETS)
+    assert [(m.into, m.sats, m.basis, m.carried_fee) for m in result.moves] == [
+        ("L1@x:0", 400, D("4.00"), 0),
+        ("L1@x:1", 400, D("5.00"), 100),
+    ]
+    assert set(result.coins) == {
+        CoinLot("t1:0", "L1@x:0", 400),
+        CoinLot("t1:1", "L1@x:1", 400),
+        CoinLot("t1:2", "L1", 100),
+    }
+
+
+def test_a_consolidations_fee_basis_stays_on_the_change_output_tracing_names() -> None:
+    # L1 (1,100 sats, $11) consolidates into two change outputs, 500 and 450, with a 150 fee. The fee's
+    # $1.50 goes to the 500 output's L1 fragment, which becomes a lot of its own: $5.00 + $1.50
+    events: list[Event] = [
+        Acquisition(
+            "L1", "w", date(2024, 1, 1), "buy", 1_100, D("11.00"), coins=(Coin("a:0", 1_100, 1_100),)
+        ),
+    ]
+    outs = [
+        Output(0, 500, b"\x00\x14c1", account="w", kind="self_custody"),
+        Output(1, 450, b"\x00\x14c2", account="w", kind="self_custody"),
+    ]
+    result = run([*events, wtx(None, outs, inputs=(Spent("a:0", 1_100, "w"),))], wallets=WALLETS)
+    assert {lot.id: (lot.sats, lot.basis) for lot in result.holdings} == {
+        "L1": (450, D("4.50")),
+        "L1@tx1:0": (500, D("6.50")),
+    }
+    assert set(result.coins) == {CoinLot("t1:0", "L1@tx1:0", 500), CoinLot("t1:1", "L1", 450)}
+
+
+def test_links_from_several_events_over_the_outputs_value_block_at_once() -> None:
+    # two 400-sat links on a 600-sat output: the second blocks when it is made, not when the coin is spent
+    events: list[Event] = [
+        Acquisition("L1", "w", date(2024, 1, 1), "buy", 400, D("1.00"), coins=(Coin("a:0", 400, 600),)),
+        Acquisition("L2", "w", date(2024, 2, 1), "buy", 400, D("1.00"), coins=(Coin("a:0", 400, 600),)),
+    ]
+    result = run(events, wallets=WALLETS)
+    assert result.blocking == (
+        Untraced("L2", "bad_link", "a:0 would hold 800 sats of lots, more than its 600"),
+    )
+    assert result.coins == (CoinLot("a:0", "L1", 400),)
+
+
+def test_an_outputs_value_is_the_same_in_every_link() -> None:
+    events: list[Event] = [
+        Acquisition("L1", "w", date(2024, 1, 1), "buy", 400, D("1.00"), coins=(Coin("a:0", 400, 600),)),
+        Acquisition("L2", "w", date(2024, 2, 1), "buy", 200, D("1.00"), coins=(Coin("a:0", 200, 700),)),
+    ]
+    with pytest.raises(EngineError, match="another value"):
+        run(events, wallets=WALLETS)
+
+
+def test_a_zero_value_coin_spent_with_the_wallets_coins_carries_no_lots() -> None:
+    spend = Disposal("s", "w", DAY, AT, "spend", BTC // 2, D("50000.00"))
+    outs = [Output(0, BTC // 2, PAY, event="s"), change(1, 49_990_000)]
+    inputs = (Spent("c0:0", BTC, "w"), Spent("z:0", 0, "w"))
+    result = run([*COIN, wtx(spend, outs, inputs=inputs)], wallets=WALLETS)
+    assert result.blocking == ()
+    assert [a.lot for a in result.allocations] == ["L1", "L2"]
+
+
+def test_the_replay_stops_where_only_it_cant_trace_a_wallet_transaction() -> None:
+    # A late withdrawal choice puts e2@wd 1,000 on the coin; the replay (FIFO) puts e1@wd 500 and e2@wd
+    # 500 there. Splitting the coin into two identical outputs then traces in the real run (both get
+    # e2@wd) but blocks in the replay (they would get different lots), so the replay stops there.
+    late = datetime(2025, 3, 1, 18, tzinfo=UTC)
+    events: list[Event] = [
+        Acquisition("e1", "x", date(2024, 1, 1), "buy", 500, D("1.00")),
+        Acquisition("e2", "x", date(2024, 2, 1), "buy", 1_000, D("4.00")),
+        Transfer(
+            "wd",
+            "x",
+            "w",
+            DAY,
+            AT,
+            "withdrawal",
+            1_000,
+            picks=(Pick("e2", 1_000),),
+            identified_at=late,
+            coins=(Coin("c:0", 1_000, 1_000),),
+        ),
+        wtx(None, [change(0, 500), change(1, 500)], inputs=(Spent("c:0", 1_000, "w"),)),
+    ]
+    result = run(events, wallets=WALLETS)
+    assert result.blocking == ()
+    assert result.replay_stopped == "tx1"
