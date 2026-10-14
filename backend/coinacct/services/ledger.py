@@ -12,9 +12,11 @@ run (THREAT_MODEL T-501, T-507, T-508).
 - **Choices.** An event's stored choice of lots becomes its picks, with when it was made; an event
   without one uses its account's standing method. So does every event of an account in automatic mode
   over a FIFO standing order or none (ADR 0021 §1, the default): the app selects its lots by the
-  standing method, a stored choice is not used, and nothing there is late. A choice naming a lot such
-  a movement moved isn't used either, since the standing method may move other lots
-  (`ignored_choices`). The run lists the events whose stored choice it didn't use.
+  standing method, a stored choice is not used, and nothing there is late. A choice that went stale,
+  naming a lot the run doesn't make or fewer sats than it holds (an edit elsewhere moved other lots),
+  takes the standing method too: the engine refuses it, and the run drops that choice and runs again.
+  A choice naming a lot the run does make stands. The run lists the events whose stored choice it
+  didn't use.
 - **Methods.** An account's standing order of FIFO is passed on; a standing order of specific
   identification, or none, leaves FIFO, the engine's only standing method and the statutory fallback.
 
@@ -23,9 +25,11 @@ The engine refuses input it can't use (`EngineError`); the run then stops, and t
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Final
 from zoneinfo import ZoneInfo
 
 from coinacct.services.imports import ImportRefused, db_errors
@@ -38,28 +42,25 @@ from coinacct.tax.engine import Acquisition, Disposal, Event, Method, Pick, Resu
 type Chosen = Mapping[int, tuple[tuple[Choice, ...], datetime]]
 
 
-def _moved_by(lot: str) -> set[int]:
-    """The event ids a lot id passes through after its origin: `<origin>@<move>@<move>…`, before any
-    `#<vout>` (the engine names a moved lot `<lot>@<movement>`)."""
-    parts = lot.split("#", 1)[0].split("@")[1:]
-    return {int(p) for p in parts if p.isdigit()}
-
-
 def ignored_choices(stored: Sequence[Stored], chosen: Chosen, automatic: frozenset[int]) -> frozenset[int]:
-    """The events whose stored choice the run doesn't use: those of accounts in automatic mode (ADR 0021
-    §1), and, in turn, any choice naming a lot one of those movements moved, since its standing method
-    may move other lots, so that choice could name a lot the run never makes."""
+    """The events whose stored choice the run doesn't use from the start: those of accounts in
+    automatic mode (ADR 0021 §1)."""
     account = {s.id: s.event.account for s in stored}
-    ignored = {i for i in chosen if account.get(i) in automatic}
-    while True:
-        more = {
-            i
-            for i, (picks, _) in chosen.items()
-            if i not in ignored and any(_moved_by(p.lot) & ignored for p in picks)
-        }
-        if not more:
-            return frozenset(ignored)
-        ignored |= more
+    return frozenset(i for i in chosen if account.get(i) in automatic)
+
+
+# the engine's refusal of a stored choice naming a lot the run doesn't make, or with fewer sats than
+# chosen (`tax.engine` `_checked_picks`): the choice went stale after an edit elsewhere
+_STALE: Final = re.compile(
+    r"event '([1-9][0-9]{0,18})': lot .* (?:isn't held in account|holds fewer sats than chosen)", re.ASCII
+)
+
+
+def _stale_choice(error: engine.EngineError, chosen: Chosen, ignored: set[int]) -> int | None:
+    """The event whose stored choice `error` refuses as stale, if it is one the run can ignore."""
+    match = _STALE.match(str(error))
+    event_id = None if match is None else int(match.group(1))
+    return event_id if event_id in chosen and event_id not in ignored else None
 
 
 def engine_events(
@@ -160,6 +161,15 @@ class Ledger:
                 reader.execute("COMMIT")
             finally:
                 reader.close()
-        ignored = ignored_choices(stored, chosen, automatic)
-        inputs = engine_events(stored, chosen, zone, ignored)
-        return Run(inputs, engine.run(inputs, methods), tuple(sorted(ignored)))
+        ignored = set(ignored_choices(stored, chosen, automatic))
+        while True:  # at most once per stored choice
+            inputs = engine_events(stored, chosen, zone, frozenset(ignored))
+            try:
+                result = engine.run(inputs, methods)
+            except engine.EngineError as e:
+                stale = _stale_choice(e, chosen, ignored)
+                if stale is None:
+                    raise
+                ignored.add(stale)  # the stale choice takes the standing method, and is listed
+                continue
+            return Run(inputs, result, tuple(sorted(ignored)))

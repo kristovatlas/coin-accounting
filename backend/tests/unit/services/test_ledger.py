@@ -18,7 +18,6 @@ from coinacct.services.ledger import (
     Ledger,
     automatic_accounts,
     engine_events,
-    ignored_choices,
     standing_methods,
 )
 from coinacct.storage import accounts as ac
@@ -27,6 +26,7 @@ from coinacct.storage import settings
 from coinacct.storage.chain_state import record_chain
 from coinacct.storage.datadir import open_data_dir
 from coinacct.storage.db import open_db, open_reader
+from coinacct.tax import engine
 from coinacct.tax.engine import Acquisition, Disposal, Pick, Transfer
 
 AT = "2026-10-14T12:00:00+00:00"
@@ -113,6 +113,7 @@ def test_the_ledger_runs_the_stored_events(db: tuple[sqlite3.Connection, Ledger]
         True,
     )
     assert result.late == ()
+    assert run.ignored == ()
 
 
 def test_the_ledger_takes_tax_dates_in_the_stored_time_zone(db: tuple[sqlite3.Connection, Ledger]) -> None:
@@ -149,6 +150,7 @@ def test_an_automatic_account_takes_the_standing_method_adr0021(
     (row,) = result.allocations
     assert row.lot == {"first": str(first), "second": str(second)}[lot]  # FIFO's oldest, or the choice
     assert result.late == ()
+    assert run.ignored == ((sale,) if automatic else ())
 
 
 def test_engine_events_drops_a_choice_on_an_automatic_account() -> None:
@@ -200,26 +202,71 @@ def test_a_choice_naming_a_lot_an_automatic_movement_moved_is_ignored_too(
     sale = ev.add_event(conn, ev.Event("sell", x, datetime(2025, 3, 1, tzinfo=UTC), 1_000, D("60.00")), at=AT)
     ev.identify(conn, sale, (ev.Choice(f"{b}@{deposit}", 1_000),), datetime(2025, 3, 1, tzinfo=UTC), at=AT)
     run = ledger.run()  # doesn't stop on a lot the run never makes
-    assert run.ignored == (deposit, sale)
+    assert run.ignored == (deposit, sale)  # the deposit's (automatic) and the now stale sale's
     (row,) = run.result.allocations
     assert row.lot == f"{a}@{deposit}"  # FIFO moved the oldest lot, and the sale took it
 
 
-def test_ignored_choices_follows_moves_transitively() -> None:
-    when = datetime(2025, 1, 1, tzinfo=UTC)
-    stored = [
-        ev.Stored(3, ev.Event("deposit", 1, when, 10, to=2)),
-        ev.Stored(4, ev.Event("withdrawal", 2, when, 10, to=5)),
-        ev.Stored(6, ev.Event("sell", 5, when, 10, D("1.00"))),
-        ev.Stored(7, ev.Event("sell", 5, when, 10, D("1.00"))),
-    ]
-    chosen = {
-        3: ((ev.Choice("1", 10),), when),
-        4: ((ev.Choice("1@3", 10),), when),
-        6: ((ev.Choice("1@3@4", 10),), when),
-        7: ((ev.Choice("8", 10),), when),  # names no lot the ignored movements moved
-    }
-    assert ignored_choices(stored, chosen, frozenset({1})) == {3, 4, 6}
+def test_a_downstream_choice_of_a_lot_the_run_makes_stands(db: tuple[sqlite3.Connection, Ledger]) -> None:
+    """An automatic wallet's deposit takes FIFO and moves its oldest lot; a manual exchange sale that
+    chose exactly that moved lot keeps its choice, over the exchange's own older lot."""
+    conn, ledger = db
+    wallet = ac.add_tax_account(conn, "Wallet", "self_custody")  # automatic, the default
+    exchange = ac.add_entity(conn, "Some exchange", "exchange")
+    x = ac.add_tax_account(conn, "Exchange", "custodial", entity_id=exchange, automatic=False)
+    own = ev.add_event(conn, ev.Event("buy", x, datetime(2023, 1, 2, tzinfo=UTC), 1_000, D("5.00")), at=AT)
+    a = ev.add_event(
+        conn, ev.Event("buy", wallet, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT
+    )
+    deposit = ev.add_event(
+        conn, ev.Event("deposit", wallet, datetime(2024, 3, 2, tzinfo=UTC), 1_000, to=x), at=AT
+    )
+    sale = ev.add_event(conn, ev.Event("sell", x, datetime(2025, 3, 1, tzinfo=UTC), 1_000, D("60.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice(f"{a}@{deposit}", 1_000),), datetime(2025, 3, 1, tzinfo=UTC), at=AT)
+    run = ledger.run()
+    assert run.ignored == ()
+    (row,) = run.result.allocations
+    assert row.lot == f"{a}@{deposit}" != str(own)
+
+
+def test_a_choice_stale_after_a_movement_without_one_falls_back(
+    db: tuple[sqlite3.Connection, Ledger],
+) -> None:
+    """A deposit with no choice of its own moves FIFO's oldest lot; a sale's choice of another lot it
+    would have moved names a lot the run never makes, so it takes FIFO and is listed."""
+    conn, ledger = db
+    wallet = ac.add_tax_account(conn, "Wallet", "self_custody")
+    exchange = ac.add_entity(conn, "Some exchange", "exchange")
+    x = ac.add_tax_account(conn, "Exchange", "custodial", entity_id=exchange, automatic=False)
+    a = ev.add_event(
+        conn, ev.Event("buy", wallet, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT
+    )
+    b = ev.add_event(
+        conn, ev.Event("buy", wallet, datetime(2024, 2, 2, tzinfo=UTC), 1_000, D("20.00")), at=AT
+    )
+    deposit = ev.add_event(
+        conn, ev.Event("deposit", wallet, datetime(2024, 3, 2, tzinfo=UTC), 1_000, to=x), at=AT
+    )
+    sale = ev.add_event(conn, ev.Event("sell", x, datetime(2025, 3, 1, tzinfo=UTC), 1_000, D("60.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice(f"{b}@{deposit}", 1_000),), datetime(2025, 3, 1, tzinfo=UTC), at=AT)
+    run = ledger.run()
+    assert run.ignored == (sale,)
+    (row,) = run.result.allocations
+    assert row.lot == f"{a}@{deposit}"
+
+
+def test_an_engine_refusal_that_isnt_a_stale_choice_still_stops_the_run(
+    db: tuple[sqlite3.Connection, Ledger],
+) -> None:
+    conn, ledger = db
+    wallet = ac.add_tax_account(conn, "Wallet", "self_custody")
+    cold = ac.add_tax_account(conn, "Cold", "self_custody")
+    ev.add_event(conn, ev.Event("buy", wallet, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT)
+    ev.add_event(
+        conn, ev.Event("self_transfer", wallet, datetime(2024, 3, 2, tzinfo=UTC), 1_000, to=cold), at=AT
+    )
+    with pytest.raises(engine.EngineError):
+        ledger.run()
 
 
 def test_a_damaged_stored_event_keeps_its_remedy(db: tuple[sqlite3.Connection, Ledger]) -> None:
