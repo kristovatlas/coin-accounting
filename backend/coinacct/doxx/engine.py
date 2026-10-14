@@ -27,18 +27,23 @@ see it rests on a guess and confirm or reject it (T-504). Heuristics only sugges
 as "known links", never as "private" or "clean" (T-505). Chain-analysis heuristics the app doesn't
 model are accepted risk R-3.
 
-The rules run until nothing changes. A tag only strengthens (inferred to certain, or a heuristic tag to
-one that isn't), so they end. Of two equal tags the earlier reason (manual, received_from, paid_to,
-change_of, cluster_backward, address_reuse), then the lowest txid and coin, wins, so the result doesn't
-depend on the order of the input. Doxx sets never reach third parties' outputs. The user's overrides
-persist: one adds a tag (certain, `manual`), which then propagates; one removes a tag, which no rule
-gives back. A recorded receipt or an override the engine can't apply (its coin isn't one of the user's,
-its entity doesn't know the user's identity) is returned as `unresolved`, and a tag a removal suppressed
-as `suppressed`, so the caller can show both (T-511: no certain link is lost without a word).
+The rules run until nothing changes, transactions in spend order (a transaction after those whose
+outputs it spends, then by txid), so a tag crosses a chain of spends in one pass. A tag only strengthens
+(inferred to certain, or a heuristic tag to one that isn't), so they end. Of two equally strong tags the
+earlier reason (manual, received_from, paid_to, change_of, cluster_backward, address_reuse) wins, and of
+two with the same reason the first given stays; each rule takes its source from the strongest holder
+(lowest coin first), so the result doesn't depend on the order of the input, and no tag names its own
+coin as its source. Doxx sets never reach third parties' outputs. The user's overrides persist: one adds
+a tag (certain, `manual`), which then propagates; one removes a tag, which no rule gives back. A
+recorded receipt or an override the engine can't apply (its coin isn't one of the user's, its entity
+doesn't know the user's identity) is returned as `unresolved`, and every tag the removals kept off, on
+the coin named or on the coins it would have reached, as `suppressed`, so the caller can show both
+(T-511: no certain link is lost without a word).
 """
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
@@ -127,7 +132,7 @@ class Unresolved:
 class Doxx:
     tags: tuple[Tag, ...]
     unresolved: tuple[Unresolved, ...] = ()
-    suppressed: tuple[Tag, ...] = ()  # tags the user's removals kept off
+    suppressed: tuple[Tag, ...] = ()  # tags the user's removals kept off, there and downstream
 
 
 def doxx(
@@ -138,33 +143,56 @@ def doxx(
 ) -> Doxx:
     """Every doxx tag on the user's coins, by outpoint (txid, then vout) then entity."""
     _check(txs, identity, received, overrides)
-    state = _State(txs, overrides)
-    unresolved: list[Unresolved] = []
-    seeds: list[tuple[Literal["received", "override"], str, str, Reason]] = [
+    order = _spend_order(txs)
+    owned = {c.outpoint for t in txs for c in (*t.inputs, *t.outputs) if c.owned}
+    unresolved: set[Unresolved] = set()
+    seeds: list[tuple[str, str, Reason]] = []
+    facts: list[tuple[Literal["received", "override"], str, str, Reason | None]] = [
         ("received", r.outpoint, r.entity, "received_from") for r in received
     ]
-    seeds += [("override", o.outpoint, o.entity, "manual") for o in overrides if o.present]
-    for kind, outpoint, entity, reason in seeds:
-        if outpoint not in state.owned:
-            unresolved.append(Unresolved(kind, outpoint, entity, "not_owned"))
+    facts += [("override", o.outpoint, o.entity, "manual" if o.present else None) for o in overrides]
+    for kind, outpoint, entity, reason in facts:
+        if outpoint not in owned:
+            unresolved.add(Unresolved(kind, outpoint, entity, "not_owned"))
         elif entity not in identity:
-            unresolved.append(Unresolved(kind, outpoint, entity, "not_identity"))
-        else:
-            state.give(outpoint, entity, ("certain", reason, None, None, False))
-    for t in sorted(txs, key=lambda t: t.txid):
+            unresolved.add(Unresolved(kind, outpoint, entity, "not_identity"))
+        elif reason is not None:
+            seeds.append((outpoint, entity, reason))
+    removed = frozenset((o.outpoint, o.entity) for o in overrides if not o.present)
+    tags = _fixpoint(order, identity, seeds, removed)
+    suppressed: dict[str, dict[str, _Value]] = {}
+    if removed:  # what the removals kept off: every tag the run without them has, and this one lacks
+        for outpoint, held in _fixpoint(order, identity, seeds, frozenset()).items():
+            for k, value in held.items():
+                kept = tags.get(outpoint, {}).get(k)
+                if kept is None or _stronger(value, kept):
+                    suppressed.setdefault(outpoint, {})[k] = value
+    return Doxx(
+        _tags(tags),
+        tuple(sorted(unresolved, key=lambda u: (u.kind, _key(u.outpoint), u.entity, u.why))),
+        _tags(suppressed),
+    )
+
+
+def _fixpoint(
+    order: list[Tx],
+    identity: frozenset[str],
+    seeds: list[tuple[str, str, Reason]],
+    removed: frozenset[tuple[str, str]],
+) -> dict[str, dict[str, _Value]]:
+    state = _State(order, removed)
+    for outpoint, entity, reason in seeds:
+        state.give(outpoint, entity, ("certain", reason, None, None, False))
+    for t in order:
         _paid_to(state, t, identity)
-    clusters = _clusters(txs)
+    clusters = _clusters(order)
     while state.changed:
         state.changed = False
-        for t in sorted(txs, key=lambda t: t.txid):
+        for t in order:
             _forward(state, t)
         _reuse(state)
         _cluster(state, clusters)
-    return Doxx(
-        _tags(state.tags),
-        tuple(sorted(unresolved, key=lambda u: (u.kind, _key(u.outpoint), u.entity))),
-        _tags(state.suppressed),
-    )
+    return state.tags
 
 
 type _Value = tuple[
@@ -212,9 +240,10 @@ def _forward(state: _State, t: Tx) -> None:
 
 def _reuse(state: _State) -> None:
     """Address reuse: every coin at an address is doxxed to every entity another coin there holds, with
-    that coin's confidence (from the strongest other holder; linear in the coins there)."""
+    that coin's confidence, from the strongest other holder (linear in the coins there). The tag names the
+    transaction that created the source coin."""
     for coins in state.by_address.values():
-        holders: dict[str, list[tuple[int, bool, tuple[str, int], str]]] = {}  # entity -> 2 best holders
+        holders: dict[str, list[tuple[int, bool, tuple[str, int], str]]] = {}  # entity -> 2 best
         for c in coins:
             for k, value in state.tags.get(c, {}).items():
                 mine = (-STRENGTH[value[0]], value[4], _key(c), c)
@@ -224,29 +253,33 @@ def _reuse(state: _State) -> None:
                 other = next((h for h in best if h[3] != c), None)
                 if other is not None:
                     conf: Confidence = "certain" if other[0] == -STRENGTH["certain"] else "inferred"
-                    state.give(c, k, (conf, "address_reuse", None, other[3], other[1]))
+                    source = other[3]
+                    state.give(c, k, (conf, "address_reuse", source.rpartition(":")[0], source, other[1]))
 
 
 def _cluster(state: _State, clusters: list[tuple[list[str], dict[str, str]]]) -> None:
     """Backward cluster: a tag at one address of a common-input cluster is inferred, as a heuristic, at
-    all of them; the tag names the co-spend transaction that put the address in the cluster."""
+    all of them, from the strongest holder; the tag names the co-spend transaction that put the address in
+    the cluster. A coin is never its own source."""
     for members, joined_by in clusters:
-        entities: dict[str, str] = {}  # entity -> a coin holding it
+        best: dict[str, tuple[int, bool, tuple[str, int], str]] = {}  # entity -> its best holder
         for a in members:
-            for c in sorted(state.by_address.get(a, ()), key=_key):
-                for k in state.tags.get(c, {}):
-                    entities.setdefault(k, c)
-        for k, source in sorted(entities.items()):
+            for c in state.by_address.get(a, ()):
+                for k, value in state.tags.get(c, {}).items():
+                    mine = (-STRENGTH[value[0]], value[4], _key(c), c)
+                    if k not in best or mine < best[k]:
+                        best[k] = mine
+        for k, holder in sorted(best.items()):
             for a in members:
                 for c in state.by_address.get(a, ()):
-                    state.give(c, k, ("inferred", "cluster_backward", joined_by[a], source, True))
+                    if c != holder[3]:  # a holder whose tag is weaker (reuse) would name itself
+                        state.give(c, k, ("inferred", "cluster_backward", joined_by[a], holder[3], True))
 
 
 class _State:
-    def __init__(self, txs: Sequence[Tx], overrides: Sequence[Override]) -> None:
+    def __init__(self, txs: Sequence[Tx], removed: frozenset[tuple[str, str]]) -> None:
         self.tags: dict[str, dict[str, _Value]] = {}
-        self.suppressed: dict[str, dict[str, _Value]] = {}
-        self.removed = {(o.outpoint, o.entity) for o in overrides if not o.present}
+        self.removed = removed
         self.owned: set[str] = set()
         self.by_address: dict[str, list[str]] = {}
         for t in txs:
@@ -257,11 +290,10 @@ class _State:
         self.changed = True
 
     def give(self, outpoint: str, entity: str, value: _Value) -> None:
-        """Tag a coin, or strengthen its tag; never weaken one. A tag the user removed is kept apart."""
-        if outpoint not in self.owned:
+        """Tag a coin, or strengthen its tag; never weaken one, and never give one the user removed."""
+        if outpoint not in self.owned or (outpoint, entity) in self.removed:
             return
-        into = self.suppressed if (outpoint, entity) in self.removed else self.tags
-        mine = into.setdefault(outpoint, {})
+        mine = self.tags.setdefault(outpoint, {})
         held = mine.get(entity)
         if held is None or _stronger(value, held):
             mine[entity] = value
@@ -269,10 +301,10 @@ class _State:
 
 
 def _stronger(new: _Value, old: _Value) -> bool:
-    """Stronger confidence, then not heuristic, then the earlier rule, lower txid and lower source."""
+    """Stronger confidence, then not heuristic, then the earlier rule; an equal tag doesn't replace."""
 
-    def rank(v: _Value) -> tuple[int, int, int, str, str]:
-        return (-STRENGTH[v[0]], int(v[4]), REASON_ORDER[v[1]], v[2] or "", v[3] or "")
+    def rank(v: _Value) -> tuple[int, int, int]:
+        return (-STRENGTH[v[0]], int(v[4]), REASON_ORDER[v[1]])
 
     return rank(new) < rank(old)
 
@@ -305,8 +337,40 @@ def _clusters(txs: Sequence[Tx]) -> list[tuple[list[str], dict[str, str]]]:
 
 
 def _key(outpoint: str) -> tuple[str, int]:
-    txid, _, vout = outpoint.rpartition(":")
-    return (txid, int(vout)) if vout.isdigit() else (outpoint, -1)
+    """An outpoint's sort key: its txid, then its vout as a number (-1 if it isn't txid:vout)."""
+    vout = _vout(outpoint)
+    return (outpoint.rpartition(":")[0], vout) if vout is not None else (outpoint, -1)
+
+
+def _vout(outpoint: str) -> int | None:
+    """The vout of a canonical "txid:vout" (ASCII digits, no leading zero), else None."""
+    txid, sep, vout = outpoint.rpartition(":")
+    if not sep or not txid or not (vout.isascii() and vout.isdigit()) or (len(vout) > 1 and vout[0] == "0"):
+        return None
+    return int(vout)
+
+
+def _spend_order(txs: Sequence[Tx]) -> list[Tx]:
+    """The transactions, each after those whose outputs it spends, then by txid."""
+    by_id = {t.txid: t for t in txs}
+    waiting = {t.txid: {i.outpoint.rpartition(":")[0] for i in t.inputs} & by_id.keys() for t in txs}
+    spenders: dict[str, list[str]] = {}
+    for txid, parents in waiting.items():
+        for parent in parents:
+            spenders.setdefault(parent, []).append(txid)
+    ready = [txid for txid, parents in waiting.items() if not parents]
+    heapq.heapify(ready)
+    order: list[Tx] = []
+    while ready:
+        txid = heapq.heappop(ready)
+        order.append(by_id[txid])
+        for child in spenders.get(txid, ()):
+            waiting[child].discard(txid)
+            if not waiting[child]:
+                heapq.heappush(ready, child)
+    if len(order) != len(txs):
+        raise DoxxError("the transactions spend each other's outputs in a cycle")
+    return order
 
 
 def _check(txs: object, identity: object, received: object, overrides: object) -> None:
@@ -346,6 +410,14 @@ def _check_txs(txs: Sequence[Tx]) -> None:
                 raise DoxxError(
                     f"coin {c.outpoint!r}: its address, owner and entity differ between sightings"
                 )
+    spent: set[str] = set()
+    for t in txs:
+        for i in t.inputs:
+            if i.outpoint in spent:
+                raise DoxxError(f"coin {i.outpoint!r} is spent by two transactions")
+            spent.add(i.outpoint)
+            if i.outpoint.rpartition(":")[0] in seen and i.outpoint not in outputs:
+                raise DoxxError(f"tx {t.txid!r}: input {i.outpoint!r} names an output its transaction lacks")
 
 
 def _check_coins(txid: str, coins: Iterable[object]) -> None:
@@ -353,7 +425,7 @@ def _check_coins(txid: str, coins: Iterable[object]) -> None:
         if (
             not isinstance(c, Coin)
             or not _name(c.outpoint)
-            or not _key(c.outpoint)[1] >= 0
+            or _vout(c.outpoint) is None
             or not _name(c.address)
         ):
             raise DoxxError(f"tx {txid!r}: a coin is a Coin with its outpoint (txid:vout) and address")

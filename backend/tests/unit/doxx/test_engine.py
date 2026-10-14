@@ -252,3 +252,105 @@ def test_the_result_doesnt_depend_on_the_order_of_the_input_t504(order: list[int
         doxx(shuffled, K, received[::-1] if flip else received, overrides[::-1] if flip else overrides)
         == expected
     )
+
+
+def test_a_removal_reports_the_tags_it_kept_off_downstream_t511() -> None:
+    # a:0 pays exch: certain on a:0 and on the change t1:1, which t2 spends on to t2:0. Removing
+    # (a:0, exch) keeps the change's tags, but its own and nothing else: removing (t1:1, exch) keeps
+    # t2:0's off too, and both are reported
+    t1 = Tx("t1", (mine("a:0", "A"),), (theirs("t1:0", "X", "exch"), mine("t1:1", "B")))
+    t2 = Tx("t2", (mine("t1:1", "B"),), (mine("t2:0", "C"),))
+    result = doxx([t1, t2], K, overrides=[Override("t1:1", "exch", False)])
+    assert {(t.outpoint, t.entity) for t in result.tags} == {("a:0", "exch")}
+    assert {(t.outpoint, t.entity, t.reason) for t in result.suppressed} == {
+        ("t1:1", "exch", "change_of"),
+        ("t2:0", "exch", "change_of"),
+    }
+
+
+def test_removals_the_engine_cant_apply_are_returned_unresolved_t511() -> None:
+    t1 = Tx("t1", (theirs("e:0", "E"),), (mine("t1:0", "A"),))
+    result = doxx([t1], K, overrides=[Override("t9:0", "exch", False), Override("t1:0", "shop", False)])
+    assert result.unresolved == (
+        Unresolved("override", "t1:0", "shop", "not_identity"),
+        Unresolved("override", "t9:0", "exch", "not_owned"),
+    )
+
+
+def test_the_same_fact_twice_is_reported_unresolved_once() -> None:
+    result = doxx([], K, [Received("t9:0", "exch"), Received("t9:0", "exch")])
+    assert result.unresolved == (Unresolved("received", "t9:0", "exch", "not_owned"),)
+
+
+def test_address_reuse_names_the_coin_the_link_came_from_t504() -> None:
+    # three coins at A, only t3:0 received from exch: the other two name t3:0 and its transaction,
+    # never each other
+    txs = [Tx(f"t{n}", (theirs(f"e{n}:0", "E"),), (mine(f"t{n}:0", "A"),)) for n in (1, 2, 3)]
+    result = {t.outpoint: t for t in doxx(txs, K, [Received("t3:0", "exch")]).tags}
+    assert [(result[o].source, result[o].txid) for o in ("t1:0", "t2:0")] == [("t3:0", "t3"), ("t3:0", "t3")]
+
+
+def test_a_cluster_tag_never_names_its_own_coin_t504() -> None:
+    # t1:0 (at C) is received from exch; t3 co-spends a:0 (at A) with it: a:0's source is t1:0
+    t1 = Tx("t1", (theirs("e:0", "E"),), (mine("t1:0", "C"),))
+    t3 = Tx("t3", (mine("a:0", "A"), mine("t1:0", "C")), (theirs("t3:0", "Y"),))
+    result = {t.outpoint: t for t in doxx([t1, t3], K, [Received("t1:0", "exch")]).tags}
+    assert (result["a:0"].reason, result["a:0"].source, result["a:0"].txid) == (
+        "cluster_backward",
+        "t1:0",
+        "t3",
+    )
+
+
+def test_a_long_chain_is_followed_whatever_its_txids_order() -> None:
+    # 3,000 spends whose txids sort against the spend order: the spend order carries the tag in one pass
+    n = 3_000
+    txs = [Tx(f"x{n:05}", (theirs("e:0", "E"),), (mine(f"x{n:05}:0", "A0"),))]
+    txs += [
+        Tx(f"x{i:05}", (mine(f"x{i + 1:05}:0", f"A{n - i - 1}"),), (mine(f"x{i:05}:0", f"A{n - i}"),))
+        for i in range(n - 1, -1, -1)
+    ]
+    result = doxx(txs, K, [Received(f"x{n:05}:0", "exch")])
+    assert ("x00000:0", "exch", "certain", "change_of") in tags(result)
+
+
+@pytest.mark.parametrize(
+    ("txs", "match"),
+    [
+        ([Tx("t", (mine("a:0", "A"),), ()), Tx("u", (mine("a:0", "A"),), ())], "spent by two"),
+        ([Tx("t", (), (mine("t:0", "A"),)), Tx("u", (mine("t:5", "A"),), ())], "lacks"),
+        (
+            [
+                Tx("t", (mine("u:0", "A"),), (mine("t:0", "A"),)),
+                Tx("u", (mine("t:0", "A"),), (mine("u:0", "A"),)),
+            ],
+            "cycle",
+        ),
+        ([Tx("t", (mine("a:03", "A"),), ())], "its outpoint"),
+        ([Tx("t", (mine("a:\u00b2", "A"),), ())], "its outpoint"),
+    ],
+)
+def test_impossible_graphs_raise_t511(txs: list[Tx], match: str) -> None:
+    with pytest.raises(DoxxError, match=match):
+        doxx(txs, K)
+
+
+def test_a_coin_with_a_heuristic_reuse_tag_isnt_its_own_cluster_source_t504() -> None:
+    # p:0 (at P) is received from exch; tq co-spends it with q:0, so Q's coins are inferred by the
+    # cluster, and q:1 forwards that to tf:0 at A. A's other coins a1:0 and a3:0 get it by reuse.
+    # tc co-spends a3:0 with b:0, so the cluster {A, B} reaches a1:0, the lowest holder: its tag
+    # (reuse) is weaker than the cluster's, which would otherwise name a1:0 itself as the source
+    txs = [
+        Tx("p", (theirs("e:0", "E"),), (mine("p:0", "P"),)),
+        Tx("q", (theirs("e:1", "E"),), (mine("q:0", "Q"), mine("q:1", "Q"))),
+        Tx("tq", (mine("p:0", "P"), mine("q:0", "Q")), (theirs("tq:0", "Y"),)),
+        Tx("tf", (mine("q:1", "Q"),), (mine("tf:0", "A"),)),
+        Tx("a1", (theirs("e:2", "E"),), (mine("a1:0", "A"),)),
+        Tx("a3", (theirs("e:3", "E"),), (mine("a3:0", "A"),)),
+        Tx("b", (theirs("e:4", "E"),), (mine("b:0", "B"),)),
+        Tx("tc", (mine("a3:0", "A"), mine("b:0", "B")), (theirs("tc:0", "Y"),)),
+    ]
+    result = {t.outpoint: t for t in doxx(txs, K, [Received("p:0", "exch")]).tags}
+    assert all(t.source != t.outpoint for t in result.values())
+    assert (result["a1:0"].reason, result["a1:0"].source) == ("address_reuse", "tf:0")
+    assert (result["b:0"].reason, result["b:0"].source) == ("cluster_backward", "a1:0")
