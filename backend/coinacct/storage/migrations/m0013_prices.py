@@ -1,7 +1,7 @@
 """Migration 13: daily prices (PLAN §2 `price`, §6; ADR 0039; THREAT_MODEL T-303, T-304, T-408).
 
 - `price` holds one price per UTC day and currency: USD for tax figures, EUR and GBP for display. The
-  price is decimal text above zero with at most two decimals (whole cents, as `prices.DailyPrice`
+  price is decimal text above zero with exactly two decimals (whole cents, as `prices.DailyPrice`
   rounds), with the method and source it came from: Coin Metrics' reference rate, Bitstamp's typical
   price, an ECB conversion, or the user's CSV import.
 - `price_batch` records each refresh or import that wrote prices, in the one transaction that wrote
