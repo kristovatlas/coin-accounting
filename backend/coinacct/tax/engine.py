@@ -96,7 +96,8 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   **The caller's part** (`services/`, ADR 0041 §6): the engine can't tell an exchange account from a
   self-custody one, so the caller passes **every** self-custody account in `wallets` (whole-wallet
   FIFO, ADR 0041 §5, isn't built: a self-custody account left out is figured by its FIFO order, as an
-  exchange account, without a block). It also checks what needs the chain cache: that a link's output
+  exchange account, without a block, except a self-transfer from it, which blocks: `mixed_transfer`).
+  It also checks what needs the chain cache: that a link's output
   is the account's, that its txid is the event's, the two-hour allowance (§1), and that every
   transaction touching a wallet coin is confirmed (§5). The engine checks links over the sats that
   arrived and over the output's value (`Coin.value`, with the links before it), and a coin's value
@@ -243,6 +244,9 @@ class WalletTx:
     inputs: tuple[Spent, ...]
     outputs: tuple[tracing.Output, ...]
     leaving: Disposal | Transfer | None = None
+    # further leaving events (two payments, a payment and a deposit): unsupported, so the transaction
+    # blocks (ADR 0041 §3), each figured by FIFO provisionally
+    also: tuple[Disposal | Transfer, ...] = ()
 
     @property
     def sats(self) -> int:
@@ -491,6 +495,7 @@ class _Engine:
         self._coins: dict[str, dict[str, dict[str, int]]] = {w: {} for w in wallets}
         self._untraced: set[str] = set()  # wallets whose coins stopped matching their lots
         self._values: dict[str, int] = {}  # each linked output's value, as its links gave it
+        self._spent: set[str] = set()  # the outpoints wallet transactions spent
         self._replay_stopped: str | None = None
         self._arriving: dict[str, dict[str, int]] = {}  # a transfer whose picks named only its arriving sats
         # such a transfer's whole identification (the fee's lots the standing method added, and the
@@ -630,7 +635,7 @@ class _Engine:
         entry = _Open(lot, a.sats, basis, loss_basis, a.kind == "gift_in", a.on)
         self._insert(a.account, entry)
         self._recorded.add(a.account)
-        self._link(a.id, a.account, [(a.id, a.sats)], a.coins)
+        self._link(a.id, a.account, [(a.id, a.sats)], a.coins, a.sats)
 
     def _standing(self, account: str, sats: int) -> tuple[list[Pick], int]:
         """FIFO's picks for `sats`, and the sats it couldn't cover. FIFO is the only standing method so
@@ -747,7 +752,8 @@ class _Engine:
                 basis, loss = self._take(pick.lot, pick.sats)
                 orphans.append((_lower(basis, loss), pick.sats, pick.lot))
         arrived = sorted(moved, key=lambda m: self._oldest_key(m.into))  # oldest first (ADR 0041 §1)
-        if t.coins and self._link(t.id, t.to, [(m.into, m.sats) for m in arrived], t.coins):
+        delivered = t.sats - t.fee_sats
+        if t.coins and self._link(t.id, t.to, [(m.into, m.sats) for m in arrived], t.coins, delivered):
             self._fee_onto_coins(t, moved, own, orphans)  # ADR 0043: linked, the fee follows a coin
             return
         for m, basis, loss, n in own:  # links refused: the fee's basis stays with the moved part
@@ -799,7 +805,9 @@ class _Engine:
 
     # Coin-traced wallets (ADR 0041 §1-§3)
 
-    def _link(self, event: str, account: str, lots: list[tuple[str, int]], coins: tuple[Coin, ...]) -> bool:
+    def _link(
+        self, event: str, account: str, lots: list[tuple[str, int]], coins: tuple[Coin, ...], delivered: int
+    ) -> bool:
         """Put an arrival's lots (oldest first) onto the outputs it names, filling them in the order given
         (the caller's canonical order); whether it did. Links over the sats that arrived, or over an
         output's value, block, and are left out."""
@@ -812,10 +820,14 @@ class _Engine:
         self._check_links(event, coins)
         if account in self._untraced:  # its coin records were dropped: they no longer match its lots
             return False
-        linked, arrived = sum(c.sats for c in coins), sum(n for _, n in lots)
-        if linked > arrived:
-            detail = f"its links hold {linked} sats, more than the {arrived} that arrived"
+        linked = sum(c.sats for c in coins)
+        if linked > delivered:
+            detail = f"its links hold {linked} sats, more than the {delivered} that arrived"
             self._blocking.append(Untraced(event, "bad_link", detail))
+            return False
+        spent = [c.outpoint for c in coins if c.outpoint in self._spent]
+        if spent:
+            self._blocking.append(Untraced(event, "bad_link", f"{', '.join(spent)} was spent already"))
             return False
         held_now = self._coins[account]
         for c in coins:
@@ -829,7 +841,7 @@ class _Engine:
         for c in coins:
             need = c.sats
             on = held.setdefault(c.outpoint, {})
-            while need:
+            while need and queue:  # a shortfall (missing lots, blocking) leaves the rest of it unlinked
                 lot, n = str(queue[0][0]), int(queue[0][1])
                 take = min(n, need)
                 on[lot] = on.get(lot, 0) + take
@@ -849,16 +861,23 @@ class _Engine:
                 raise EngineError(f"event {event!r}: {c.outpoint} has another value in an earlier link")
         if len({c.outpoint for c in coins}) != len(coins):
             raise EngineError(f"event {event!r}: an output is linked once per event")
+        if len({c.outpoint.rsplit(":", 1)[0] for c in coins}) != 1:  # one arrival, one transaction (§1)
+            raise EngineError(f"event {event!r}: its links name the outputs of one transaction")
 
     def _wallet_tx(self, c: WalletTx) -> None:
         """A transaction from a coin-traced wallet: its coins' lots go to its outputs by ADR 0041 §2
         (`tracing.trace`). A transaction it can't trace blocks (§3); its leaving event is then figured by
         the account's FIFO order, provisionally, and the wallet's later transactions block too."""
         leaving = _checked_wallet_tx(c, self._wallets)
-        if leaving is not None:
-            if leaving.id in self._seen:
-                raise EngineError(f"event {leaving.id!r} appears twice")
-            self._seen.add(leaving.id)
+        for e in (() if leaving is None else (leaving,)) + c.also:
+            if e.id in self._seen:
+                raise EngineError(f"event {e.id!r} appears twice")
+            self._seen.add(e.id)
+        if c.also:
+            ids = ", ".join(repr(e.id) for e in (leaving, *c.also) if e is not None)
+            self._blocking.append(Untraced(c.id, "several_leaving_events", f"leaving events {ids}"))
+            self._untrace(c, leaving)
+            return
         for i in c.inputs:  # a coin's value is the chain's: the same in its links and when it is spent
             if self._values.setdefault(i.outpoint, i.value) != i.value:
                 raise EngineError(f"wallet tx {c.id!r}: {i.outpoint} has another value in its links")
@@ -919,6 +938,7 @@ class _Engine:
         # every wallet the transaction spends from: their coin records no longer match their lots, so
         # they are dropped, and the wallets' later transactions block too
         to = leaving.to if isinstance(leaving, Transfer) and leaving.to in self._wallets else None
+        self._spent.update(i.outpoint for i in c.inputs)
         for account in {c.account, to} | {i.account for i in c.inputs if i.account in self._wallets}:
             if account is not None:
                 self._untraced.add(account)
@@ -929,12 +949,20 @@ class _Engine:
         fee = (
             0 if isinstance(leaving, Transfer) else max(0, min(c.sats - sum(o.value for o in c.outputs), out))
         )
+        if c.also:
+            fee = 0  # several leaving events: each by FIFO in turn, the fee leaving with what remains
         if isinstance(leaving, Transfer):  # its fee_sats is the fee: the transfer carries it
             self._transfer(leaving, untraced=True)
         elif isinstance(leaving, Disposal):
             self._fifo_disposal(leaving, fee)
         elif fee:
             self._fifo_consolidation(c.account, fee)
+        for extra in c.also:
+            if isinstance(extra, Transfer):
+                self._transfer(extra, untraced=True)
+            else:
+                self._dispose(extra, untraced=True)
+            out -= extra.sats
         if out - fee > 0:  # outputs to no one recorded: their sats leave too, by FIFO
             picks, _ = self._standing(c.account, out - fee)
             for pick in picks:
@@ -976,6 +1004,7 @@ class _Engine:
                     rest.loss_basis = add(rest.loss_basis, _lower(basis, loss))
 
     def _apply_traced(self, c: WalletTx, leaving: Disposal | Transfer | None, traced: tracing.Traced) -> None:
+        self._spent.update(i.outpoint for i in c.inputs)
         held = self._coins[c.account]
         for i in c.inputs:
             held.pop(i.outpoint, None)
@@ -1005,38 +1034,47 @@ class _Engine:
 
     def _consolidated(self, c: WalletTx, carries: tuple[tracing.FeeCarry, ...]) -> None:
         """A consolidation's fee basis joins the fragment tracing names on the change. Where that lot is
-        anywhere else too (another coin, or the pool), the named fragment becomes a lot of its own first
-        (`lot@tx#vout`), so the basis stays on that coin (ADR 0041 §2.4)."""
+        anywhere else too (another coin, or the pool), the named fragment becomes a lot of its own
+        (`lot@tx#vout`), so the basis stays on that coin (ADR 0041 §2.4). In ADR 0041 §2.2's order: the
+        fee's sats take their basis first, then the change fragments split off, then the fee's basis
+        joins them."""
         held = self._coins[c.account]
-        split: dict[tuple[str, int], str] = {}  # (lot, vout) -> the lot its fragment there became
-        pending: dict[str, int] = {}  # each lot's fee sats yet to go
+        pending: dict[str, int] = {}  # each lot's fee sats
         for k in carries:
             pending[k.lot] = pending.get(k.lot, 0) + k.sats
-        for k in carries:
-            coin = held[f"{c.txid}:{k.vout}"]
-            target = split.get((k.onto, k.vout), k.onto)
-            # the lot's fee sats aside, is any of it anywhere but this fragment (another coin, the pool)?
-            elsewhere = self._lots[target].sats - pending.get(target, 0) > coin[target]
-            if target == k.onto and elsewhere:
-                new = f"{target}@{c.id}{SPLIT}{k.vout}"  # split it off, once per coin
-                self._split_off(c.account, target, coin.pop(target), new)
-                coin[new] = self._lots[new].sats
-                split[k.onto, k.vout] = target = new
-            pending[k.lot] -= k.sats
-            if k.lot == target:  # the lot's own fee sats: it keeps their basis
+        # which named fragments split off: their lot is somewhere else too, the fee's sats aside
+        splits = {
+            (k.onto, k.vout): self._lots[k.onto].sats - pending.get(k.onto, 0)
+            > held[f"{c.txid}:{k.vout}"][k.onto]
+            for k in carries
+        }
+        taken: list[tuple[tracing.FeeCarry, Decimal, Decimal | None]] = []
+        for k in carries:  # the fee first
+            if k.lot == k.onto and not splits[k.onto, k.vout]:  # its own fragment: the lot keeps the basis
                 self._lots[k.lot].sats -= k.sats
                 continue
             basis, loss = self._take(k.lot, k.sats)
-            same = k.lot == k.onto  # a split-off part of the fee's own lot: both bases move together
-            entry = self._lots[target]
+            taken.append((k, basis, loss))
+        lots: dict[tuple[str, int], str] = {}
+        for (onto, vout), split in splits.items():  # then the change fragments
+            if split:
+                coin = held[f"{c.txid}:{vout}"]
+                new = f"{onto}@{c.id}{SPLIT}{vout}"
+                self._split_off(c.account, onto, coin.pop(onto), new)
+                coin[new] = self._lots[new].sats
+                lots[onto, vout] = new
+        for k, basis, loss in taken:  # then the fee's basis onto them
+            entry = self._lots[lots.get((k.onto, k.vout), k.onto)]
+            same = k.lot == k.onto  # a part of the fee's own lot: both bases move together
             entry.basis = add(entry.basis, basis if same else _lower(basis, loss))
             if entry.loss_basis is not None:
-                moved_loss = loss if same and loss is not None else _lower(basis, loss)
-                entry.loss_basis = add(entry.loss_basis, moved_loss)
+                entry.loss_basis = add(
+                    entry.loss_basis, loss if same and loss is not None else _lower(basis, loss)
+                )
 
     def _split_off(self, account: str, lot_id: str, sats: int, new: str) -> None:
-        """`sats` of a lot become a lot of their own in the same account, at the same FIFO place, with
-        their shares of its bases."""
+        """`sats` of a lot become a lot of their own in the same account, with its FIFO date (placed after
+        the account's other lots of that date), with their shares of its bases."""
         o = self._lots[lot_id]
         basis, loss = self._take(lot_id, sats)
         lot = replace(o.lot, id=new, sats=sats, basis=basis, loss_basis=loss)
@@ -1428,15 +1466,28 @@ def _checked_wallet_tx(c: WalletTx, wallets: frozenset[str]) -> Disposal | Trans
     tracing.check_outputs(c.txid, c.account, c.outputs, c.sats)  # here too: it can block before tracing
     leaving = _checked_leaving(c, wallets)
     named = {o.event for o in c.outputs if o.event is not None}
-    if named != (set() if leaving is None else {leaving.id}):
-        raise EngineError(f"wallet tx {c.id!r}: its outputs pay its leaving event, and only that")
+    if named != ({e.id for e in c.also} | (set() if leaving is None else {leaving.id})):
+        raise EngineError(f"wallet tx {c.id!r}: its outputs pay its leaving events, and only those")
     return leaving
 
 
 def _checked_leaving(c: WalletTx, wallets: frozenset[str]) -> Disposal | Transfer | None:
-    leaving = c.leaving
-    if leaving is None:
+    if not isinstance(c.also, tuple) or (c.also and c.leaving is None):
+        raise EngineError(f"wallet tx {c.id!r}: further leaving events are a tuple, after its leaving event")
+    for extra in c.also:
+        _checked_event(c, extra, wallets, fee=None)
+    if c.leaving is None:
         return None
+    return _checked_event(
+        c, c.leaving, wallets, fee=None if c.also else c.sats - sum(o.value for o in c.outputs)
+    )
+
+
+def _checked_event(
+    c: WalletTx, leaving: object, wallets: frozenset[str], *, fee: int | None
+) -> Disposal | Transfer:
+    """One of a wallet transaction's leaving events, checked; `fee` the transaction's, which a leaving
+    transfer's `fee_sats` must equal (None: not checked, with several leaving events)."""
     if not isinstance(leaving, Disposal | Transfer):
         raise EngineError(f"wallet tx {c.id!r}: its leaving event is a Disposal or a Transfer")
     _check_common(leaving)
@@ -1444,14 +1495,13 @@ def _checked_leaving(c: WalletTx, wallets: frozenset[str]) -> Disposal | Transfe
         raise EngineError(f"wallet tx {c.id!r}: its leaving event has its account, date and moment")
     if leaving.picks is not None or leaving.identified_at is not None:
         raise EngineError(f"wallet tx {c.id!r}: the coins it spends identify the lots; it chooses none")
-    fee = c.sats - sum(o.value for o in c.outputs)
     if isinstance(leaving, Transfer):
         _checked_transfer(leaving)
         if leaving.kind not in ("deposit", "self_transfer") or leaving.coins:
             raise EngineError(f"wallet tx {c.id!r}: a wallet's transfer is a deposit or a self-transfer")
         if leaving.kind == "deposit" and leaving.to in wallets:
             raise EngineError(f"wallet tx {c.id!r}: a deposit goes to an exchange account, not a wallet")
-        if leaving.fee_sats != fee:
+        if fee is not None and leaving.fee_sats != fee:
             raise EngineError(f"wallet tx {c.id!r}: its transfer's fee_sats is the transaction's fee, {fee}")
     else:
         _checked_disposal(leaving)
