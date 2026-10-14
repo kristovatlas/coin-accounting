@@ -57,9 +57,21 @@ def test_fifo_uses_the_oldest_lot_first_and_splits_basis_and_proceeds_by_sats() 
 
     assert result.allocations == (
         # 100M of the 120M sold: 5/6 of the proceeds; all of b1's basis; held 14 months.
-        Allocation("s1", "b1", BTC, D("10000.00"), D("50000.00"), date(2024, 1, 10), SALE_DAY, True),
+        Allocation(
+            "s1", "b1", BTC, D("10000.00"), D("50000.00"), date(2024, 1, 10), SALE_DAY, True, bought=True
+        ),
         # 20M of b2's 50M: 2/5 of its basis; the rest of the proceeds; held 9 months.
-        Allocation("s1", "b2", 20_000_000, D("6000.00"), D("10000.00"), date(2024, 6, 1), SALE_DAY, False),
+        Allocation(
+            "s1",
+            "b2",
+            20_000_000,
+            D("6000.00"),
+            D("10000.00"),
+            date(2024, 6, 1),
+            SALE_DAY,
+            False,
+            bought=True,
+        ),
     )
     assert [a.gain for a in result.allocations] == [D("40000.00"), D("4000.00")]
     assert result.holdings == (Lot("b2", "exch", date(2024, 6, 1), 30_000_000, D("9000.00"), False),)
@@ -233,7 +245,9 @@ def test_a_late_choice_that_differs_from_fifo_is_used_and_warned_with_fifos_figu
     )
     assert [a.lot for a in result.allocations] == ["b2"]  # the user's choice, not FIFO's
     # FIFO would have used half of b1: basis $5000.00, all the proceeds, held over a year (ADR 0008 §4).
-    fifo = Allocation("s", "b1", BTC // 2, D("5000.00"), D("30000.00"), date(2024, 1, 10), SALE_DAY, True)
+    fifo = Allocation(
+        "s", "b1", BTC // 2, D("5000.00"), D("30000.00"), date(2024, 1, 10), SALE_DAY, True, bought=True
+    )
     assert result.late == (LateIdentification("s", chosen, (fifo,)),)
     assert result.holdings[0] == Lot("b1", "exch", date(2024, 1, 10), BTC, D("10000.00"), False)  # untouched
 

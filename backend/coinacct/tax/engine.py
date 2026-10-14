@@ -105,6 +105,7 @@ from typing import Final, Literal
 
 from coinacct.domain.chain import MAX_SATS
 from coinacct.domain.money import CONTEXT, add, share, signed_usd, subtract, usd
+from coinacct.tax.errors import EngineError as EngineError  # noqa: PLC0414  (re-exported for callers)
 
 type AcquisitionKind = Literal["buy", "p2p_buy", "income", "inherit", "gift_in"]
 type DisposalKind = Literal["sell", "spend", "gift_out"]
@@ -122,10 +123,6 @@ ZERO: Final = Decimal("0.00")
 GENESIS: Final = date(2009, 1, 3)  # no bitcoin was acquired before the genesis block
 RESERVED: Final = ("@",)  # the separator in the lot ids the engine builds (lot@transfer)
 UNRECORDED: Final = "@@unrecorded"  # a created lot's suffix: no event or moved lot id can contain "@@"
-
-
-class EngineError(ValueError):
-    """The events are invalid input: the caller must not have produced them."""
 
 
 @dataclass(frozen=True)
@@ -214,6 +211,8 @@ class Allocation:
     rule: BasisRule = "cost"
     lot_basis: Decimal | None = None  # None: the same as `basis`
     lot_loss_basis: Decimal | None = None  # a gift's FMV basis the lot gave up, when it has one
+    inherited: bool = False  # the user inherited the lot: Form 8949's (b) is "INHERITED"
+    bought: bool = False  # the lot is a `buy` in the disposal's own account, not moved in
 
     @property
     def gain(self) -> Decimal:
@@ -318,6 +317,7 @@ class _Open:
     created: bool = (
         False  # made by the engine for a withdrawal from an account without lots, or moved from one
     )
+    bought: bool = False  # a `buy` in this very account (never a moved part): Form 8949's covered test
 
 
 def long_term(acquired: date, disposed: date) -> bool:
@@ -478,7 +478,7 @@ class _Engine:
                 raise EngineError(f"acquisition {a.id!r}: only a gift's basis can be unknown")
             basis = _usd(a.basis, a.id)
         lot = Lot(a.id, a.account, acquired, a.sats, basis, always_long, loss_basis, loss_from, unknown)
-        entry = _Open(lot, a.sats, basis, loss_basis, a.kind == "gift_in", a.on)
+        entry = _Open(lot, a.sats, basis, loss_basis, a.kind == "gift_in", a.on, bought=a.kind == "buy")
         self._insert(a.account, entry)
         self._recorded.add(a.account)
 
@@ -807,7 +807,22 @@ class _Engine:
         # inherited long-term status tacks only where the donor's basis is used.
         term = (lot.always_long and rule != "fmv_at_gift") or long_term(acquired, d.on)
         lot_basis = None if used == basis else basis
-        return Allocation(d.id, lot.id, sats, used, proceeds, acquired, d.on, term, rule, lot_basis, loss)
+        inherited = lot.always_long and not self._lots[lot.id].gift  # a gift's tacked status isn't
+        return Allocation(
+            d.id,
+            lot.id,
+            sats,
+            used,
+            proceeds,
+            acquired,
+            d.on,
+            term,
+            rule,
+            lot_basis,
+            loss,
+            inherited,
+            self._lots[lot.id].bought,
+        )
 
     def _checked_picks(self, d: Disposal | Transfer, chosen: tuple[Pick, ...]) -> list[Pick]:
         """The user's picks, checked, with repeats of a lot merged (first-seen order)."""
