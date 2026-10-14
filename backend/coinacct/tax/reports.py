@@ -398,18 +398,20 @@ class IncomeSummary:
 
 
 def income_summary(
+    events: Sequence[Event],
     result: Result,
     tax_year: int,
     *,
     blocking: Sequence[object],
     sources: Mapping[str, str] | None = None,
 ) -> IncomeSummary | Blocked:
-    """The tax year's `income` acquisitions of the engine's run, by date, with their FMV and total (PLAN
-    §8), or why it can't be built: the run's blocking conditions block it, as the caller's do
-    (`blocking`, as for `form_8949`). `sources` names who paid each income event; a row the caller names
-    no source for has none (`source` None)."""
+    """The tax year's `income` acquisitions, by date, with their FMV and total (PLAN §8), or why it can't
+    be built: `result` is the engine's run of every event (`events`, checked), whose blocking conditions
+    of any year block it, as the caller's do (`blocking`, as for `form_8949`). `sources` names who paid
+    each income event; a row the caller names no source for has none (`source` None)."""
     rules_for(tax_year)
     _check_blocking(blocking)
+    _check_run(result, events)
     named = {} if sources is None else sources
     income = [e for e in result.events if isinstance(e, Acquisition) and e.kind == "income"]
     if not isinstance(named, Mapping) or not all(
@@ -446,18 +448,22 @@ class YearSummary:
     tax_year: int
     short: Term
     long: Term
-    replay_stopped: str | None
+    replay_stopped: str | None = None
     late: tuple[LateIdentification, ...] = ()  # every late warning, as on Form 8949
     ruleset: str = RULESET
     positions: tuple[str, ...] = POSITIONS
 
 
-def year_summary(result: Result, tax_year: int, *, blocking: Sequence[object]) -> YearSummary | Blocked:
+def year_summary(
+    events: Sequence[Event], result: Result, tax_year: int, *, blocking: Sequence[object]
+) -> YearSummary | Blocked:
     """The tax year's realized short- and long-term totals, from its sales' and spends' allocations, or
     why it can't be built (the engine's blocking conditions and the caller's, as for `form_8949`).
-    `result` is the run of every event, as for `form_8949` (#298: blocking by year)."""
+    `result` is the engine's run of every event (`events`, checked), so a block of any year blocks it.
+    """
     rules_for(tax_year)
     _check_blocking(blocking)
+    _check_run(result, events)
     if result.blocking or blocking:
         return Blocked((*result.blocking, *blocking))
     terms = {False: Term(0, ZERO, ZERO, ZERO), True: Term(0, ZERO, ZERO, ZERO)}
@@ -490,15 +496,16 @@ class Holding:
 class Holdings:
     as_of: date
     rows: tuple[Holding, ...]
-    replay_stopped: str | None
-    late: tuple[LateIdentification, ...]
+    replay_stopped: str | None = None
+    late: tuple[LateIdentification, ...] = ()
     ruleset: str = RULESET
     positions: tuple[str, ...] = POSITIONS
 
 
-def holdings(
+def holdings(  # noqa: PLR0913 - the events, both runs, the date, the price and the caller's blocks
     events: Sequence[Event],
     result: Result,
+    upto: Result,
     as_of: date,
     price: Decimal | None = None,
     *,
@@ -506,21 +513,23 @@ def holdings(
 ) -> Holdings | Blocked:
     """The lots `result` left, by account in the engine's order, with their holding periods on `as_of`
     and, given a USD price per BTC, their value and unrealized gain (a gift's by its dual basis), or why
-    they can't be shown (the engine's blocking conditions and the caller's). `result` is the engine's run
-    of exactly `events` up to `as_of` (`Result.events`)."""
+    they can't be shown. `result` is the engine's run of every event (`events`), whose blocking conditions
+    of any date block them, as the caller's do; `upto` is its run of the events up to `as_of`, whose lots
+    are shown. Both are checked against `events`."""
     _check_blocking(blocking)
     if type(as_of) is not date:
         raise EngineError("holdings are as of a date")
-    if result.events != tuple(e for e in events if e.on <= as_of):
-        raise EngineError(f"result is the engine's run of these events up to {as_of}: it took others")
+    _check_run(result, events)
+    if upto.events != tuple(e for e in events if e.on <= as_of):
+        raise EngineError(f"upto is the engine's run of the events up to {as_of}: it took others")
     btc = None if price is None else _usd(price, "the price")
     if btc is not None and btc == ZERO:
         raise EngineError("the price: a BTC price is at least a cent")
     if result.blocking or blocking:
         return Blocked((*result.blocking, *blocking))
     rows: list[Holding] = []
-    for lot in result.holdings:
-        value = None if btc is None else _value(lot.sats, btc)
+    for lot in upto.holdings:
+        value = None if btc is None else _value(lot.id, lot.sats, btc)
         # the FMV side runs from the gift date alone: a donor's long-term status (an inheritance) carries
         # over only with the donor's basis (Treas. Reg. §1.1223-1(b)), as the engine figures a sale
         loss_long = None if lot.loss_from is None else long_term(lot.loss_from, as_of)
@@ -540,7 +549,7 @@ def holdings(
             )
         )
     rows.sort(key=lambda h: h.account)  # stable: each account's lots stay in the engine's order
-    return Holdings(as_of, tuple(rows), result.replay_stopped, tuple(result.late))
+    return Holdings(as_of, tuple(rows), upto.replay_stopped, tuple(upto.late))
 
 
 def _unrealized(value: Decimal, basis: Decimal, loss_basis: Decimal | None) -> Decimal:
@@ -553,11 +562,16 @@ def _unrealized(value: Decimal, basis: Decimal, loss_basis: Decimal | None) -> D
     return ZERO
 
 
-def _value(sats: int, price: Decimal) -> Decimal:
+def _check_run(result: Result, events: Sequence[Event]) -> None:
+    if result.events != tuple(events):
+        raise EngineError("result is the engine's run of these events: it took others")
+
+
+def _value(lot: str, sats: int, price: Decimal) -> Decimal:
     try:
         return value_of(sats, price)
-    except (TypeError, ValueError) as e:
-        raise EngineError(f"{sats} sats at {price}: {e}") from None
+    except (TypeError, ValueError):
+        raise EngineError(f"lot {lot!r}: its value at that price is too large") from None
 
 
 def _check_blocking(blocking: object) -> None:

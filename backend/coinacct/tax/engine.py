@@ -294,7 +294,6 @@ class Result:
     moves: tuple[Moved, ...] = ()
     created: tuple[Lot, ...] = ()  # lots created for a withdrawal from an account without lots (ADR 0009)
     replay_stopped: str | None = None  # the event the late choices' replay couldn't follow (#238)
-    through: date | None = None  # the last event's tax date: the run is of the events up to it
     events: tuple[Event, ...] = ()  # the events the run took, in order: what a report was built from
 
 
@@ -368,6 +367,7 @@ class _Engine:
         self._given: dict[str, tuple[tuple[Pick, ...], dict[str, int]]] = {}
 
     def run(self, events: Sequence[Event]) -> Result:
+        events = tuple(events)  # once: a one-shot iterable is read once, and the result keeps it
         last: date | None = None
         last_moment: datetime | None = None
         for event in events:
@@ -417,8 +417,7 @@ class _Engine:
             tuple(self._moves),
             tuple(self._created),
             self._replay_stopped,
-            last,
-            tuple(events),
+            events,
         )
 
     def _follow(self, event: Event) -> None:
