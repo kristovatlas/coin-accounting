@@ -465,7 +465,9 @@ def _graph_routes(app: FastAPI, graph: Graph, authenticated: list[Any]) -> None:
         }
 
 
-RowId = Annotated[int, Field(ge=1, le=2**63 - 1)]  # SQLite's integer range: no OverflowError, no 500
+RowId = Annotated[
+    int, Field(strict=True, ge=1, le=2**63 - 1)
+]  # SQLite's integer range: no OverflowError, no 500
 
 
 class AddressTag(Strict):
@@ -507,14 +509,14 @@ class EventBody(Strict):
     account: RowId
     to: RowId | None = None
     at: AwareDatetime
-    sats: int = Field(ge=1, le=MAX_SATS)
+    sats: int = Field(strict=True, ge=1, le=MAX_SATS)
     usd: USD | None = None
-    fee_sats: int = Field(default=0, ge=0, le=MAX_SATS)
+    fee_sats: int = Field(default=0, strict=True, ge=0, le=MAX_SATS)
     valuation_source: str | None = Field(default=None, min_length=1, max_length=200)
     txid: str | None = Field(default=None, pattern=HASH)
     fmv: USD | None = None
     donor_acquired: date | None = None
-    donor_always_long: bool = False
+    donor_always_long: bool = Field(default=False, strict=True)
     missing_basis: USD | None = None
     missing_acquired: date | None = None
     note: str | None = Field(default=None, min_length=1, max_length=2000)
@@ -552,14 +554,15 @@ class EventRef(Strict):
 
 
 class ChoiceBody(Strict):
-    lot: str = Field(min_length=1, max_length=400)
-    sats: int = Field(ge=1, le=MAX_SATS)
+    lot: str = Field(pattern=r"^[0-9A-Za-z_.:@#-]{1,400}$")  # the engine's lot ids
+    sats: int = Field(strict=True, ge=1, le=MAX_SATS)
 
 
 class Identification(Strict):
+    """A choice of lots made now: the app records when (ADR 0008 §3), so the body doesn't say."""
+
     id: RowId
     choices: list[ChoiceBody] = Field(max_length=1000)
-    identified_at: AwareDatetime | None = None
 
 
 def _event_json(stored: Any, choice: Any) -> dict[str, Any]:
@@ -609,7 +612,7 @@ def _event_routes(app: FastAPI, service: event_service.Events, authenticated: li
     @app.post("/api/events/identify", dependencies=authenticated)
     def identify(body: Identification) -> dict[str, int]:
         choices = tuple(event_service.Choice(c.lot, c.sats) for c in body.choices)
-        service.identify(body.id, choices, body.identified_at)
+        service.identify(body.id, choices)
         return {"id": body.id}
 
 
