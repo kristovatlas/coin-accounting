@@ -9,8 +9,8 @@ both timezone-aware UTC (ENGINEERING §5.2). A disposal's tax date is within a d
 date (time zones run from UTC-12 to UTC+14), and disposals come in the order of their moments.
 
 - **Acquisitions** (`buy`, `p2p_buy`, `income`, `inherit`, `gift_in`) each create one lot: its sats, its
-  basis (cost plus fees, or the FMV the caller computed) and its date. The 2025 opening allocation and
-  UTXO tracing come in later slices.
+  basis (cost plus fees, or the FMV the caller computed) and its date. The 2025 opening allocation comes
+  in a later slice.
 - **A gift received** (`gift_in`; IRC §1015(a), Treas. Reg. §1.1015-1(a)) has a **dual basis**. Its gain
   basis is the donor's basis, held from the donor's date (tacked, IRC §1223(2)). If the FMV at the gift
   was lower, that FMV is its loss basis, held from the gift date. At a disposal, proceeds above the
@@ -69,13 +69,13 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   besides them (ADR 0043). Those fee lots are part of the identification: the late check judges the
   whole, which sats arrive included, and the replay follows the whole (or falls back, whole).
 - **Coin-traced wallets** (`run(..., wallets={account: Wallet(tracking_start)})`, ADR 0041): in a
-  self-custody wallet the coins a
-  transaction spends identify the lots that leave (ADR 0008 §2). An arrival (an acquisition, or a
-  withdrawal's moved lots) **links** the outputs it arrived in (`coins`); its lots, oldest first, fill
-  them in the order given. Links over the sats that arrived block (`Untraced`, `bad_link`). A wallet's
-  spends come only as a `WalletTx`: its inputs and outputs from the chain, and its one leaving event (a
-  sale, spend or gift, a deposit, or a self-transfer to another coin-traced wallet), or none (a
-  consolidation). `tracing.trace` decides which lots each output gets (ADR 0041 §2):
+  self-custody wallet the coins a transaction spends identify the lots that leave (ADR 0008 §2). An
+  arrival (an acquisition, or a withdrawal's moved lots) **links** the outputs it arrived in (`coins`);
+  its lots, oldest first, fill them in the order given. Links over the sats that arrived block
+  (`Untraced`, `bad_link`). A wallet's spends come only as a `WalletTx`: its inputs and outputs from the
+  chain, and its one leaving event (a sale, spend or gift, a deposit, or a self-transfer to another
+  coin-traced wallet), or none (a consolidation). `tracing.trace` decides which lots each output gets (ADR
+  0041 §2):
   - a sale's or spend's lots are its outputs' and the fee's (the fee's basis is in the disposal); a
     gift's are its outputs', and the fee's basis isn't recovered (ADR 0043)
   - a deposit or self-transfer moves its outputs' lots, as a transfer does; the fee's basis passes to
@@ -98,20 +98,26 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   self-custody one, so the caller passes **every** self-custody account in `wallets` (whole-wallet
   FIFO, ADR 0041 §5, isn't built: a self-custody account left out is figured by its FIFO order, as an
   exchange account, without a block, except a self-transfer from it, which blocks: `mixed_transfer`).
-  It also checks what needs the chain cache: that a link's output
-  is the account's, that its txid is the event's, the two-hour allowance (§1), and that every
-  transaction touching a wallet coin is confirmed (§5). The engine checks links over the sats that
+  It also checks what needs the chain cache or the clock: that a link's output is the account's, that its
+  txid is the event's, the two-hour allowance (§1, §4), that every transaction touching a wallet coin is
+  confirmed (§5), and that a wallet's tracking start isn't later than when the user entered it (§4).
+  The engine needs events in time order and a coin's links before its `Received`; block times aren't
+  monotonic, and an allowed link can come up to two hours after its coin's block time, so the caller
+  orders chain events by their place in the chain and gives each one a moment no earlier than the last
+  (#299 holds the open question of how). The engine checks links over the sats that
   arrived and over the output's value (`Coin.value`, with the links before it), and a coin's value
   when it is spent.
   - **The pool** (ADR 0041 §4) is a wallet's lots on no coin: acquisitions and withdrawals into it that
     link no output, such as a balance from before the wallet was tracked. A coin from outside the
     user's wallets (`Received`, in chain order, after the events that link it) has its part no link
     covers drawn from the pool, oldest first, if it arrived before the wallet's tracking start
-    (`Result.draws`); only lots already in the pool count, since events come in time order. A pool
+    (`Result.draws`); only lots already in the pool count, in the caller's order. A pool
     short of it leaves a **placeholder** of unknown basis on the coin (`Result.placeholders`, blocking,
     T-509). After the tracking start, or with none set, that part blocks (`unrecorded_receipt`,
-    `no_tracking_start`). Lots still in the pool at the end are listed (`Result.pool`), for the warning
-    that they are probably a duplicate purchase or an unrecorded sale.
+    `no_tracking_start`). A coin received after the transaction that spent it, or one another wallet's
+    links hold, raises; one received into an untraced wallet draws nothing. Lots still in the pool at
+    the end are listed (`Result.pool`, untraced wallets left out), for the warning that they are
+    probably a duplicate purchase or an unrecorded sale.
   - **A fee is never a taxable event** (ADR 0043): a network fee on a deposit, or an exchange's BTC
     withdrawal fee (`fee_sats` of the sats that leave), is no disposal and has no Form 8949 row. The
     sats that arrive take the transfer's lots first, in the account's FIFO order; the fee takes the
@@ -286,7 +292,8 @@ class Received:
 @dataclass(frozen=True)
 class Wallet:
     """A coin-traced self-custody account: the time from which every coin sent to it from outside is
-    recorded (ADR 0041 §4), set by the user; None if not set yet (its received coins then block)."""
+    recorded (ADR 0041 §4), set by the user; None if not set yet: the wallet then blocks (an `Untraced`
+    naming the account, ADR 0041 §3), and so does each received coin's part no link covers."""
 
     tracking_start: datetime | None
 
@@ -394,7 +401,8 @@ class MissingLots:
 @dataclass(frozen=True)
 class UnknownBasis:
     """Blocking: a lot whose basis isn't known (ADR 0009, T-509): a gift received without its donor's
-    basis, or a lot created for a withdrawal from an account without lots. The user enters one; zero is
+    basis, a lot created for a withdrawal from an account without lots, or a received coin's placeholder
+    (ADR 0041 §4). The user enters one; zero is
     a conservative resolution (the legal default for a gift is in Treas. Reg. §1.1015-1(a)(3))."""
 
     lot: str
@@ -443,6 +451,8 @@ class Drawn:
 
 @dataclass(frozen=True)
 class PoolLot:
+    """A lot's sats on no coin at the end, in a coin-traced wallet (ADR 0041 §4)."""
+
     account: str
     lot: str
     sats: int
@@ -580,6 +590,8 @@ class _Engine:
         self._given: dict[str, tuple[tuple[Pick, ...], dict[str, int]]] = {}
 
     def run(self, events: Sequence[Event]) -> Result:
+        for wallet in sorted(w for w, start in self._tracking.items() if start is None):  # ADR 0041 §3
+            self._blocking.append(Untraced(wallet, "no_tracking_start", f"{wallet!r} has no tracking start"))
         last: date | None = None
         last_moment: datetime | None = None
         for event in events:
@@ -641,9 +653,9 @@ class _Engine:
             ),
             tuple(self._draws),
             tuple(self._placeholders),
-            tuple(
+            tuple(  # an untraced wallet's lots aren't placed: none is listed
                 PoolLot(wallet, lot, sats)
-                for wallet in sorted(self._wallets)
+                for wallet in sorted(self._wallets - self._untraced)
                 for lot, sats in self._pool(wallet)
             ),
         )
@@ -953,6 +965,12 @@ class _Engine:
         self._received.add(r.outpoint)
         if self._values.setdefault(r.outpoint, r.value) != r.value:
             raise EngineError(f"received coin {r.id!r}: its links gave {r.outpoint} another value")
+        if r.outpoint in self._spent:  # it came after the transaction that spent it: the caller's order
+            raise EngineError(f"received coin {r.id!r}: {r.outpoint} was spent already")
+        if any(r.outpoint in self._coins[w] for w in self._coins if w != r.account):
+            raise EngineError(f"received coin {r.id!r}: {r.outpoint} is another wallet's coin")
+        if r.account in self._untraced:  # its coin records were dropped, and it blocks already
+            return
         on = self._coins[r.account].setdefault(r.outpoint, {})
         need = r.value - sum(on.values())
         if need <= 0:  # covered by links (links over its value blocked when they were made)
@@ -980,16 +998,18 @@ class _Engine:
         on[lot_id] = need
 
     def _pool(self, account: str) -> list[tuple[str, int]]:
-        """The wallet's lots on no coin, oldest first, with their sats on no coin."""
+        """The wallet's lots on no coin, oldest first (by the date each reached the user, then its event
+        id, ADR 0041 §2.1), with their sats on no coin."""
         on_coins: dict[str, int] = {}
         for lots in self._coins[account].values():
             for lot, n in lots.items():
                 on_coins[lot] = on_coins.get(lot, 0) + n
-        return [
+        free = [
             (o.lot.id, o.sats - on_coins.get(o.lot.id, 0))
             for o in self._open.get(account, [])
             if o.sats > on_coins.get(o.lot.id, 0)
         ]
+        return sorted(free, key=lambda entry: self._oldest_key(entry[0]))
 
     def _check_links(self, event: str, coins: tuple[Coin, ...]) -> None:
         for c in coins:

@@ -409,10 +409,16 @@ def test_malformed_links_raise(coins: Any, match: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "wallets", [{"w"}, {"w": None}, {"": Wallet(None)}, {"w": Wallet(datetime(2025, 1, 1))}]
+    ("wallets", "match"),
+    [
+        ({"w"}, "maps account names to Wallets"),
+        ({"w": None}, "maps account names to Wallets"),
+        ({"": Wallet(None)}, "maps account names to Wallets"),
+        ({"w": Wallet(datetime(2025, 1, 1))}, "its tracking start"),
+    ],
 )
-def test_wallets_maps_names_to_wallets(wallets: Any) -> None:
-    with pytest.raises(EngineError, match=r"Wallets|tracking start"):
+def test_wallets_maps_names_to_wallets(wallets: Any, match: str) -> None:
+    with pytest.raises(EngineError, match=match):
         run([], wallets=wallets)
 
 
@@ -482,7 +488,63 @@ def test_a_coin_received_after_the_tracking_start_that_no_link_covers_blocks() -
 
 def test_a_wallet_without_a_tracking_start_blocks_its_received_coins() -> None:
     result = run([*POOLED, received("r1", "a:0", 1_000)], wallets={"w": Wallet(None)})
-    assert [b.reason for b in result.blocking if isinstance(b, Untraced)] == ["no_tracking_start"]
+    assert [(b.event, b.reason) for b in result.blocking if isinstance(b, Untraced)] == [
+        ("w", "no_tracking_start"),
+        ("r1", "no_tracking_start"),
+    ]
+
+
+def test_a_wallet_without_a_tracking_start_blocks_even_with_no_received_coins_adr0041() -> None:
+    # ADR 0041 §3: the missing date itself blocks, whatever the wallet's coins
+    assert run(POOLED, wallets={"w": Wallet(None)}).blocking == (
+        Untraced("w", "no_tracking_start", "'w' has no tracking start"),
+    )
+
+
+def test_a_coin_received_exactly_at_the_tracking_start_blocks() -> None:
+    result = run([*POOLED, received("r1", "a:0", 1_000, on=date(2025, 1, 1), hour=0)], wallets=WALLETS)
+    assert [b.reason for b in result.blocking if isinstance(b, Untraced)] == ["unrecorded_receipt"]
+
+
+def test_same_date_pool_lots_are_drawn_by_event_id_adr0041() -> None:
+    # ADR 0041 §2.1's tie-break: the same date, then the event id, whatever the order they came in
+    events: list[Event] = [
+        Acquisition("Q2", "w", date(2024, 1, 1), "buy", 600, D("12.00")),
+        Acquisition("Q1", "w", date(2024, 1, 1), "buy", 600, D("6.00")),
+        received("r1", "a:0", 600),
+    ]
+    assert run(events, wallets=WALLETS).draws == (Drawn("r1", "a:0", "Q1", 600),)
+
+
+def test_a_coin_received_into_an_untraced_wallet_draws_nothing() -> None:
+    # the self-transfer from z (not coin-traced) untraces w: its lots' places are unknown, so nothing is
+    # drawn, no placeholder made, and no lot listed as left in the pool
+    events: list[Event] = [
+        Acquisition("b1", "z", date(2023, 12, 1), "buy", 10, D("1.00")),
+        Transfer(
+            "t1", "z", "w", date(2024, 1, 1), datetime(2024, 1, 1, 12, tzinfo=UTC), "self_transfer", 5, 0
+        ),
+        *POOLED,
+        received("r1", "a:0", 1_000),
+    ]
+    result = run(events, wallets=WALLETS)
+    assert (result.draws, result.placeholders, result.pool, result.coins) == ((), (), (), ())
+    assert [b.reason for b in result.blocking if isinstance(b, Untraced)] == ["mixed_transfer"]
+
+
+def test_a_coin_received_after_it_was_spent_raises() -> None:
+    late = Received("r1", "w", date(2025, 3, 2), datetime(2025, 3, 2, 12, tzinfo=UTC), "c0:0", BTC)
+    spend = Disposal("s", "w", DAY, AT, "spend", BTC, D("1.00"))
+    with pytest.raises(EngineError, match="spent already"):
+        run([*COIN, wtx(spend, [Output(0, BTC, PAY, event="s")]), late], wallets=WALLETS)
+
+
+def test_a_coin_another_wallet_holds_cant_be_received_raises() -> None:
+    linked = Acquisition(
+        "L", "v", date(2024, 3, 1), "buy", 1_000, D("3.00"), coins=(Coin("a:0", 1_000, 1_000),)
+    )
+    with pytest.raises(EngineError, match="another wallet's coin"):
+        run([*POOLED, linked, received("r1", "a:0", 1_000)], wallets=WALLETS)
 
 
 def test_a_linked_coin_draws_nothing() -> None:
