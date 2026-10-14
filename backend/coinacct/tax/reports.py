@@ -1,8 +1,11 @@
 """Report builders: pure functions from the engine's result to report rows (PLAN §8; ADR 0011,
 ADR 0040, ADR 0043; T-510). They return values; the CSV writing and the input hash are the caller's.
-The free text in them (`Row.override_reason`, `Row.disposal` and `Row.lot`, `BrokerFee.description`,
-`Row.review`) is the user's or an import's: the CSV writer must escape it against formula injection
-(T-702).
+The free text in them (`Row.override_reason`, `Row.disposal` and `Row.lot`, `Row.review`,
+`BrokerFee.description`, `Form8949.replay_stopped`, the ids in `Form8949.late`, and whatever the caller
+passes as `blocking`) is the user's or an import's: the CSV writer must escape it against formula
+injection (T-702). The caller also adds what every report embeds besides the rule set and the stated
+positions (PLAN §8, T-507): the app version, the settings, the unsupported situations it doesn't
+model, and the input hash. A blocking condition of any year blocks every year's report (PLAN §7).
 
 **Form 8949** (`form_8949`): one row per allocation of a sale or spend in the tax year, the engine's
 lot-by-lot figures. A gift given never has a row, and neither does a fee: the engine makes no
@@ -14,7 +17,7 @@ disposal was made (`Sale`); `Sale.default` gives ADR 0011's defaults:
   ADR 0043): not reported, so C/F through 2024 and I/L from 2025
 - an exchange sale: from 2025 reported without basis, H/K, including coins deposited from outside,
   which brokers treat as noncovered; G/J only for covered coins (bought in that exchange account from
-  2026-01-01, with the broker reporting basis), which the caller marks; through 2024, C/F unless a
+  2026-01-01, a buy in that account), when the caller marks a reported basis; through 2024, C/F unless a
   1099-B reported it
 
 A row of an inherited lot reads "INHERITED" in column (b) instead of a date (`Row.inherited`).
@@ -49,6 +52,7 @@ from coinacct.tax.rules import BOXES, RULESET, Box, box, rules_for, y2024
 type Channel = Literal["exchange", "onchain"]
 
 SHORT_BOXES: Final[frozenset[str]] = frozenset("ABCGHI")
+BASIS_BOXES: Final[frozenset[str]] = frozenset("ADGJ")  # the boxes of sales a form reports with basis
 SATS_PER_BTC: Final = 100_000_000
 ZERO: Final = Decimal("0.00")
 COVERED_FROM: Final = date(2026, 1, 1)  # a digital asset bought from then is covered (ADR 0011)
@@ -151,6 +155,8 @@ class Sale:
             raise EngineError("a sale's reported and basis_reported are True or False")
         if self.broker is not None and (not isinstance(self.broker, Broker) or not self.reported):
             raise EngineError("broker figures are a Broker, for a sale a form reports")
+        if self.broker is not None and self.broker.basis is not None and not self.basis_reported:
+            raise EngineError("a broker's basis is given only for a form that reports basis")
         overridden = self.override_short is not None or self.override_long is not None
         if overridden != (isinstance(self.reason, str) and bool(self.reason.strip())):
             raise EngineError("an overridden box records the user's reason, and only then")
@@ -249,8 +255,8 @@ def form_8949(
         rows.append(_row(a, facts, tax_year, late.get(a.disposal)))
     rows = _reviewed(rows, sales)
     rows.sort(key=lambda r: (r.box, r.sold, r.disposal, r.acquired, r.lot))
-    if not all(isinstance(f, BrokerFee) for f in broker_fees):
-        raise EngineError("a broker's fee rows are BrokerFees")
+    if not isinstance(broker_fees, tuple | list) or not all(isinstance(f, BrokerFee) for f in broker_fees):
+        raise EngineError("a broker's fee rows are a list or tuple of BrokerFees")
     fees = tuple(f for f in broker_fees if f.sold.year == tax_year)
     return Form8949(tax_year, tuple(rows), _totals(rows), result.replay_stopped, tuple(result.late), fees)
 
@@ -321,11 +327,14 @@ def _reviewed(rows: list[Row], sales: Mapping[str, Sale]) -> list[Row]:
     for disposal, its in by.items():
         broker = sales[disposal].broker
         flags: list[str] = []
+        if sales[disposal].basis_reported and not all(r.box in BASIS_BOXES for r in its):
+            flags.append("the form reports basis, but these coins aren't covered: check the broker's box")
         if broker is not None:
             if _sum(r.proceeds for r in its) != broker.proceeds:
                 flags.append("proceeds differ from the broker's")
             if broker.basis is not None and _sum(r.basis for r in its) != broker.basis:
-                flags.append("basis differs from the broker's")
+                # Form 8949 instructions, columns (f) and (g): an incorrect reported basis takes code B
+                flags.append("basis differs from the broker's: Form 8949 needs code B and the adjustment")
             if broker.acquired is not None and {r.acquired for r in its} != {broker.acquired}:
                 flags.append("acquisition date differs from the broker's")
         out.extend(replace(r, review=tuple(flags)) for r in its)

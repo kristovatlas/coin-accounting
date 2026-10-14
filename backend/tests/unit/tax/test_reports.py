@@ -365,8 +365,9 @@ def test_a_gift_lots_row_is_not_inherited_and_takes_its_basis_rule() -> None:
 
 
 def test_rows_whose_figures_differ_from_the_brokers_are_flagged_adr0011() -> None:
-    sale = Sale("exchange", True, broker=Broker(D("99.00"), D("50.00"), date(2023, 1, 10)))
-    rows = report([*BUYS, sell("s", date(2025, 6, 1), 2_000, "100.00")], {"s": sale}).rows
+    sale = Sale("exchange", True, True, broker=Broker(D("99.00"), D("50.00"), date(2023, 1, 10)))
+    events: list[Event] = [BUYS[0], Acquisition("b2", "x", date(2024, 2, 1), "buy", 1_000, D("40.00"))]
+    rows = report([*events, sell("s", date(2024, 6, 1), 2_000, "100.00")], {"s": sale}, 2024).rows
     # proceeds $100 vs $99; basis $50 matches; the rows' dates are two, the broker's one
     assert {r.review for r in rows} == {
         ("proceeds differ from the broker's", "acquisition date differs from the broker's")
@@ -374,15 +375,15 @@ def test_rows_whose_figures_differ_from_the_brokers_are_flagged_adr0011() -> Non
 
 
 def test_rows_matching_the_brokers_figures_are_not_flagged_adr0011() -> None:
-    sale = Sale("exchange", True, broker=Broker(D("50.00"), D("10.00"), date(2023, 1, 10)))
-    (row,) = report([BUYS[0], sell("s", date(2025, 6, 1), 1_000, "50.00")], {"s": sale}).rows
-    assert row.review == ()
+    sale = Sale("exchange", True, True, broker=Broker(D("50.00"), D("10.00"), date(2023, 1, 10)))
+    (row,) = report([BUYS[0], sell("s", date(2024, 6, 1), 1_000, "50.00")], {"s": sale}, 2024).rows
+    assert (row.box, row.review) == ("D", ())
 
 
 def test_a_basis_difference_is_flagged_adr0011() -> None:
-    sale = Sale("exchange", True, broker=Broker(D("50.00"), D("11.00")))
-    (row,) = report([BUYS[0], sell("s", date(2025, 6, 1), 1_000, "50.00")], {"s": sale}).rows
-    assert row.review == ("basis differs from the broker's",)
+    sale = Sale("exchange", True, True, broker=Broker(D("50.00"), D("11.00")))
+    (row,) = report([BUYS[0], sell("s", date(2024, 6, 1), 1_000, "50.00")], {"s": sale}, 2024).rows
+    assert row.review == ("basis differs from the broker's: Form 8949 needs code B and the adjustment",)
 
 
 @pytest.mark.parametrize(
@@ -450,11 +451,11 @@ def test_only_a_buy_in_the_exchange_account_is_covered_t510(kind: str) -> None:
 
 def test_a_gift_lot_is_never_covered_t510() -> None:
     events: list[Event] = [
-        Acquisition("g", "x", date(2026, 1, 5), "gift_in", 1_000, D("10.00"), D("12.00"), date(2025, 1, 1)),
+        Acquisition("g", "x", date(2026, 1, 5), "gift_in", 1_000, D("10.00"), D("12.00"), date(2026, 1, 2)),
         sell("s", date(2026, 3, 1), 1_000, "20.00"),
-    ]
+    ]  # the donor's 2026 date passes the date test: only the bought gate keeps it out of G
     assert [r.box for r in report(events, {"s": Sale("exchange", True, basis_reported=True)}, 2026).rows] == [
-        "K"
+        "H"
     ]
 
 
@@ -518,3 +519,22 @@ def test_the_fee_position_prints_all_five_of_adr_0043s_bullets() -> None:
         "§1.1001-7(b)(2)",
     ):
         assert words in text
+
+
+def test_a_reported_basis_on_uncovered_coins_is_flagged_t510() -> None:
+    # a 2025 1099-DA can't report basis (no coin is covered before 2026): the rows are H/K, flagged
+    events: list[Event] = [BUYS[0], sell("s", date(2025, 6, 1), 1_000, "50.00")]
+    (row,) = report(events, {"s": Sale("exchange", True, basis_reported=True)}).rows
+    assert row.box == "K"
+    assert row.review == ("the form reports basis, but these coins aren't covered: check the broker's box",)
+
+
+def test_broker_fees_are_a_list_or_tuple() -> None:
+    fee = BrokerFee("fee", date(2025, 6, 1), D("0.10"))
+    with pytest.raises(EngineError, match="list or tuple"):
+        form_8949(run([]), {}, 2025, blocking=(), broker_fees=iter([fee]))  # type: ignore[arg-type]
+
+
+def test_a_broker_basis_needs_a_form_that_reports_basis() -> None:
+    with pytest.raises(EngineError, match="reports basis"):
+        Sale("exchange", True, broker=Broker(D("1.00"), D("1.00")))
