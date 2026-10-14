@@ -18,6 +18,7 @@ from coinacct.tax.engine import (
     LateOpening,
     Lot,
     OpeningAllocation,
+    OpeningBasisAdded,
     OpeningDiffers,
     OpeningLot,
     OpeningMismatch,
@@ -175,14 +176,14 @@ def test_with_no_2025_sale_the_due_date_is_the_deadline() -> None:
     (warning,) = run(
         [*HELD, opening(OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), recorded_at=late_at)]
     ).opening_late
-    assert (warning.first, warning.deadline) == (None, datetime(2026, 4, 15, tzinfo=UTC))
+    assert (warning.first, warning.deadline) == (None, datetime(2026, 4, 14, 10, tzinfo=UTC))
 
 
 def test_a_sale_after_the_due_date_makes_the_due_date_the_deadline() -> None:
     late_at = datetime(2026, 5, 2, tzinfo=UTC)
     recorded = opening(OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), recorded_at=late_at)
     (warning,) = run([*HELD, recorded, sell("s", date(2026, 5, 1), 10, "1.00")]).opening_late
-    assert (warning.first, warning.deadline) == (None, datetime(2026, 4, 15, tzinfo=UTC))
+    assert (warning.first, warning.deadline) == (None, datetime(2026, 4, 14, 10, tzinfo=UTC))
 
 
 def test_the_replay_follows_the_allocation() -> None:
@@ -218,7 +219,7 @@ def test_the_replay_follows_the_allocation() -> None:
         (opening(OpeningLot(0, D("12.00"), date(2023, 1, 1))), "sats must be a positive whole number"),
         (opening(OpeningLot(1_000, D("12.00"), date(2025, 1, 1))), "from genesis to 2024-12-31"),
         (opening(OpeningLot(1_000, D("-1.00"), date(2023, 1, 1))), "can't be negative"),
-        (opening(OpeningLot(1_000, D("1.00"), date(2024, 12, 21))), "made before a lot it allocates"),
+        (opening(OpeningLot(1_000, D("1.00"), date(2024, 12, 22))), "made before a lot it allocates"),
         (opening(OpeningLot(1_000, D("1.00"), date(2023, 1, 1), always_long=1)), "True or False"),  # type: ignore[arg-type]
         (
             opening(OpeningLot(1_000, D("1.00"), date(2023, 1, 1)), recorded_at=datetime(2024, 1, 1)),
@@ -258,7 +259,7 @@ def test_an_allocation_recorded_at_the_first_sales_moment_is_late() -> None:
 
 def test_an_allocation_recorded_on_the_due_date_is_late() -> None:
     recorded = opening(
-        OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), recorded_at=datetime(2026, 4, 15, tzinfo=UTC)
+        OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), recorded_at=datetime(2026, 4, 14, 10, tzinfo=UTC)
     )
     assert len(run([*HELD, recorded]).opening_late) == 1
 
@@ -371,3 +372,108 @@ def test_an_allocation_that_inflates_basis_on_the_same_units_warns() -> None:
     assert run([*HELD, inflated]).opening_differs == (
         OpeningDiffers(date(2023, 5, 1), False, 600, D("1000000.00"), 600, D("6.00")),
     )
+
+
+GIFT = Acquisition("g", "x", date(2024, 3, 1), "gift_in", 1_000, D("10.00"), D("6.00"), date(2020, 1, 1))
+
+
+def test_a_gifts_dual_basis_is_carried_through_the_allocation_t509() -> None:
+    # the gift's unused basis keeps its dual basis: a sale under the $6 FMV is a loss against it, held
+    # from the gift date (IRC §1015(a); Treas. Reg. §1.1223-1(b))
+    kept = opening(
+        OpeningLot(1_000, D("10.00"), date(2020, 1, 1), loss_basis=D("6.00"), received=date(2024, 3, 1))
+    )
+    result = run([GIFT, kept, sell("s", date(2025, 2, 1), 1_000, "5.00")])
+    (row,) = result.allocations
+    assert (row.rule, row.basis, row.acquired, row.long_term) == (
+        "fmv_at_gift",
+        D("6.00"),
+        date(2024, 3, 1),
+        False,
+    )
+    assert (result.opening_differs, result.blocking) == ((), ())
+
+
+def test_dropping_a_gifts_loss_basis_warns() -> None:
+    dropped = opening(OpeningLot(1_000, D("10.00"), date(2020, 1, 1)))
+    # by gift date the two differ: the allocated lot has none (loss basis $0), the replaced had $6
+    assert run([GIFT, dropped]).opening_differs == (
+        OpeningDiffers(date(2020, 1, 1), False, 1_000, D("10.00"), 0, D("0.00")),
+        OpeningDiffers(
+            date(2020, 1, 1), False, 0, D("0.00"), 1_000, D("10.00"), date(2024, 3, 1), D("0.00"), D("6.00")
+        ),
+    )
+
+
+def test_an_allocation_that_adds_basis_in_all_blocks() -> None:
+    inflated = opening(
+        OpeningLot(600, D("1000000.00"), date(2023, 5, 1)), OpeningLot(400, D("8.00"), date(2024, 5, 1))
+    )
+    assert OpeningBasisAdded(D("1000008.00"), D("14.00")) in run([*HELD, inflated]).blocking
+    # less basis in all is no block (a warning by date only): the user may allocate conservatively
+    lower = opening(
+        OpeningLot(600, D("1.00"), date(2023, 5, 1)), OpeningLot(400, D("8.00"), date(2024, 5, 1))
+    )
+    assert run([*HELD, lower]).blocking == ()
+
+
+def test_an_unknown_basis_replaced_stays_blocking_and_is_compared_by_sats_t509() -> None:
+    unknown = Acquisition("u", "x", date(2024, 3, 1), "gift_in", 1_000, None, D("6.00"), date(2020, 1, 1))
+    # its donor basis is unknown, so no dual basis is on record either: the allocation gives it $9
+    allocated = opening(OpeningLot(1_000, D("9.00"), date(2020, 1, 1)))
+    result = run([unknown, allocated])
+    assert UnknownBasis("u") in result.blocking
+    assert [lot.id for lot in result.replaced] == ["u"]
+    assert result.opening_differs == ()  # same sats on the same dates; the basis was unknown
+    assert not any(isinstance(b, OpeningBasisAdded) for b in result.blocking)
+
+
+@pytest.mark.parametrize(
+    ("lot", "match"),
+    [
+        (OpeningLot(1_000, D("10.00"), date(2020, 1, 1), loss_basis=D("6.00")), "comes with the gift's date"),
+        (
+            OpeningLot(1_000, D("10.00"), date(2020, 1, 1), loss_basis=D("10.00"), received=date(2024, 3, 1)),
+            "below the donor's",
+        ),
+        (
+            OpeningLot(1_000, D("10.00"), date(2020, 1, 1), loss_basis=D("6.00"), received=date(2019, 1, 1)),
+            "received from its date",
+        ),
+    ],
+)
+def test_invalid_dual_bases_raise(lot: OpeningLot, match: str) -> None:
+    with pytest.raises(EngineError, match=match):
+        run([GIFT, opening(lot)])
+
+
+def test_a_changed_loss_basis_on_the_same_gift_warns() -> None:
+    changed = opening(
+        OpeningLot(1_000, D("10.00"), date(2020, 1, 1), loss_basis=D("5.00"), received=date(2024, 3, 1))
+    )
+    (warning,) = run([GIFT, changed]).opening_differs
+    assert (warning.allocated_loss_basis, warning.replaced_loss_basis) == (D("5.00"), D("6.00"))
+
+
+def test_an_allocated_gift_keeps_its_fifo_place_the_gift_date_t509() -> None:
+    # a 2024 gift of a 2020 lot and a 2022 buy: FIFO takes the buy first (received earlier), as before
+    buy = Acquisition("b", "x", date(2022, 6, 1), "buy", 1_000, D("20.00"))
+    gift = Acquisition("g", "x", date(2024, 3, 1), "gift_in", 1_000, D("10.00"), D("12.00"), date(2020, 1, 1))
+    kept = opening(
+        OpeningLot(1_000, D("20.00"), date(2022, 6, 1)),
+        OpeningLot(1_000, D("10.00"), date(2020, 1, 1), received=date(2024, 3, 1)),
+    )
+    (row,) = run([buy, gift, kept, sell("s", date(2025, 2, 1), 1_000, "30.00")]).allocations
+    assert (row.lot, row.basis) == ("open@1", D("20.00"))
+
+
+def test_the_due_date_begins_at_its_earliest_moment_anywhere() -> None:
+    # 09:00 on 2026-04-15 in UTC+10 (Guam) is 23:00 UTC the day before: already on the due date there
+    recorded = opening(
+        OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), recorded_at=datetime(2026, 4, 14, 23, tzinfo=UTC)
+    )
+    assert len(run([*HELD, recorded]).opening_late) == 1
+    before = opening(
+        OpeningLot(1_000, D("12.00"), date(2023, 1, 1)), recorded_at=datetime(2026, 4, 14, 9, 59, tzinfo=UTC)
+    )
+    assert run([*HELD, before]).opening_late == ()

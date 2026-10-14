@@ -21,9 +21,10 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   keeping its date, and adds none. It is late (`Result.opening_late`, a warning, T-508) if the user's
   attested completion isn't before their first sale, disposition or transfer of BTC from any account on or
   after 2025-01-01 (any wallet transaction counts), or the 2025 return's due date if that is earlier (ADR
-  0041 §5; Rev. Proc. 2024-28 §5.02(4): "before"; the due date from the start of 2026-04-15 UTC, without
-  extensions, so only ever warning more). A coin-traced wallet's allocation (ADR 0041 §5: the pool and the
-  fragments drawn from it) isn't built yet: it blocks (`Untraced`, `opening_allocation`).
+  0041 §5; Rev. Proc. 2024-28 §5.02(4): "before"; the due date from the moment 2026-04-15 begins anywhere
+  (UTC+14), without extensions, so only ever warning more). A coin-traced wallet's allocation (ADR 0041
+  §5: the pool and the fragments drawn from it) isn't built yet: it blocks (`Untraced`,
+  `opening_allocation`).
 - **A gift received** (`gift_in`; IRC §1015(a), Treas. Reg. §1.1015-1(a)) has a **dual basis**. Its gain
   basis is the donor's basis, held from the donor's date (tacked, IRC §1223(2)). If the FMV at the gift
   was lower, that FMV is its loss basis, held from the gift date. At a disposal, proceeds above the
@@ -180,9 +181,10 @@ TRANSFER_KINDS: Final[frozenset[str]] = frozenset({"deposit", "withdrawal", "sel
 ZERO: Final = Decimal("0.00")
 GENESIS: Final = date(2009, 1, 3)  # no bitcoin was acquired before the genesis block
 OPENING_DAY: Final = date(2025, 1, 1)  # the 2025 opening allocation's date (Rev. Proc. 2024-28)
-# the 2025 return's due date (2026-04-15), from the start of the day in UTC: an allocation must be complete
-# before it (Rev. Proc. 2024-28 §5.02(4)), and an extension isn't counted: both only warn more
-RETURN_DUE_2025: Final = datetime(2026, 4, 15, tzinfo=UTC)
+# the 2025 return's due date (2026-04-15) from the moment it begins anywhere, UTC+14 (10:00 UTC the day
+# before): an allocation must be complete before it (Rev. Proc. 2024-28 §5.02(4)) wherever the user is,
+# and an extension isn't counted: both only warn more
+RETURN_DUE_2025: Final = datetime(2026, 4, 14, 10, tzinfo=UTC)
 RESERVED: Final = ("@", "#")  # the separators in the lot ids the engine builds (lot@transfer, lot@tx#vout)
 SPLIT: Final = "#"  # in a per-output moved or split-off lot's id: lot@event#vout
 UNRECORDED: Final = "@@unrecorded"  # a created lot's suffix: no event or moved lot id can contain "@@"
@@ -318,12 +320,17 @@ class Wallet:
 @dataclass(frozen=True)
 class OpeningLot:
     """A lot of a 2025 opening allocation: the sats the user allocated basis to, that basis (USD) and the
-    date the holding period runs from; `always_long` for an inherited lot."""
+    date the holding period runs from; `always_long` for an inherited lot. `received` is the date the lot
+    reached the user, its FIFO place (a gift's date, #241; `acquired` if None). A gift's unused basis keeps
+    its dual basis (IRC §1015(a)): `basis` and `acquired` are the donor's, `loss_basis` the lower FMV at the
+    gift, held from `received`."""
 
     sats: int
     basis: Decimal
     acquired: date
     always_long: bool = False
+    loss_basis: Decimal | None = None
+    received: date | None = None
 
 
 @dataclass(frozen=True)
@@ -464,6 +471,15 @@ class OpeningMismatch:
 
 
 @dataclass(frozen=True)
+class OpeningBasisAdded:
+    """Blocking: the opening allocations hold more basis in all than the lots they replaced, which had no
+    unknown basis. An allocation moves unused basis and adds none (Rev. Proc. 2024-28 §5.02(2), (5))."""
+
+    allocated: Decimal
+    replaced: Decimal
+
+
+@dataclass(frozen=True)
 class OpeningDiffers:
     """A warning: the opening allocations move the unused basis onto the held sats (Rev. Proc. 2024-28
     §5.02(2), (5)), each unit keeping the date it was acquired, so for each acquisition date (and
@@ -476,6 +492,10 @@ class OpeningDiffers:
     allocated_basis: Decimal
     replaced_sats: int
     replaced_basis: Decimal
+    loss_from: date | None = None  # a gift's date, for its loss basis
+    allocated_loss_basis: Decimal = ZERO
+    replaced_loss_basis: Decimal = ZERO
+    unknown: bool = False  # a replaced lot had an unknown basis: only the sats are compared
 
 
 @dataclass(frozen=True)
@@ -496,7 +516,7 @@ class Result:
     gifts: tuple[GiftGiven, ...]
     holdings: tuple[Lot, ...]  # the lots left, in the order they were created or moved in, without empty ones
     late: tuple[LateIdentification, ...]
-    blocking: tuple[MissingLots | UnknownBasis | Untraced | OpeningMismatch, ...]
+    blocking: tuple[MissingLots | UnknownBasis | Untraced | OpeningMismatch | OpeningBasisAdded, ...]
     moves: tuple[Moved, ...] = ()
     created: tuple[Lot, ...] = ()  # lots created for a withdrawal from an account without lots (ADR 0009)
     replay_stopped: str | None = None  # the event the late choices' replay couldn't follow (#238)
@@ -653,7 +673,7 @@ class _Engine:
         self._allocations: list[Allocation] = []
         self._gifts: list[GiftGiven] = []
         self._late: list[LateIdentification] = []
-        self._blocking: list[MissingLots | UnknownBasis | Untraced | OpeningMismatch] = []
+        self._blocking: list[MissingLots | UnknownBasis | Untraced | OpeningMismatch | OpeningBasisAdded] = []
         self._moves: list[Moved] = []
         self._created: list[Lot] = []
         self._recorded: set[str] = set()  # accounts holding lots the user recorded (not created lots)
@@ -710,6 +730,9 @@ class _Engine:
             self._apply(event)
             self._follow(event)
         holdings = tuple(_left(o) for o in self._lots.values() if o.sats > 0)
+        added = self._basis_added()
+        if added is not None:
+            self._blocking.append(added)
         early = first is not None and first[1] < RETURN_DUE_2025
         deadline, named = (first[1], first[0]) if first is not None and early else (RETURN_DUE_2025, None)
         opening_late = [
@@ -851,9 +874,14 @@ class _Engine:
                 self._replaced.append(_left(o))
                 o.sats, o.basis, o.loss_basis = 0, ZERO, None
         for i, (lot, basis) in enumerate(zip(e.lots, bases, strict=True), start=1):
-            new = Lot(f"{e.id}@{i}", e.account, lot.acquired, lot.sats, basis, lot.always_long)
+            loss = None if lot.loss_basis is None else _usd(lot.loss_basis, e.id)
+            received = lot.acquired if lot.received is None else lot.received
+            loss_from = None if loss is None else received
+            new = Lot(
+                f"{e.id}@{i}", e.account, lot.acquired, lot.sats, basis, lot.always_long, loss, loss_from
+            )
             self._allocated.append(new)
-            self._insert(e.account, _Open(new, lot.sats, basis, None, False, lot.acquired))
+            self._insert(e.account, _Open(new, lot.sats, basis, loss, lot.received is not None, received))
         if held > e.sats:
             lot_id = f"{e.id}{PLACEHOLDER}"
             placeholder = Lot(lot_id, e.account, e.on, held - e.sats, ZERO, False, None, None, True)
@@ -863,19 +891,44 @@ class _Engine:
         self._recorded.add(e.account)
 
     def _opening_differs(self) -> tuple[OpeningDiffers, ...]:
-        """Where the applied allocations' sats and basis, by acquisition date and inheritance, aren't
-        those of the lots they replaced (a shortfall's placeholder isn't counted: it blocks)."""
-        sums: dict[tuple[date, bool], list[Any]] = {}
+        """Where the applied allocations' sats and bases, by acquisition date, inheritance and gift date,
+        aren't those of the lots they replaced (a shortfall's placeholder isn't counted: it blocks). A
+        replaced lot of unknown basis is compared by its sats only."""
+        sums: dict[tuple[date, bool, date | None], list[Any]] = {}
         for side, lots in ((0, self._allocated), (1, self._replaced)):
             for lot in lots:
-                entry = sums.setdefault((lot.acquired, lot.always_long), [0, ZERO, 0, ZERO])
-                entry[2 * side] += lot.sats
-                entry[2 * side + 1] = add(entry[2 * side + 1], lot.basis)
-        return tuple(
-            OpeningDiffers(when, long, *figures)
-            for (when, long), figures in sorted(sums.items())
-            if (figures[0], figures[1]) != (figures[2], figures[3])
-        )
+                key = (lot.acquired, lot.always_long, lot.loss_from)
+                entry = sums.setdefault(key, [0, ZERO, ZERO, 0, ZERO, ZERO, False])
+                entry[3 * side] += lot.sats
+                entry[3 * side + 1] = add(entry[3 * side + 1], lot.basis)
+                entry[3 * side + 2] = add(
+                    entry[3 * side + 2], ZERO if lot.loss_basis is None else lot.loss_basis
+                )
+                entry[6] = entry[6] or lot.unknown_basis
+        out = []
+        for (when, long, loss_from), (a_sats, a_basis, a_loss, r_sats, r_basis, r_loss, unknown) in sorted(
+            sums.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] or date.min)
+        ):
+            if a_sats != r_sats or (not unknown and (a_basis, a_loss) != (r_basis, r_loss)):
+                out.append(
+                    OpeningDiffers(
+                        when, long, a_sats, a_basis, r_sats, r_basis, loss_from, a_loss, r_loss, unknown
+                    )
+                )
+        return tuple(out)
+
+    def _basis_added(self) -> OpeningBasisAdded | None:
+        """A block: the allocations hold more basis in all than the lots they replaced, none of which had
+        an unknown basis (Rev. Proc. 2024-28 §5.02(2): an allocation moves unused basis, it adds none)."""
+        if not self._allocated or any(lot.unknown_basis for lot in self._replaced):
+            return None
+        allocated = ZERO
+        for lot in self._allocated:
+            allocated = add(allocated, lot.basis)
+        replaced = ZERO
+        for lot in self._replaced:
+            replaced = add(replaced, lot.basis)
+        return OpeningBasisAdded(allocated, replaced) if allocated > replaced else None
 
     def _standing(self, account: str, sats: int) -> tuple[list[Pick], int]:
         """FIFO's picks for `sats`, and the sats it couldn't cover. FIFO is the only standing method so
@@ -1884,7 +1937,18 @@ def _checked_opening(e: OpeningAllocation) -> list[Decimal]:
             raise EngineError(f"opening allocation {e.id!r}: a lot's date is from genesis to 2024-12-31")
         if type(lot.always_long) is not bool:
             raise EngineError(f"opening allocation {e.id!r}: always_long is True or False")
-        if e.recorded_at.date() < lot.acquired:
+        if lot.received is not None and (
+            type(lot.received) is not date or not lot.acquired <= lot.received < OPENING_DAY
+        ):
+            raise EngineError(f"opening allocation {e.id!r}: a lot was received from its date to 2024-12-31")
+        if lot.loss_basis is not None:
+            if lot.received is None:
+                raise EngineError(
+                    f"opening allocation {e.id!r}: a gift's loss basis comes with the gift's date"
+                )
+            if _usd(lot.loss_basis, e.id) >= _usd(lot.basis, e.id):
+                raise EngineError(f"opening allocation {e.id!r}: a loss basis is below the donor's basis")
+        if (e.recorded_at.date() - lot.acquired).days < -1:  # a day's slack: a UTC moment against a tax date
             raise EngineError(
                 f"opening allocation {e.id!r}: it was made before a lot it allocates was bought"
             )
