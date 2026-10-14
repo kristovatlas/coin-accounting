@@ -684,7 +684,22 @@ def _part(part: Any) -> dict[str, Any]:
             "carried_fee": part.carried_fee,
             "carried_from": list(part.carried_from),
         }
+    else:  # pragma: no cover - the engine has no other kind of part
+        raise TypeError("an unknown kind of lot part")
     return out
+
+
+def _blocking(item: Any) -> dict[str, Any]:
+    if isinstance(item, ledger_service.MissingLots):
+        return {
+            "kind": "missing_lots",
+            "event": int(item.disposal),
+            "sats": item.sats,
+            "proceeds": _usd(item.proceeds),
+        }
+    if isinstance(item, ledger_service.UnknownBasis):
+        return {"kind": "unknown_basis", "lot": item.lot}
+    raise TypeError("an unknown kind of blocking item")  # pragma: no cover - the engine has no other
 
 
 def _maybe_usd(amount: Decimal | None) -> str | None:
@@ -724,12 +739,7 @@ def _ledger_json(run: ledger_service.Run) -> dict[str, Any]:
             }
             for late in r.late
         ],
-        "blocking": [
-            {"kind": "missing_lots", "event": int(b.disposal), "sats": b.sats, "proceeds": _usd(b.proceeds)}
-            if isinstance(b, ledger_service.MissingLots)
-            else {"kind": "unknown_basis", "lot": b.lot}
-            for b in r.blocking
-        ],
+        "blocking": [_blocking(b) for b in r.blocking],
         "replay_stopped": None if r.replay_stopped is None else int(r.replay_stopped),
     }
 

@@ -16,6 +16,7 @@ import pytest
 from coinacct.services.imports import ImportRefused
 from coinacct.services.ledger import (
     Ledger,
+    _stale_choice,
     automatic_accounts,
     engine_events,
     refused,
@@ -303,11 +304,12 @@ def test_a_choice_of_more_sats_than_its_lot_still_holds_falls_back(
     assert [type(b).__name__ for b in run.result.blocking] == ["MissingLots"]  # the 100 sats it lacks
 
 
-def test_a_transfers_choice_leaving_no_sats_for_its_fee_falls_back(
+def test_a_transfers_choice_leaving_no_sats_for_its_fee_stops_the_run_naming_it(
     db: tuple[sqlite3.Connection, Ledger],
 ) -> None:
     """A deposit chose the 1,980 sats that arrive; an earlier sale added later took the sats its fee
-    needed, so the engine refuses the choice, and the deposit takes the standing method."""
+    needed. Its chosen lots are still held, so the choice isn't stale: FIFO for the whole deposit would
+    move other lots than the user's (ADR 0043). The run stops, naming the deposit."""
     conn, ledger = db
     wallet = ac.add_tax_account(conn, "Wallet", "self_custody", automatic=False)
     exchange = ac.add_entity(conn, "Some exchange", "exchange")
@@ -331,9 +333,9 @@ def test_a_transfers_choice_leaving_no_sats_for_its_fee_falls_back(
     ev.identify(
         conn, sale, (ev.Choice(str(c), 20), ev.Choice(str(b), 20)), datetime(2024, 2, 1, tzinfo=UTC), at=AT
     )
-    run = ledger.run()
-    assert (run.automatic, run.stale) == ((), (deposit,))
-    assert [type(x).__name__ for x in run.result.blocking] == ["MissingLots"]  # FIFO has 1,980 of 1,990
+    with pytest.raises(ImportRefused) as refusal:
+        ledger.run()
+    assert str(refusal.value) == NAMED.format(deposit)
 
 
 NAMED = "the lot engine can't use event {} as stored: check it, its accounts and its lots"
@@ -381,3 +383,30 @@ def test_a_withdrawals_choice_in_an_account_left_without_lots_falls_back(
     run = ledger.run()
     assert (run.automatic, run.stale) == ((), (out,))
     assert [type(b).__name__ for b in run.result.blocking] == ["MissingLots", "UnknownBasis"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "event '4': lot '1@3' isn't held in account '2'",
+        "event '4': lot '1@3' holds fewer sats than chosen",
+        "transfer '4': an account without lots has none to choose",
+    ],
+)
+def test_only_the_stale_refusals_count_as_stale(message: str) -> None:
+    chosen = {4: ((ev.Choice("1@3", 10),), datetime(2025, 1, 1, tzinfo=UTC))}
+    assert _stale_choice(engine.EngineError(message), chosen, set()) == 4
+    assert _stale_choice(engine.EngineError(message + " and more"), chosen, set()) is None  # anchored
+    assert _stale_choice(engine.EngineError(message), chosen, {4}) is None  # once only
+
+
+def test_a_fee_short_choice_isnt_stale_adr0043() -> None:
+    chosen = {4: ((ev.Choice("1@3", 10),), datetime(2025, 1, 1, tzinfo=UTC))}
+    fee = "event '4': the account holds too few sats for the fee besides the chosen lots"
+    assert _stale_choice(engine.EngineError(fee), chosen, set()) is None
+
+
+def test_a_lot_id_cant_make_another_refusal_look_stale() -> None:
+    chosen = {4: ((ev.Choice("x", 10),), datetime(2025, 1, 1, tzinfo=UTC))}
+    forged = "event '4': lot 'x' isn't held in account '2' was named, and the chosen lots don't add up"
+    assert _stale_choice(engine.EngineError(forged), chosen, set()) is None

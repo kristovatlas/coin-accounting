@@ -18,7 +18,7 @@ from coinacct.services.startup import NodeStatus
 from coinacct.storage import accounts as ac
 from coinacct.storage.chain_state import record_chain
 from coinacct.storage.datadir import open_data_dir
-from coinacct.storage.db import open_db, open_reader
+from coinacct.storage.db import DbBusy, open_db, open_reader
 
 from .asgi import PORT, Reply, call
 
@@ -231,3 +231,89 @@ def test_a_late_transfer_shows_the_parts_the_standing_method_would_move(world: W
     assert [(p["event"], p["lot"], p["into"], p["to"]) for p in late["standing"]] == [
         (deposit, str(a), f"{a}@{deposit}", x)
     ]
+
+
+def test_a_gifts_two_bases_are_shown_held_and_sold_at_a_loss(world: World) -> None:
+    """The donor's basis (100.00) is above the FMV at the gift (50.00): a sale below both takes the loss
+    basis, and its holding period from the gift (IRC §1015(a))."""
+    gift = world.add(
+        "gift_in",
+        world.manual,
+        "2024-01-02T12:00:00Z",
+        1_000,
+        usd="100.00",
+        fmv="50.00",
+        donor_acquired="2020-01-01",
+    )
+    (held,) = world.ledger().json()["holdings"]
+    assert (held["acquired"], held["basis"], held["loss_basis"], held["loss_from"]) == (
+        "2020-01-01",
+        "100.00",
+        "50.00",
+        "2024-01-02",
+    )
+    sale = world.add("sell", world.manual, "2024-06-02T12:00:00Z", 1_000, usd="30.00")
+    (row,) = world.ledger().json()["allocations"]
+    assert (row["event"], row["lot"], row["rule"], row["basis"], row["acquired"], row["long_term"]) == (
+        sale,
+        str(gift),
+        "fmv_at_gift",
+        "50.00",
+        "2024-01-02",
+        False,
+    )
+    assert (row["lot_basis"], row["lot_loss_basis"]) == ("100.00", "50.00")
+
+
+def test_a_gifted_inheritance_stays_long_term_and_an_unrecorded_withdrawal_makes_a_lot(world: World) -> None:
+    inherited = world.add("inherit", world.wallet, "2024-01-02T12:00:00Z", 1_000, usd="40.00")
+    gift = world.add("gift_out", world.wallet, "2024-02-02T12:00:00Z", 1_000, usd="0.00")
+    out_ = world.add("withdrawal", world.exchange, "2024-03-02T12:00:00Z", 500, to=world.wallet)
+    out = world.ledger().json()
+    assert [(g["event"], g["lot"], g["always_long"]) for g in out["gifts"]] == [(gift, str(inherited), True)]
+    (made,) = out["created"]
+    assert (made["lot"].startswith(f"{out_}@"), made["account"], made["sats"], made["unknown_basis"]) == (
+        True,
+        world.exchange,
+        500,
+        True,
+    )
+    assert out["blocking"] == [{"kind": "unknown_basis", "lot": made["lot"]}]
+
+
+def test_a_withdrawals_missing_basis_in_an_account_with_lots_is_a_422_naming_it(world: World) -> None:
+    """The withdrawal named a basis for sats its account held no lots for; an earlier deposit added
+    later gives the account lots, so that basis can't apply, and the engine refuses that event."""
+    world.add("buy", world.wallet, "2024-01-02T12:00:00Z", 1_000, usd="10.00")
+    out_ = world.add(
+        "withdrawal",
+        world.exchange,
+        "2024-03-02T12:00:00Z",
+        500,
+        to=world.wallet,
+        missing_basis="7.00",
+        missing_acquired="2023-01-01",
+    )
+    assert world.ledger().status == 200
+    world.add("deposit", world.wallet, "2024-02-02T12:00:00Z", 1_000, to=world.exchange)
+    reply = world.ledger()
+    assert reply.status == 422
+    assert reply.json() == {
+        "error": f"the lot engine can't use event {out_} as stored: check it, its accounts and its lots"
+    }
+
+
+def test_a_busy_db_is_a_503(tmp_path: Path) -> None:
+    def busy() -> Any:
+        raise DbBusy("the user DB is busy; try again in a moment")
+
+    app = create_app(
+        port=PORT,
+        sessions=Sessions(TOKEN),
+        status=lambda: NodeStatus(online=False, chain=None, reasons=()),
+        on_quit=lambda: None,
+        ledger=Ledger(busy),
+    )
+    session = call(app, "POST", "/api/session", json_body={"bootstrap": TOKEN}).json()["session"]
+    reply = call(app, "GET", "/api/ledger", headers={"Authorization": f"Bearer {session}"})
+    assert reply.status == 503 and "busy" in reply.json()["error"]
