@@ -269,7 +269,7 @@ export function Imports({ session }: { session: string }) {
           onChange={(e) => setNewWallet(e.target.value)}
         />
         <label>
-          <input id="new-wallet-manual" type="checkbox" checked={chooseLots} onChange={(e) => setChooseLots(e.target.checked)} />
+          <input autoComplete="off" id="new-wallet-manual" type="checkbox" disabled={busy} checked={chooseLots} onChange={(e) => setChooseLots(e.target.checked)} />
           I choose this wallet's lots myself (otherwise its standing method, FIFO, does)
         </label>
         <button id="new-wallet" type="button" disabled={busy || newWallet.trim() === ""} onClick={onNewWallet}>

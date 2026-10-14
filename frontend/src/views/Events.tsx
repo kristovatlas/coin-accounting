@@ -35,6 +35,10 @@ const MOVEMENTS: EventKind[] = ["deposit", "withdrawal", "self_transfer"];
 const NO_USD: EventKind[] = [...MOVEMENTS, "gift_out"]; // a gift given's proceeds are 0.00
 const USD = /^-?\d{1,15}(\.\d{1,2})?$/; // the API's USD text: exact cents
 const FEE: EventKind[] = [...MOVEMENTS, "buy"]; // a BTC fee on a sale, spend or gift isn't supported yet
+// From 2027 a broker must have the choice (ADR 0008). The tax date is in the user's zone, which this
+// view doesn't read yet (#316), so the reminder starts at 2027 in the earliest zone, UTC+14, erring
+// towards a reminder.
+const BROKER_REMINDER_FROM = "2026-12-31T10:00";
 const CHOOSES: EventKind[] = [...MOVEMENTS, "sell", "spend", "gift_out"];
 
 function message(error: unknown): string {
@@ -305,7 +309,7 @@ export function Events({ session }: { session: string }) {
                 {e.identified_at !== null ? ` (chosen ${e.identified_at})` : ""}
               </td>
               <td>
-                {CHOOSES.includes(e.kind) && !selectsItself(e.account) && (
+                {CHOOSES.includes(e.kind) && !selectsItself(e.account) && e.missing_basis === null && (
                   <button type="button" className="choose" disabled={busy} onClick={() => openChoice(e)}>
                     Choose lots
                   </button>
@@ -323,11 +327,12 @@ export function Events({ session }: { session: string }) {
         <section id="choose-lots">
           <h3>Choose lots for event {current.id}</h3>
           <p>
-            One lot per line: its id (the event that bought it) and the BTC taken from it. Leave it empty to use the
-            account's standing method. The app records when you save a change: one made after the event may count
+            One lot per line: its id and the BTC taken from it. A lot's id is the id of the event that acquired it;
+            once coins moved into this account, it is that id, then <code>@</code> and the move's id, for each move
+            (for example <code>1@5</code>). Leave it empty to use the account's standing method. The app records when you save a change: one made after the event may count
             as late.
           </p>
-          {custodial(current.account) && current.at >= "2027" && (
+          {custodial(current.account) && current.at >= BROKER_REMINDER_FROM && (
             <p id="choose-lots-broker">
               From 2027 your broker must have this identification by the time of the sale or withdrawal: tell
               them then, not only this app (ADR 0008).
