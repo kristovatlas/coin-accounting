@@ -10,6 +10,7 @@ digits. Anything else is refused rather than rounded or guessed: rounding is exp
 - All money arithmetic runs in `CONTEXT`, a fixed context, never the caller's: a lowered precision
   elsewhere in the process can't change a figure (T-502). Amounts and satoshi counts are bounded so
   that every sum, difference and `amount * part` is exact in it; only `share` rounds, once.
+- `value_of` is sats at a USD price per BTC, rounded once to the cent, half to even.
 - `share` is the only way `tax/` divides money (ENGINEERING §5.2 bans `/` there). It rounds to the
   cent, half to even. The engine splits an amount by always taking a share of what remains and
   giving the last part the remainder, so the parts of every split add up to the whole exactly.
@@ -31,7 +32,7 @@ from decimal import (
 )
 from typing import Final
 
-from coinacct.domain.chain import MAX_SATS
+from coinacct.domain.chain import MAX_SATS, SATS_PER_BTC
 
 CENT: Final = Decimal("0.01")
 MAX_USD: Final = Decimal(10) ** 15  # a quadrillion dollars: far above any real figure
@@ -84,6 +85,17 @@ def add(a: Decimal, b: Decimal) -> Decimal:
 def subtract(a: Decimal, b: Decimal) -> Decimal:
     """`a - b`, exactly (a gain or a loss can be negative)."""
     return CONTEXT.subtract(a, b)
+
+
+def value_of(sats: int, price: str | Decimal) -> Decimal:
+    """`sats` at `price` USD per BTC, rounded once to the cent (half to even); `0 <= sats <= MAX_SATS`,
+    and the value below `MAX_USD`."""
+    if isinstance(sats, bool) or not isinstance(sats, int):
+        raise TypeError("sats is an integer")
+    if not 0 <= sats <= MAX_SATS:
+        raise ValueError("sats is from 0 to the supply")
+    exact = _DIVIDE.divide(CONTEXT.multiply(usd(price), Decimal(sats)), Decimal(SATS_PER_BTC))
+    return usd(exact.quantize(CENT, rounding=ROUND_HALF_EVEN, context=_DIVIDE))
 
 
 def share(amount: Decimal, part: int, whole: int) -> Decimal:

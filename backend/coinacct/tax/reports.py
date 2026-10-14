@@ -1,11 +1,12 @@
-"""Report builders: pure functions from the engine's result to report rows (PLAN §8; ADR 0011,
-ADR 0040, ADR 0043; T-510). They return values; the CSV writing and the input hash are the caller's.
-The free text in them (`Row.override_reason`, `Row.disposal` and `Row.lot`, `Row.review`,
-`BrokerFee.description`, `Form8949.replay_stopped`, the ids in `Form8949.late`, and whatever the caller
-passes as `blocking`) is the user's or an import's: the CSV writer must escape it against formula
-injection (T-702). The caller also adds what every report embeds besides the rule set and the stated
-positions (PLAN §8, T-507): the app version, the settings, the unsupported situations it doesn't
-model, and the input hash. A blocking condition of any year blocks every year's report (PLAN §7).
+"""Report builders: pure functions from the engine's result to report rows (PLAN §8; ADR 0011, ADR 0040,
+ADR 0043; T-510). They return values; the CSV writing and the input hash are the caller's. The free text
+in them (`Row.override_reason`, `Row.disposal` and `Row.lot`, `Row.review`, `BrokerFee.description`,
+`IncomeRow.event` and `IncomeRow.source`, `Holding.lot` and `Holding.account`, every `replay_stopped`,
+the ids in every `late`, and whatever the caller passes as `blocking`) is the user's or an import's: the
+CSV writer must escape it against formula injection (T-702). The caller also adds what every report
+embeds besides the rule set and the stated positions (PLAN §8, T-507): the app version, the settings,
+the unsupported situations it doesn't model, and the input hash. A blocking condition of any year blocks
+every year's report (PLAN §7).
 
 **Form 8949** (`form_8949`): one row per allocation of a sale or spend in the tax year, the engine's
 lot-by-lot figures. A gift given never has a row, and neither does a fee: the engine makes no
@@ -21,6 +22,16 @@ disposal was made (`Sale`); `Sale.default` gives ADR 0011's defaults:
   1099-B reported it
 
 A row of an inherited lot reads "INHERITED" in column (b) instead of a date (`Row.inherited`).
+
+**Income** (`income_summary`): each `income` acquisition in the tax year, with its USD FMV at receipt
+(its basis, which is also ordinary income) and the source the caller names (PLAN §8).
+
+**Year summary** (`year_summary`): the tax year's realized short- and long-term proceeds, basis and
+gain, from the same allocations as Form 8949. **Holdings** (`holdings`): the lots an engine run up to a
+date left, each with its basis, its holding periods on that date and, given a price, its value and
+unrealized gain (a gift's by its dual basis: a gain over the donor's basis, a loss under the FMV at the
+gift with the gift date's holding period, none between). Every one of them is blocked as Form 8949 is,
+and carries the rule set, the stated positions, the late warnings and a stopped replay.
 
 **Blocked:** a report isn't built while anything blocks (ADR 0009, ADR 0041 §3, ADR 0043; PLAN §7):
 the engine's blocking conditions (unknown basis, missing lots), and those only the caller knows of,
@@ -45,15 +56,23 @@ from datetime import date
 from decimal import Decimal
 from typing import Final, Literal
 
-from coinacct.domain.money import add, signed_usd, usd
-from coinacct.tax.engine import Allocation, EngineError, LateIdentification, Result
+from coinacct.domain.chain import SATS_PER_BTC
+from coinacct.domain.money import add, signed_usd, subtract, usd, value_of
+from coinacct.tax.engine import (
+    Acquisition,
+    Allocation,
+    EngineError,
+    Event,
+    LateIdentification,
+    Result,
+    long_term,
+)
 from coinacct.tax.rules import BOXES, RULESET, Box, box, rules_for, y2024
 
 type Channel = Literal["exchange", "onchain"]
 
 SHORT_BOXES: Final[frozenset[str]] = frozenset("ABCGHI")
 BASIS_BOXES: Final[frozenset[str]] = frozenset("ADGJ")  # the boxes of sales a form reports with basis
-SATS_PER_BTC: Final = 100_000_000
 ZERO: Final = Decimal("0.00")
 COVERED_FROM: Final = date(2026, 1, 1)  # a digital asset bought from then is covered (ADR 0011)
 # The stated tax positions every report prints (PLAN §8), by the ADR that records each
@@ -303,11 +322,11 @@ def _covered(a: Allocation) -> bool:
 
 def _check_overrides(disposal: str, sale: Sale, tax_year: int) -> None:
     """Both of a sale's overrides, whether or not it has rows of that term."""
-    for chosen, long_term in ((sale.override_short, False), (sale.override_long, True)):
+    for chosen, is_long in ((sale.override_short, False), (sale.override_long, True)):
         if chosen is None:
             continue
-        if not isinstance(chosen, str) or chosen not in BOXES or (chosen in SHORT_BOXES) == long_term:
-            term = "long" if long_term else "short"
+        if not isinstance(chosen, str) or chosen not in BOXES or (chosen in SHORT_BOXES) == is_long:
+            term = "long" if is_long else "short"
             raise EngineError(f"disposal {disposal!r}: box {chosen!r} isn't one for its {term}-term rows")
         if (chosen in "ABCDEF") != (tax_year <= y2024.LAST_YEAR):
             year = f"{tax_year}"
@@ -356,3 +375,212 @@ def _totals(rows: list[Row]) -> tuple[Total, ...]:
             r.box, t.rows + 1, add(t.proceeds, r.proceeds), add(t.basis, r.basis), add(t.gain, r.gain)
         )
     return tuple(out[b] for b in sorted(out))
+
+
+@dataclass(frozen=True)
+class IncomeRow:
+    event: str
+    received: date
+    sats: int
+    fmv: Decimal  # USD at receipt: ordinary income, and the lot's basis
+    source: str | None  # who paid it (an employer, a pool), as the caller names it
+
+
+@dataclass(frozen=True)
+class IncomeSummary:
+    tax_year: int
+    rows: tuple[IncomeRow, ...]
+    total: Decimal
+    replay_stopped: str | None = None
+    late: tuple[LateIdentification, ...] = ()  # every late warning: the report shows them all
+    ruleset: str = RULESET
+    positions: tuple[str, ...] = POSITIONS
+
+
+def income_summary(
+    events: Sequence[Event],
+    result: Result,
+    tax_year: int,
+    *,
+    blocking: Sequence[object],
+    sources: Mapping[str, str] | None = None,
+) -> IncomeSummary | Blocked:
+    """The tax year's `income` acquisitions, by date, with their FMV and total (PLAN §8), or why it can't
+    be built: `result` is the engine's run of every event (`events`, checked), whose blocking conditions
+    of any year block it, as the caller's do (`blocking`, as for `form_8949`). `sources` names who paid
+    each income event; a row the caller names no source for has none (`source` None)."""
+    rules_for(tax_year)
+    _check_blocking(blocking)
+    _check_run(result, events)
+    named = {} if sources is None else sources
+    income = [e for e in result.events if isinstance(e, Acquisition) and e.kind == "income"]
+    if not isinstance(named, Mapping) or not all(
+        isinstance(k, str) and isinstance(v, str) and v for k, v in named.items()
+    ):
+        raise EngineError("sources maps income events to the names of who paid them")
+    if not set(named) <= {e.id for e in income}:
+        raise EngineError(
+            f"sources names events that aren't income: {sorted(set(named) - {e.id for e in income})}"
+        )
+    if result.blocking or blocking:
+        return Blocked((*result.blocking, *blocking))
+    rows = [
+        IncomeRow(e.id, e.on, e.sats, _usd(e.basis, e.id), named.get(e.id))
+        for e in income
+        if e.on.year == tax_year and e.basis is not None  # the engine refuses income without its FMV
+    ]
+    rows.sort(key=lambda r: (r.received, r.event))
+    return IncomeSummary(
+        tax_year, tuple(rows), _sum(r.fmv for r in rows), result.replay_stopped, tuple(result.late)
+    )
+
+
+@dataclass(frozen=True)
+class Term:
+    rows: int
+    proceeds: Decimal
+    basis: Decimal
+    gain: Decimal
+
+
+@dataclass(frozen=True)
+class YearSummary:
+    tax_year: int
+    short: Term
+    long: Term
+    replay_stopped: str | None = None
+    late: tuple[LateIdentification, ...] = ()  # every late warning, as on Form 8949
+    ruleset: str = RULESET
+    positions: tuple[str, ...] = POSITIONS
+
+
+def year_summary(
+    events: Sequence[Event], result: Result, tax_year: int, *, blocking: Sequence[object]
+) -> YearSummary | Blocked:
+    """The tax year's realized short- and long-term totals, from its sales' and spends' allocations, or
+    why it can't be built (the engine's blocking conditions and the caller's, as for `form_8949`).
+    `result` is the engine's run of every event (`events`, checked), so a block of any year blocks it.
+    """
+    rules_for(tax_year)
+    _check_blocking(blocking)
+    _check_run(result, events)
+    if result.blocking or blocking:
+        return Blocked((*result.blocking, *blocking))
+    terms = {False: Term(0, ZERO, ZERO, ZERO), True: Term(0, ZERO, ZERO, ZERO)}
+    for a in result.allocations:
+        if a.disposed.year == tax_year:
+            t = terms[a.long_term]
+            gain = subtract(a.proceeds, a.basis)
+            terms[a.long_term] = Term(
+                t.rows + 1, add(t.proceeds, a.proceeds), add(t.basis, a.basis), add(t.gain, gain)
+            )
+    return YearSummary(tax_year, terms[False], terms[True], result.replay_stopped, tuple(result.late))
+
+
+@dataclass(frozen=True)
+class Holding:
+    lot: str
+    account: str
+    acquired: date
+    sats: int
+    basis: Decimal  # the gain basis (a gift's donor basis)
+    loss_basis: Decimal | None  # a gift's FMV at the gift, where lower
+    loss_from: date | None  # and the gift date its holding period runs from
+    long_term: bool  # the gain side's holding period on the date asked about
+    loss_long_term: bool | None  # a gift's loss side's (None without a loss basis)
+    value: Decimal | None  # at the price given, if any
+    unrealized: Decimal | None  # gain over the gain basis, loss under the loss basis, none between
+
+
+@dataclass(frozen=True)
+class Holdings:
+    as_of: date
+    rows: tuple[Holding, ...]
+    replay_stopped: str | None = None
+    late: tuple[LateIdentification, ...] = ()
+    ruleset: str = RULESET
+    positions: tuple[str, ...] = POSITIONS
+
+
+def holdings(  # noqa: PLR0913 - the events, both runs, the date, the price and the caller's blocks
+    events: Sequence[Event],
+    result: Result,
+    upto: Result,
+    as_of: date,
+    price: Decimal | None = None,
+    *,
+    blocking: Sequence[object],
+) -> Holdings | Blocked:
+    """The lots `result` left, by account in the engine's order, with their holding periods on `as_of`
+    and, given a USD price per BTC, their value and unrealized gain (a gift's by its dual basis), or why
+    they can't be shown. `result` is the engine's run of every event (`events`), whose blocking conditions
+    of any date block them, as the caller's do; `upto` is its run of the events up to `as_of`, whose lots
+    are shown. Both are checked against `events`."""
+    _check_blocking(blocking)
+    if type(as_of) is not date:
+        raise EngineError("holdings are as of a date")
+    _check_run(result, events)
+    if upto.events != tuple(e for e in events if e.on <= as_of):
+        raise EngineError(f"upto is the engine's run of the events up to {as_of}: it took others")
+    btc = None if price is None else _usd(price, "the price")
+    if btc is not None and btc == ZERO:
+        raise EngineError("the price: a BTC price is at least a cent")
+    if result.blocking or blocking:
+        return Blocked((*result.blocking, *blocking))
+    rows: list[Holding] = []
+    for lot in upto.holdings:
+        value = None if btc is None else _value(lot.id, lot.sats, btc)
+        # the FMV side runs from the gift date alone: a donor's long-term status (an inheritance) carries
+        # over only with the donor's basis (Treas. Reg. §1.1223-1(b)), as the engine figures a sale
+        loss_long = None if lot.loss_from is None else long_term(lot.loss_from, as_of)
+        rows.append(
+            Holding(
+                lot.id,
+                lot.account,
+                lot.acquired,
+                lot.sats,
+                lot.basis,
+                lot.loss_basis,
+                lot.loss_from,
+                lot.always_long or long_term(lot.acquired, as_of),
+                loss_long,
+                value,
+                None if value is None else _unrealized(value, lot.basis, lot.loss_basis),
+            )
+        )
+    rows.sort(key=lambda h: h.account)  # stable: each account's lots stay in the engine's order
+    return Holdings(as_of, tuple(rows), upto.replay_stopped, tuple(upto.late))
+
+
+def _unrealized(value: Decimal, basis: Decimal, loss_basis: Decimal | None) -> Decimal:
+    """The gain or loss a sale at `value` would give: against the gain basis, or for a gift worth less
+    than its loss basis against that, and none between the two (ADR 0009; IRC §1015(a))."""
+    if loss_basis is None or value >= basis:
+        return subtract(value, basis)
+    if value < loss_basis:
+        return subtract(value, loss_basis)
+    return ZERO
+
+
+def _check_run(result: Result, events: Sequence[Event]) -> None:
+    if result.events != tuple(events):
+        raise EngineError("result is the engine's run of these events: it took others")
+
+
+def _value(lot: str, sats: int, price: Decimal) -> Decimal:
+    try:
+        return value_of(sats, price)
+    except (TypeError, ValueError):
+        raise EngineError(f"lot {lot!r}: its value at that price is too large") from None
+
+
+def _check_blocking(blocking: object) -> None:
+    if not isinstance(blocking, tuple | list):
+        raise EngineError("blocking is a list or tuple of the caller's blocking conditions")
+
+
+def _usd(value: Decimal, what: str) -> Decimal:
+    try:
+        return usd(value)
+    except (TypeError, ValueError) as e:
+        raise EngineError(f"{what}: {e}") from None
