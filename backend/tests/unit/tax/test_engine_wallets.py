@@ -14,13 +14,18 @@ from coinacct.tax.engine import (
     Coin,
     CoinLot,
     Disposal,
+    Drawn,
     EngineError,
     Event,
     Moved,
     Pick,
+    PoolLot,
+    Received,
     Spent,
     Transfer,
+    UnknownBasis,
     Untraced,
+    Wallet,
     WalletTx,
     run,
 )
@@ -33,7 +38,8 @@ AT = datetime(2025, 3, 1, 12, tzinfo=UTC)
 PAY = b"\x00\x14pay"
 CHANGE = b"\x00\x14chg"
 DEST = b"\x00\x14dst"
-WALLETS = frozenset({"w", "v"})
+START = datetime(2025, 1, 1, tzinfo=UTC)  # the wallets' tracking start
+WALLETS = {"w": Wallet(START), "v": Wallet(START)}
 
 # ADR 0041 §2's coin: 1 BTC, holding L1 (0.4, oldest, $10,000) and L2 (0.6, $30,000)
 COIN: list[Event] = [
@@ -395,9 +401,109 @@ def test_malformed_links_raise(coins: Any, match: str) -> None:
         run([Acquisition("L1", "w", DAY, "buy", 10, D("1.00"), coins=coins)], wallets=WALLETS)
 
 
-def test_wallets_is_a_frozenset_of_names() -> None:
-    with pytest.raises(EngineError, match="frozenset"):
-        run([], wallets={"w"})  # type: ignore[arg-type]
+@pytest.mark.parametrize(
+    "wallets", [{"w"}, {"w": None}, {"": Wallet(None)}, {"w": Wallet(datetime(2025, 1, 1))}]
+)
+def test_wallets_maps_names_to_wallets(wallets: Any) -> None:
+    with pytest.raises(EngineError, match=r"Wallets|tracking start"):
+        run([], wallets=wallets)
+
+
+# The pool (ADR 0041 §4): wallet lots on no coin; coins received from outside before the tracking start
+# draw from it, oldest first, and a shortfall is a placeholder of unknown basis.
+
+POOLED: list[Event] = [
+    Acquisition("P1", "w", date(2024, 1, 1), "buy", 600, D("6.00")),
+    Acquisition("P2", "w", date(2024, 2, 1), "buy", 600, D("12.00")),
+]
+
+
+def received(id: str, outpoint: str, value: int, on: date = date(2024, 6, 1), hour: int = 12) -> Received:
+    return Received(id, "w", on, datetime(on.year, on.month, on.day, hour, tzinfo=UTC), outpoint, value)
+
+
+def test_a_coin_received_before_the_tracking_start_draws_from_the_pool_oldest_first() -> None:
+    result = run([*POOLED, received("r1", "a:0", 1_000)], wallets=WALLETS)
+    assert result.draws == (Drawn("r1", "a:0", "P1", 600), Drawn("r1", "a:0", "P2", 400))
+    assert set(result.coins) == {CoinLot("a:0", "P1", 600), CoinLot("a:0", "P2", 400)}
+    assert result.pool == (PoolLot("w", "P2", 200),)  # left over: shown as a warning
+    assert result.blocking == ()
+
+
+def test_linked_sats_never_enter_the_pool() -> None:
+    linked = Acquisition("L", "w", date(2024, 3, 1), "buy", 300, D("3.00"), coins=(Coin("a:0", 300, 1_000),))
+    result = run([*POOLED, linked, received("r1", "a:0", 1_000)], wallets=WALLETS)
+    assert set(result.coins) == {
+        CoinLot("a:0", "L", 300),
+        CoinLot("a:0", "P1", 600),
+        CoinLot("a:0", "P2", 100),
+    }
+
+
+def test_only_lots_already_in_the_pool_count() -> None:
+    # P2 reached the user after the coin arrived (it comes later in time order): it can't be on it, so
+    # the rest is a placeholder
+    late_lot = Acquisition("P2", "w", date(2024, 7, 1), "buy", 600, D("12.00"))
+    result = run([POOLED[0], received("r1", "a:0", 1_000), late_lot], wallets=WALLETS)
+    assert result.draws == (Drawn("r1", "a:0", "P1", 600),)
+    (placeholder,) = result.placeholders
+    assert (placeholder.id, placeholder.sats, placeholder.unknown_basis) == ("r1@@placeholder", 400, True)
+    assert UnknownBasis("r1@@placeholder") in result.blocking
+    assert result.pool == (PoolLot("w", "P2", 600),)
+
+
+def test_a_pool_draw_is_spent_like_any_coin() -> None:
+    spend = Disposal("s", "w", DAY, AT, "spend", 900, D("90.00"))
+    tx = wtx(spend, [Output(0, 900, PAY, event="s")], inputs=(Spent("a:0", 1_000, "w"),))
+    result = run([*POOLED, received("r1", "a:0", 1_000), tx], wallets=WALLETS)
+    # the spend takes the coin's P1 600 and P2 300; the 100-sat fee is P2's too, its basis in P2's row
+    assert [(a.lot, a.sats, a.basis) for a in result.allocations] == [
+        ("P1", 600, D("6.00")),
+        ("P2", 300, D("8.00")),
+    ]
+
+
+def test_a_coin_received_after_the_tracking_start_that_no_link_covers_blocks() -> None:
+    result = run([*POOLED, received("r1", "a:0", 1_000, on=date(2025, 2, 1))], wallets=WALLETS)
+    assert result.blocking == (
+        Untraced(
+            "r1", "unrecorded_receipt", "1000 sats of a:0 no link covers, received after the tracking start"
+        ),
+    )
+    assert result.draws == ()
+
+
+def test_a_wallet_without_a_tracking_start_blocks_its_received_coins() -> None:
+    result = run([*POOLED, received("r1", "a:0", 1_000)], wallets={"w": Wallet(None)})
+    assert [b.reason for b in result.blocking if isinstance(b, Untraced)] == ["no_tracking_start"]
+
+
+def test_a_linked_coin_draws_nothing() -> None:
+    linked = Acquisition(
+        "L", "w", date(2024, 3, 1), "buy", 1_000, D("3.00"), coins=(Coin("a:0", 1_000, 1_000),)
+    )
+    result = run([*POOLED, linked, received("r1", "a:0", 1_000, on=date(2025, 2, 1))], wallets=WALLETS)
+    assert result.draws == () and result.blocking == ()
+
+
+@pytest.mark.parametrize(
+    ("events", "match"),
+    [
+        ([Received("r", "x", DAY, AT, "a:0", 1)], "isn't a coin-traced wallet"),
+        ([Received("r", "w", DAY, AT, "a0", 1)], "names its outpoint"),
+        ([Received("r", "w", DAY, AT, "a:0", 1), Received("r2", "w", DAY, AT, "a:0", 1)], "received already"),
+        (
+            [
+                Acquisition("L", "w", DAY, "buy", 1, D("1.00"), coins=(Coin("a:0", 1, 5),)),
+                Received("r", "w", DAY, AT, "a:0", 6),
+            ],
+            "another value",
+        ),
+    ],
+)
+def test_invalid_received_coins_raise(events: list[Event], match: str) -> None:
+    with pytest.raises(EngineError, match=match):
+        run(events, wallets=WALLETS)
 
 
 def test_a_fee_lot_with_no_row_joins_the_oldest_row_which_keeps_its_date_adr0043() -> None:
