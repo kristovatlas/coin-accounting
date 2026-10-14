@@ -11,8 +11,10 @@ run (THREAT_MODEL T-501, T-507, T-508).
   sats less the fee, at the full cash paid. A movement's fee is the engine's `fee_sats`.
 - **Choices.** An event's stored choice of lots becomes its picks, with when it was made; an event
   without one uses its account's standing method. So does every event of an account in automatic mode
-  (ADR 0021 §1, the default): the app selects its lots by the standing method, a stored choice is not
-  used, and nothing there is late.
+  over a FIFO standing order or none (ADR 0021 §1, the default): the app selects its lots by the
+  standing method, a stored choice is not used, and nothing there is late. A choice naming a lot such
+  a movement moved isn't used either, since the standing method may move other lots
+  (`ignored_choices`). The run lists the events whose stored choice it didn't use.
 - **Methods.** An account's standing order of FIFO is passed on; a standing order of specific
   identification, or none, leaves FIFO, the engine's only standing method and the statutory fallback.
 
@@ -22,6 +24,7 @@ The engine refuses input it can't use (`EngineError`); the run then stops, and t
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -35,17 +38,41 @@ from coinacct.tax.engine import Acquisition, Disposal, Event, Method, Pick, Resu
 type Chosen = Mapping[int, tuple[tuple[Choice, ...], datetime]]
 
 
+def _moved_by(lot: str) -> set[int]:
+    """The event ids a lot id passes through after its origin: `<origin>@<move>@<move>…`, before any
+    `#<vout>` (the engine names a moved lot `<lot>@<movement>`)."""
+    parts = lot.split("#", 1)[0].split("@")[1:]
+    return {int(p) for p in parts if p.isdigit()}
+
+
+def ignored_choices(stored: Sequence[Stored], chosen: Chosen, automatic: frozenset[int]) -> frozenset[int]:
+    """The events whose stored choice the run doesn't use: those of accounts in automatic mode (ADR 0021
+    §1), and, in turn, any choice naming a lot one of those movements moved, since its standing method
+    may move other lots, so that choice could name a lot the run never makes."""
+    account = {s.id: s.event.account for s in stored}
+    ignored = {i for i in chosen if account.get(i) in automatic}
+    while True:
+        more = {
+            i
+            for i, (picks, _) in chosen.items()
+            if i not in ignored and any(_moved_by(p.lot) & ignored for p in picks)
+        }
+        if not more:
+            return frozenset(ignored)
+        ignored |= more
+
+
 def engine_events(
-    stored: Sequence[Stored], chosen: Chosen, zone: ZoneInfo, automatic: frozenset[int] = frozenset()
+    stored: Sequence[Stored], chosen: Chosen, zone: ZoneInfo, ignored: frozenset[int] = frozenset()
 ) -> list[Event]:
     """The engine's input for `stored` (in the order of their moments), with their choices of lots. An
-    event of an account in `automatic` mode takes the standing method, whatever choice is stored."""
+    event in `ignored` (`ignored_choices`) takes its account's standing method, whatever choice is stored."""
     out: list[Event] = []
     for s in sorted(stored, key=lambda s: (s.event.at, s.id)):
         e = s.event
         on = e.at.astimezone(zone).date()
         ident, account = str(s.id), str(e.account)
-        choice = None if e.account in automatic else chosen.get(s.id)
+        choice = None if s.id in ignored else chosen.get(s.id)
         picks = None if choice is None else tuple(Pick(c.lot, c.sats) for c in choice[0])
         identified_at = None if choice is None else choice[1]
         if e.kind in ACQUISITIONS:
@@ -98,20 +125,31 @@ def standing_methods(tax_accounts: Sequence[accounts.TaxAccount]) -> dict[str, M
     return {str(a.id): "fifo" for a in tax_accounts if a.standing_method == "fifo"}
 
 
+@dataclass(frozen=True, slots=True)
+class Run:
+    inputs: list[Event]
+    result: Result
+    ignored: tuple[int, ...]  # events whose stored choice of lots wasn't used (`ignored_choices`)
+
+
 class Ledger:
     """The engine's run of everything stored, for the API's ledger and report routes."""
 
     def __init__(self, open_reader: Callable[[], Connection]) -> None:
         self._open_reader = open_reader
 
-    def run(self) -> tuple[list[Event], Result]:
-        """The engine's input, from one snapshot of the user DB, and its run."""
+    def run(self) -> Run:
+        """The engine's input, from one snapshot of the user DB, its run, and the events whose stored
+        choice wasn't used. A damaged stored row or setting is refused with its remedy (T-408)."""
         with db_errors():
             reader = self._open_reader()
             try:
                 reader.execute("BEGIN")
-                stored = events.events(reader)
-                chosen = events.identifications(reader)
+                try:
+                    stored = events.events(reader)
+                    chosen = events.identifications(reader)
+                except events.EventError as e:  # its fixed message names the remedy (T-408)
+                    raise ImportRefused(str(e)) from None
                 tax_accounts = accounts.tax_accounts(reader)
                 methods = standing_methods(tax_accounts)
                 automatic = automatic_accounts(tax_accounts)
@@ -122,5 +160,6 @@ class Ledger:
                 reader.execute("COMMIT")
             finally:
                 reader.close()
-        inputs = engine_events(stored, chosen, zone, automatic)
-        return inputs, engine.run(inputs, methods)
+        ignored = ignored_choices(stored, chosen, automatic)
+        inputs = engine_events(stored, chosen, zone, ignored)
+        return Run(inputs, engine.run(inputs, methods), tuple(sorted(ignored)))

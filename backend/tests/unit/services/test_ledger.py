@@ -14,7 +14,13 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from coinacct.services.imports import ImportRefused
-from coinacct.services.ledger import Ledger, automatic_accounts, engine_events, standing_methods
+from coinacct.services.ledger import (
+    Ledger,
+    automatic_accounts,
+    engine_events,
+    ignored_choices,
+    standing_methods,
+)
 from coinacct.storage import accounts as ac
 from coinacct.storage import events as ev
 from coinacct.storage import settings
@@ -95,7 +101,8 @@ def test_the_ledger_runs_the_stored_events(db: tuple[sqlite3.Connection, Ledger]
     )
     ev.identify(conn, sale, (ev.Choice(str(bought), 400),), datetime(2025, 3, 1, 11, tzinfo=UTC), at=AT)
     settings.set_time_zone(conn, "America/New_York")
-    inputs, result = ledger.run()
+    run = ledger.run()
+    inputs, result = run.inputs, run.result
     assert [e.id for e in inputs] == [str(bought), str(sale)]
     (row,) = result.allocations
     assert (row.lot, row.sats, row.basis, row.proceeds, row.long_term) == (
@@ -112,10 +119,10 @@ def test_the_ledger_takes_tax_dates_in_the_stored_time_zone(db: tuple[sqlite3.Co
     conn, ledger = db
     wallet = ac.add_tax_account(conn, "Wallet", "self_custody")
     ev.add_event(conn, ev.Event("buy", wallet, datetime(2025, 1, 1, 3, tzinfo=UTC), 1_000, D("10.00")), at=AT)
-    (utc,), _ = ledger.run()
+    (utc,) = ledger.run().inputs
     assert utc.on == date(2025, 1, 1)  # UTC until the user sets a zone
     settings.set_time_zone(conn, "America/New_York")
-    (local,), _ = ledger.run()
+    (local,) = ledger.run().inputs
     assert local.on == date(2024, 12, 31)
 
 
@@ -134,7 +141,8 @@ def test_an_automatic_account_takes_the_standing_method_adr0021(
         conn, ev.Event("sell", x, datetime(2025, 3, 1, 12, tzinfo=UTC), 1_000, D("60.00")), at=AT
     )
     ev.identify(conn, sale, (ev.Choice(str(second), 1_000),), datetime(2025, 3, 1, 11, tzinfo=UTC), at=AT)
-    inputs, result = ledger.run()
+    run = ledger.run()
+    inputs, result = run.inputs, run.result
     (sold,) = [e for e in inputs if e.id == str(sale)]
     assert isinstance(sold, Disposal)
     assert sold.picks == (None if automatic else (Pick(str(second), 1_000),))
@@ -148,7 +156,7 @@ def test_engine_events_drops_a_choice_on_an_automatic_account() -> None:
     sale = ev.Stored(2, ev.Event("sell", 7, when, 1_000, D("50.00")))
     chosen = {2: ((ev.Choice("1", 1_000),), when)}
     (manual,) = engine_events([sale], chosen, NEW_YORK)
-    (auto,) = engine_events([sale], chosen, NEW_YORK, frozenset({7}))
+    (auto,) = engine_events([sale], chosen, NEW_YORK, frozenset({2}))
     assert isinstance(manual, Disposal) and isinstance(auto, Disposal)
     assert (manual.picks, auto.picks, auto.identified_at) == ((Pick("1", 1_000),), None, None)
 
@@ -167,4 +175,57 @@ def test_a_damaged_time_zone_keeps_its_remedy(db: tuple[sqlite3.Connection, Ledg
     conn, ledger = db
     conn.execute("INSERT INTO setting (key, value) VALUES ('time_zone', 'Not/A_Zone')")
     with pytest.raises(ImportRefused, match="set the time zone again"):
+        ledger.run()
+
+
+def test_a_choice_naming_a_lot_an_automatic_movement_moved_is_ignored_too(
+    db: tuple[sqlite3.Connection, Ledger],
+) -> None:
+    """An automatic wallet's deposit takes FIFO whatever its stored choice, so a manual exchange sale's
+    choice of the lot it would have moved could name a lot the run never makes: it is ignored too."""
+    conn, ledger = db
+    wallet = ac.add_tax_account(conn, "Wallet", "self_custody")  # automatic, the default
+    exchange = ac.add_entity(conn, "Some exchange", "exchange")
+    x = ac.add_tax_account(conn, "Exchange", "custodial", entity_id=exchange, automatic=False)
+    a = ev.add_event(
+        conn, ev.Event("buy", wallet, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT
+    )
+    b = ev.add_event(
+        conn, ev.Event("buy", wallet, datetime(2024, 2, 2, tzinfo=UTC), 1_000, D("20.00")), at=AT
+    )
+    deposit = ev.add_event(
+        conn, ev.Event("deposit", wallet, datetime(2024, 3, 2, tzinfo=UTC), 1_000, to=x), at=AT
+    )
+    ev.identify(conn, deposit, (ev.Choice(str(b), 1_000),), datetime(2024, 3, 2, tzinfo=UTC), at=AT)
+    sale = ev.add_event(conn, ev.Event("sell", x, datetime(2025, 3, 1, tzinfo=UTC), 1_000, D("60.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice(f"{b}@{deposit}", 1_000),), datetime(2025, 3, 1, tzinfo=UTC), at=AT)
+    run = ledger.run()  # doesn't stop on a lot the run never makes
+    assert run.ignored == (deposit, sale)
+    (row,) = run.result.allocations
+    assert row.lot == f"{a}@{deposit}"  # FIFO moved the oldest lot, and the sale took it
+
+
+def test_ignored_choices_follows_moves_transitively() -> None:
+    when = datetime(2025, 1, 1, tzinfo=UTC)
+    stored = [
+        ev.Stored(3, ev.Event("deposit", 1, when, 10, to=2)),
+        ev.Stored(4, ev.Event("withdrawal", 2, when, 10, to=5)),
+        ev.Stored(6, ev.Event("sell", 5, when, 10, D("1.00"))),
+        ev.Stored(7, ev.Event("sell", 5, when, 10, D("1.00"))),
+    ]
+    chosen = {
+        3: ((ev.Choice("1", 10),), when),
+        4: ((ev.Choice("1@3", 10),), when),
+        6: ((ev.Choice("1@3@4", 10),), when),
+        7: ((ev.Choice("8", 10),), when),  # names no lot the ignored movements moved
+    }
+    assert ignored_choices(stored, chosen, frozenset({1})) == {3, 4, 6}
+
+
+def test_a_damaged_stored_event_keeps_its_remedy(db: tuple[sqlite3.Connection, Ledger]) -> None:
+    conn, ledger = db
+    wallet = ac.add_tax_account(conn, "Wallet", "self_custody")
+    ev.add_event(conn, ev.Event("buy", wallet, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT)
+    conn.execute("UPDATE event SET usd = '1.001'")
+    with pytest.raises(ImportRefused, match="restore the user DB from a backup"):
         ledger.run()
