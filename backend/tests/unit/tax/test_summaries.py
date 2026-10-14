@@ -59,7 +59,7 @@ def test_the_year_summary_totals_each_term() -> None:
         sell("s1", date(2025, 6, 1), 1_500, "60.00"),  # old 1,000 (long) for 40.00, new 500 (short) for 20.00
         sell("s2", date(2026, 1, 5), 500, "30.00"),
     ]
-    summary = year_summary(run(events), 2025)
+    summary = year_summary(run(events), 2025, blocking=())
     assert summary == YearSummary(
         2025,
         short=Term(1, D("20.00"), D("20.00"), D("0.00")),
@@ -70,7 +70,16 @@ def test_the_year_summary_totals_each_term() -> None:
 
 def test_the_year_summary_is_blocked_while_anything_blocks() -> None:
     result = run([sell("s", date(2025, 6, 1), 10, "1.00")])
-    assert year_summary(result, 2025) == Blocked(result.blocking)
+    assert year_summary(result, 2025, blocking=()) == Blocked(result.blocking)
+
+
+def test_the_year_summary_is_blocked_by_the_callers_conditions_too() -> None:
+    result = run([Acquisition("b", "x", date(2025, 1, 2), "buy", 10, D("1.00"))])
+    assert year_summary(result, 2025, blocking=["unconfirmed tx"]) == Blocked(("unconfirmed tx",))
+    with pytest.raises(EngineError, match="list or tuple"):
+        year_summary(result, 2025, blocking=iter(()))  # type: ignore[arg-type]
+    with pytest.raises(EngineError):
+        year_summary(result, 2012, blocking=())
 
 
 def test_holdings_show_the_holding_period_on_the_date_and_the_unrealized_gain() -> None:

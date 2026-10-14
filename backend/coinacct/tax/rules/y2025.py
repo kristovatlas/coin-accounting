@@ -8,7 +8,9 @@ disposal, say). https://www.irs.gov/instructions/i8949
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
+
+FIRST_YEAR: Final = 2025  # its first year; no coin is covered (basis reported) until 2026 (ADR 0011)
 
 
 def box(long_term: bool, reported: bool, basis_reported: bool) -> Literal["G", "H", "I", "J", "K", "L"]:
