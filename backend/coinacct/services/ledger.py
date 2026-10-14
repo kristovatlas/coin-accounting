@@ -13,14 +13,20 @@ run (THREAT_MODEL T-501, T-507, T-508).
   without one uses its account's standing method. So does every event of an account in automatic mode
   over a FIFO standing order or none (ADR 0021 §1, the default): the app selects its lots by the
   standing method, a stored choice is not used, and nothing there is late. A choice that went stale,
-  naming a lot the run doesn't make or fewer sats than it holds (an edit elsewhere moved other lots),
-  takes the standing method too: the engine refuses it, and the run drops that choice and runs again.
-  A choice naming a lot the run does make stands. The run lists the events whose stored choice it
-  didn't use.
+  naming a lot the run doesn't make, more sats than that lot holds, or lots of an account the run
+  leaves without any (an edit elsewhere moved other lots, or, until #313, the choice named another
+  account's lot), takes the standing method too: the engine refuses it, and the run drops that choice
+  and runs again. A withdrawal's stored basis for unrecorded sats is the event's own data, not a
+  choice, so an account that has lots after an edit still refuses it, naming the event. So does a
+  transfer's choice that leaves too few other sats for its fee: its lots are still held, and the
+  standing method for the whole transfer would move other lots (ADR 0043). A choice naming a lot the
+  run does make stands. The run lists both apart: automatic mode's unused choices, and the stale
+  ones, which a report shows with a warning, since the user's identification wasn't used.
 - **Methods.** An account's standing order of FIFO is passed on; a standing order of specific
   identification, or none, leaves FIFO, the engine's only standing method and the statutory fallback.
 
-The engine refuses input it can't use (`EngineError`); the run then stops, and the caller shows why.
+The engine refuses input it can't use (`EngineError`); the run then stops with a fixed message naming
+the event (`refused`), which the API shows as a 422.
 """
 
 from __future__ import annotations
@@ -37,7 +43,36 @@ from coinacct.storage import accounts, events, settings
 from coinacct.storage.db import Connection
 from coinacct.storage.events import ACQUISITIONS, DISPOSALS, Choice, Stored
 from coinacct.tax import engine
-from coinacct.tax.engine import Acquisition, Disposal, Event, Method, Pick, Result, Transfer
+from coinacct.tax.engine import (
+    Acquisition,
+    Allocation,
+    Disposal,
+    Event,
+    GiftGiven,
+    Method,
+    MissingLots,
+    Moved,
+    Pick,
+    Result,
+    Transfer,
+    UnknownBasis,
+)
+
+# the engine's result types are re-exported for the API, which imports only services (architecture §2)
+__all__ = [
+    "Allocation",
+    "GiftGiven",
+    "Ledger",
+    "MissingLots",
+    "Moved",
+    "Run",
+    "UnknownBasis",
+    "automatic_accounts",
+    "engine_events",
+    "ignored_choices",
+    "refused",
+    "standing_methods",
+]
 
 type Chosen = Mapping[int, tuple[tuple[Choice, ...], datetime]]
 
@@ -49,18 +84,42 @@ def ignored_choices(stored: Sequence[Stored], chosen: Chosen, automatic: frozens
     return frozenset(i for i in chosen if account.get(i) in automatic)
 
 
-# the engine's refusal of a stored choice naming a lot the run doesn't make, or with fewer sats than
-# chosen (`tax.engine` `_checked_picks`): the choice went stale after an edit elsewhere
+# the engine's refusal of a stored choice naming a lot the run doesn't make, more sats than a lot holds
+# (`tax.engine` `_checked_picks`), or lots in an account the run leaves without any
+# (`_unrecorded_if_needed`): the choice went stale after an edit elsewhere, or, until a choice is
+# checked when it is made (#313), named another account's lot. A transfer's choice that leaves too few
+# other sats for its fee (`_with_fee`) is not stale: its lots are still held, and taking the standing
+# method for all of it would move other lots than the user identified (ADR 0043), so that refusal
+# stops the run, naming the event (#317)
 _STALE: Final = re.compile(
-    r"event '([1-9][0-9]{0,18})': lot .* (?:isn't held in account|holds fewer sats than chosen)", re.ASCII
+    r"(?:event '(?P<event>[1-9][0-9]{0,18})': "
+    r"(?:lot '[0-9A-Za-z_.:@#-]{1,400}' (?:isn't held in account '[1-9][0-9]{0,18}'"
+    r"|holds fewer sats than chosen)$)"
+    r"|transfer '(?P<transfer>[1-9][0-9]{0,18})': an account without lots has none to choose$)",
+    re.ASCII,
 )
+# the event an engine refusal names, as `str(id)` of a stored event (`engine_events`)
+_REFUSED: Final = re.compile(r"(?:event|acquisition|disposal|transfer|gift) '([1-9][0-9]{0,18})'", re.ASCII)
 
 
 def _stale_choice(error: engine.EngineError, chosen: Chosen, ignored: set[int]) -> int | None:
     """The event whose stored choice `error` refuses as stale, if it is one the run can ignore."""
     match = _STALE.match(str(error))
-    event_id = None if match is None else int(match.group(1))
+    event_id = None if match is None else int(match.group("event") or match.group("transfer"))
     return event_id if event_id in chosen and event_id not in ignored else None
+
+
+def refused(error: engine.EngineError) -> ImportRefused:
+    """The engine's refusal as a fixed message naming only the event's id: the engine's own text can
+    repeat stored lot ids and kinds (T-403)."""
+    match = _REFUSED.match(str(error))
+    if match is None:
+        return ImportRefused(
+            "the lot engine can't use the stored events: check them, or restore from a backup"
+        )
+    return ImportRefused(
+        f"the lot engine can't use event {int(match.group(1))} as stored: check it, its accounts and its lots"
+    )
 
 
 def engine_events(
@@ -130,7 +189,13 @@ def standing_methods(tax_accounts: Sequence[accounts.TaxAccount]) -> dict[str, M
 class Run:
     inputs: list[Event]
     result: Result
-    ignored: tuple[int, ...]  # events whose stored choice of lots wasn't used (`ignored_choices`)
+    automatic: tuple[int, ...]  # events whose stored choice wasn't used: automatic mode (ADR 0021 §1)
+    stale: tuple[int, ...]  # events whose stored choice went stale and took the standing method: warn
+
+    @property
+    def ignored(self) -> tuple[int, ...]:
+        """Every event whose stored choice of lots wasn't used."""
+        return tuple(sorted(self.automatic + self.stale))
 
 
 class Ledger:
@@ -161,15 +226,17 @@ class Ledger:
                 reader.execute("COMMIT")
             finally:
                 reader.close()
-        ignored = set(ignored_choices(stored, chosen, automatic))
-        while True:  # at most once per stored choice
-            inputs = engine_events(stored, chosen, zone, frozenset(ignored))
+        unused = ignored_choices(stored, chosen, automatic)
+        ignored, stale = set(unused), set[int]()
+        while True:  # at most once per stored choice; each run is a whole engine run, accepted
             try:
+                inputs = engine_events(stored, chosen, zone, frozenset(ignored))
                 result = engine.run(inputs, methods)
             except engine.EngineError as e:
-                stale = _stale_choice(e, chosen, ignored)
-                if stale is None:
-                    raise
-                ignored.add(stale)  # the stale choice takes the standing method, and is listed
+                event_id = _stale_choice(e, chosen, ignored)
+                if event_id is None:
+                    raise refused(e) from None
+                ignored.add(event_id)  # the stale choice takes the standing method, and is listed
+                stale.add(event_id)
                 continue
-            return Run(inputs, result, tuple(sorted(ignored)))
+            return Run(inputs, result, tuple(sorted(unused)), tuple(sorted(stale)))

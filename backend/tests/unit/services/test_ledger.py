@@ -16,8 +16,10 @@ import pytest
 from coinacct.services.imports import ImportRefused
 from coinacct.services.ledger import (
     Ledger,
+    _stale_choice,
     automatic_accounts,
     engine_events,
+    refused,
     standing_methods,
 )
 from coinacct.storage import accounts as ac
@@ -150,7 +152,7 @@ def test_an_automatic_account_takes_the_standing_method_adr0021(
     (row,) = result.allocations
     assert row.lot == {"first": str(first), "second": str(second)}[lot]  # FIFO's oldest, or the choice
     assert result.late == ()
-    assert run.ignored == ((sale,) if automatic else ())
+    assert (run.automatic, run.stale) == (((sale,) if automatic else ()), ())
 
 
 def test_engine_events_drops_a_choice_on_an_automatic_account() -> None:
@@ -202,7 +204,10 @@ def test_a_choice_naming_a_lot_an_automatic_movement_moved_is_ignored_too(
     sale = ev.add_event(conn, ev.Event("sell", x, datetime(2025, 3, 1, tzinfo=UTC), 1_000, D("60.00")), at=AT)
     ev.identify(conn, sale, (ev.Choice(f"{b}@{deposit}", 1_000),), datetime(2025, 3, 1, tzinfo=UTC), at=AT)
     run = ledger.run()  # doesn't stop on a lot the run never makes
-    assert run.ignored == (deposit, sale)  # the deposit's (automatic) and the now stale sale's
+    assert (run.automatic, run.stale) == (
+        (deposit,),
+        (sale,),
+    )  # the deposit's (automatic), the now stale sale's
     (row,) = run.result.allocations
     assert row.lot == f"{a}@{deposit}"  # FIFO moved the oldest lot, and the sale took it
 
@@ -250,7 +255,7 @@ def test_a_choice_stale_after_a_movement_without_one_falls_back(
     sale = ev.add_event(conn, ev.Event("sell", x, datetime(2025, 3, 1, tzinfo=UTC), 1_000, D("60.00")), at=AT)
     ev.identify(conn, sale, (ev.Choice(f"{b}@{deposit}", 1_000),), datetime(2025, 3, 1, tzinfo=UTC), at=AT)
     run = ledger.run()
-    assert run.ignored == (sale,)
+    assert (run.automatic, run.stale, run.ignored) == ((), (sale,), (sale,))
     (row,) = run.result.allocations
     assert row.lot == f"{a}@{deposit}"
 
@@ -265,8 +270,9 @@ def test_an_engine_refusal_that_isnt_a_stale_choice_still_stops_the_run(
     ev.add_event(
         conn, ev.Event("self_transfer", wallet, datetime(2024, 3, 2, tzinfo=UTC), 1_000, to=cold), at=AT
     )
-    with pytest.raises(engine.EngineError):
+    with pytest.raises(ImportRefused) as refused:
         ledger.run()
+    assert str(refused.value).startswith("the lot engine can't use event ")
 
 
 def test_a_damaged_stored_event_keeps_its_remedy(db: tuple[sqlite3.Connection, Ledger]) -> None:
@@ -276,3 +282,131 @@ def test_a_damaged_stored_event_keeps_its_remedy(db: tuple[sqlite3.Connection, L
     conn.execute("UPDATE event SET usd = '1.001'")
     with pytest.raises(ImportRefused, match="restore the user DB from a backup"):
         ledger.run()
+
+
+def test_a_choice_of_more_sats_than_its_lot_still_holds_falls_back(
+    db: tuple[sqlite3.Connection, Ledger],
+) -> None:
+    """A sale without a choice takes 600 of the only lot; a later sale's choice of 500 of it is stale."""
+    conn, ledger = db
+    wallet = ac.add_tax_account(conn, "Wallet", "self_custody", automatic=False)
+    a = ev.add_event(
+        conn, ev.Event("buy", wallet, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT
+    )
+    ev.add_event(conn, ev.Event("sell", wallet, datetime(2024, 6, 1, tzinfo=UTC), 600, D("9.00")), at=AT)
+    later = ev.add_event(
+        conn, ev.Event("sell", wallet, datetime(2025, 6, 1, tzinfo=UTC), 500, D("9.00")), at=AT
+    )
+    ev.identify(conn, later, (ev.Choice(str(a), 500),), datetime(2025, 6, 1, tzinfo=UTC), at=AT)
+    run = ledger.run()
+    assert (run.automatic, run.stale) == ((), (later,))
+    assert [(r.disposal, r.lot, r.sats) for r in run.result.allocations][-1] == (str(later), str(a), 400)
+    assert [type(b).__name__ for b in run.result.blocking] == ["MissingLots"]  # the 100 sats it lacks
+
+
+def test_a_transfers_choice_leaving_no_sats_for_its_fee_stops_the_run_naming_it(
+    db: tuple[sqlite3.Connection, Ledger],
+) -> None:
+    """A deposit chose the 1,980 sats that arrive; an earlier sale added later took the sats its fee
+    needed. Its chosen lots are still held, so the choice isn't stale: FIFO for the whole deposit would
+    move other lots than the user's (ADR 0043). The run stops, naming the deposit."""
+    conn, ledger = db
+    wallet = ac.add_tax_account(conn, "Wallet", "self_custody", automatic=False)
+    exchange = ac.add_entity(conn, "Some exchange", "exchange")
+    x = ac.add_tax_account(conn, "Exchange", "custodial", entity_id=exchange, automatic=False)
+    a = ev.add_event(
+        conn, ev.Event("buy", wallet, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT
+    )
+    b = ev.add_event(
+        conn, ev.Event("buy", wallet, datetime(2024, 1, 3, tzinfo=UTC), 1_000, D("10.00")), at=AT
+    )
+    c = ev.add_event(conn, ev.Event("buy", wallet, datetime(2024, 1, 4, tzinfo=UTC), 20, D("1.00")), at=AT)
+    deposit = ev.add_event(
+        conn, ev.Event("deposit", wallet, datetime(2024, 3, 2, tzinfo=UTC), 1_990, to=x, fee_sats=10), at=AT
+    )
+    picks = (ev.Choice(str(a), 1_000), ev.Choice(str(b), 980))
+    ev.identify(conn, deposit, picks, datetime(2024, 3, 2, tzinfo=UTC), at=AT)
+    assert ledger.run().stale == ()  # c's 20 sats pay the fee
+    sale = ev.add_event(
+        conn, ev.Event("sell", wallet, datetime(2024, 2, 1, tzinfo=UTC), 40, D("1.00")), at=AT
+    )
+    ev.identify(
+        conn, sale, (ev.Choice(str(c), 20), ev.Choice(str(b), 20)), datetime(2024, 2, 1, tzinfo=UTC), at=AT
+    )
+    with pytest.raises(ImportRefused) as refusal:
+        ledger.run()
+    assert str(refusal.value) == NAMED.format(deposit)
+
+
+NAMED = "the lot engine can't use event {} as stored: check it, its accounts and its lots"
+UNNAMED = "the lot engine can't use the stored events: check them, or restore from a backup"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("event '12': lot 'x' isn't held in account '3'", NAMED.format(12)),
+        ("transfer '7': its fee is a whole number of sats below the sats it moves", NAMED.format(7)),
+        ("gift '9': its FMV basis is above the donor's", NAMED.format(9)),
+        ("an event names its id and its account", UNNAMED),
+        ("event 'x@1' appears twice", UNNAMED),
+        ("event '012' appears twice", UNNAMED),
+    ],
+)
+def test_an_engine_refusal_names_only_the_event_t403(message: str, expected: str) -> None:
+    assert str(refused(engine.EngineError(message))) == expected
+
+
+def test_a_withdrawals_choice_in_an_account_left_without_lots_falls_back(
+    db: tuple[sqlite3.Connection, Ledger],
+) -> None:
+    """A deposit without a choice moved lot a into the exchange, and a withdrawal chose it there; a sale
+    added before the deposit takes a, so the exchange gets no lots and the choice names none: it is
+    stale, and the withdrawal's sats become an unrecorded lot of unknown basis."""
+    conn, ledger = db
+    wallet = ac.add_tax_account(conn, "Wallet", "self_custody")
+    exchange = ac.add_entity(conn, "Some exchange", "exchange")
+    x = ac.add_tax_account(conn, "Exchange", "custodial", entity_id=exchange, automatic=False)
+    cold = ac.add_tax_account(conn, "Cold", "self_custody")
+    a = ev.add_event(
+        conn, ev.Event("buy", wallet, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT
+    )
+    deposit = ev.add_event(
+        conn, ev.Event("deposit", wallet, datetime(2024, 3, 2, tzinfo=UTC), 1_000, to=x), at=AT
+    )
+    out = ev.add_event(
+        conn, ev.Event("withdrawal", x, datetime(2024, 4, 2, tzinfo=UTC), 1_000, to=cold), at=AT
+    )
+    ev.identify(conn, out, (ev.Choice(f"{a}@{deposit}", 1_000),), datetime(2024, 4, 2, tzinfo=UTC), at=AT)
+    assert ledger.run().stale == ()
+    ev.add_event(conn, ev.Event("sell", wallet, datetime(2024, 2, 1, tzinfo=UTC), 1_000, D("20.00")), at=AT)
+    run = ledger.run()
+    assert (run.automatic, run.stale) == ((), (out,))
+    assert [type(b).__name__ for b in run.result.blocking] == ["MissingLots", "UnknownBasis"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "event '4': lot '1@3' isn't held in account '2'",
+        "event '4': lot '1@3' holds fewer sats than chosen",
+        "transfer '4': an account without lots has none to choose",
+    ],
+)
+def test_only_the_stale_refusals_count_as_stale(message: str) -> None:
+    chosen = {4: ((ev.Choice("1@3", 10),), datetime(2025, 1, 1, tzinfo=UTC))}
+    assert _stale_choice(engine.EngineError(message), chosen, set()) == 4
+    assert _stale_choice(engine.EngineError(message + " and more"), chosen, set()) is None  # anchored
+    assert _stale_choice(engine.EngineError(message), chosen, {4}) is None  # once only
+
+
+def test_a_fee_short_choice_isnt_stale_adr0043() -> None:
+    chosen = {4: ((ev.Choice("1@3", 10),), datetime(2025, 1, 1, tzinfo=UTC))}
+    fee = "event '4': the account holds too few sats for the fee besides the chosen lots"
+    assert _stale_choice(engine.EngineError(fee), chosen, set()) is None
+
+
+def test_a_lot_id_cant_make_another_refusal_look_stale() -> None:
+    chosen = {4: ((ev.Choice("x", 10),), datetime(2025, 1, 1, tzinfo=UTC))}
+    forged = "event '4': lot 'x' isn't held in account '2' was named, and the chosen lots don't add up"
+    assert _stale_choice(engine.EngineError(forged), chosen, set()) is None

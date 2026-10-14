@@ -25,6 +25,11 @@ Routes:
   (every event with its choice of lots), `POST /api/events` (add), `/api/events/update`,
   `/api/events/remove` and `/api/events/identify` (when, from the app's clock). An unknown event is
   404, a refusal 422 with a fixed message, a busy DB 503.
+- Ledger (bearer; PLAN §7, ADR 0021 §1, T-507, T-508), through `services.ledger.Ledger`:
+  `GET /api/ledger`, the lot engine's run of every stored event: each disposal's lots, each gift's and
+  each move's, the lots held, the late choices with the standing method's figures, what blocks a
+  report, and which stored choices weren't used (automatic mode's, and stale ones, to warn about). A
+  refusal is a 422 with a fixed message naming at most the event's id, a busy DB 503.
 - History (bearer; PLAN §3), through `services.history.History`, from the chain cache only, as of the
   last finished sync (`as_of`; each address's `scanned_to` says how far its own history is scanned):
   - `GET /api/addresses[?tax_account_id=N]`: every address, with its owner, balance, UTXO count and
@@ -62,6 +67,7 @@ from coinacct.domain.chain import MAX_SATS
 from coinacct.domain.keys import PrivateKeyError
 from coinacct.services import events as event_service
 from coinacct.services import imports as import_service
+from coinacct.services import ledger as ledger_service
 from coinacct.services.graph import Graph, NotFound
 from coinacct.services.history import History
 from coinacct.services.imports import Busy, ImportRefused, Imports, OfflineError, Owner
@@ -166,6 +172,7 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
     graph: Graph | None = None,
     tagging: Tagging | None = None,
     events: event_service.Events | None = None,
+    ledger: ledger_service.Ledger | None = None,
 ) -> SecurityMiddleware:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -257,6 +264,8 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
         _tag_routes(app, tagging, authenticated)
     if events is not None:
         _event_routes(app, events, authenticated)
+    if ledger is not None:
+        _ledger_routes(app, ledger, authenticated)
     return SecurityMiddleware(app, port=port)
 
 
@@ -641,6 +650,104 @@ def _event_routes(app: FastAPI, service: event_service.Events, authenticated: li
         choices = tuple(event_service.Choice(c.lot, c.sats) for c in body.choices)
         service.identify(body.id, choices)
         return {"id": body.id}
+
+
+def _usd(amount: Decimal) -> str:
+    return format(amount, "f")  # never an exponent
+
+
+def _part(part: Any) -> dict[str, Any]:
+    """A disposal's lot, a gift given's or a move's, as the ledger and the late warnings show them."""
+    out: dict[str, Any] = {"lot": part.lot, "sats": part.sats, "basis": _usd(part.basis)}
+    out["acquired"] = part.acquired.isoformat()
+    if isinstance(part, ledger_service.Allocation):
+        out |= {
+            "event": int(part.disposal),
+            "proceeds": _usd(part.proceeds),
+            "disposed": part.disposed.isoformat(),
+            "long_term": part.long_term,
+            "rule": part.rule,
+            "lot_basis": _maybe_usd(part.lot_basis),
+            "lot_loss_basis": _maybe_usd(part.lot_loss_basis),
+        }
+    elif isinstance(part, ledger_service.GiftGiven):
+        out |= {
+            "event": int(part.disposal),
+            "unknown_basis": part.unknown_basis,
+            "always_long": part.always_long,
+        }
+    elif isinstance(part, ledger_service.Moved):
+        out |= {
+            "event": int(part.transfer),
+            "into": part.into,
+            "to": int(part.to),
+            "carried_fee": part.carried_fee,
+            "carried_from": list(part.carried_from),
+        }
+    else:  # pragma: no cover - the engine has no other kind of part
+        raise TypeError("an unknown kind of lot part")
+    return out
+
+
+def _blocking(item: Any) -> dict[str, Any]:
+    if isinstance(item, ledger_service.MissingLots):
+        return {
+            "kind": "missing_lots",
+            "event": int(item.disposal),
+            "sats": item.sats,
+            "proceeds": _usd(item.proceeds),
+        }
+    if isinstance(item, ledger_service.UnknownBasis):
+        return {"kind": "unknown_basis", "lot": item.lot}
+    raise TypeError("an unknown kind of blocking item")  # pragma: no cover - the engine has no other
+
+
+def _maybe_usd(amount: Decimal | None) -> str | None:
+    return None if amount is None else _usd(amount)
+
+
+def _lot(lot: Any) -> dict[str, Any]:
+    return {
+        "lot": lot.id,
+        "account": int(lot.account),
+        "acquired": lot.acquired.isoformat(),
+        "sats": lot.sats,
+        "basis": _usd(lot.basis),
+        "loss_basis": _maybe_usd(lot.loss_basis),
+        "loss_from": None if lot.loss_from is None else lot.loss_from.isoformat(),
+        "always_long": lot.always_long,
+        "unknown_basis": lot.unknown_basis,
+    }
+
+
+def _ledger_json(run: ledger_service.Run) -> dict[str, Any]:
+    r = run.result
+    return {
+        "automatic": list(run.automatic),
+        "stale": list(run.stale),
+        "allocations": [_part(a) for a in r.allocations],
+        "gifts": [_part(g) for g in r.gifts],
+        "moves": [_part(m) for m in r.moves],
+        "holdings": [_lot(lot) for lot in r.holdings],
+        "created": [_lot(lot) for lot in r.created],  # lots made for a withdrawal's unrecorded sats
+        "late": [
+            {
+                "event": int(late.disposal),
+                "identified_at": late.identified_at.isoformat(),
+                "replayed": late.replayed,
+                "standing": [_part(p) for p in late.standing],
+            }
+            for late in r.late
+        ],
+        "blocking": [_blocking(b) for b in r.blocking],
+        "replay_stopped": None if r.replay_stopped is None else int(r.replay_stopped),
+    }
+
+
+def _ledger_routes(app: FastAPI, ledger: ledger_service.Ledger, authenticated: list[Any]) -> None:
+    @app.get("/api/ledger", dependencies=authenticated)
+    def run_ledger() -> dict[str, Any]:
+        return _ledger_json(ledger.run())
 
 
 # POST bodies, as for the graph: scripts and txids stay out of URLs (T-105).
