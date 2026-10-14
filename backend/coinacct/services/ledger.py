@@ -213,7 +213,7 @@ class Ledger:
                 reader.execute("BEGIN")
                 try:
                     stored = events.events(reader)
-                    chosen = events.identifications(reader)
+                    chosen = events.identifications(reader, stored)  # checked against the same events
                 except events.EventError as e:  # its fixed message names the remedy (T-408)
                     raise ImportRefused(str(e)) from None
                 tax_accounts = accounts.tax_accounts(reader)

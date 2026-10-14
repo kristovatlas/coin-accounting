@@ -489,10 +489,19 @@ def test_every_choice_reads_back_in_one_query(conn: sqlite3.Connection, accounts
     deposit = ev.add_event(conn, ev.Event("deposit", wallet, WHEN, 500, to=exchange), at=AT)
     ev.identify(conn, sale, (ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN, at=AT)
     ev.identify(conn, deposit, (ev.Choice("e2", 500),), WHEN, at=AT)
-    assert ev.identifications(conn) == {
+    expected = {
         sale: ((ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN),
         deposit: ((ev.Choice("e2", 500),), WHEN),
     }
+    assert ev.identifications(conn) == expected  # reading the events itself
+    stored = ev.events(conn)
+    queries: list[str] = []
+    conn.set_trace_callback(queries.append)
+    try:
+        assert ev.identifications(conn, stored) == expected
+    finally:
+        conn.set_trace_callback(None)
+    assert len(queries) == 1  # however many choices: checked against the events already read
 
 
 def test_an_unknown_event_is_not_found(conn: sqlite3.Connection) -> None:
@@ -909,6 +918,8 @@ def test_damaged_rows_are_refused_when_read_t408(
         ev.identifications(conn)
     with pytest.raises(ev.EventError, match="damaged"):
         ev.identifications(conn)
+    with pytest.raises(ev.EventError, match="damaged"):
+        ev.identification(conn, sale)  # the one-event read too, which identify's checks rely on
         ev.events(conn)
 
 
@@ -976,6 +987,13 @@ def test_lot_ids_the_engine_builds_are_accepted(
         "UPDATE identification SET identified_at = '2025-03-01T17:00:00+05:00'",  # not UTC
         "UPDATE identification SET identified_at = '2025-03-01T12:00:00Z'",  # not as the module writes it
         "UPDATE identification SET identified_at = '2008-01-01T00:00:00+00:00'",  # before genesis
+        "UPDATE identification SET lot = '01' WHERE position = 0",  # an event id with a leading zero
+        "UPDATE identification SET lot = '999@5' WHERE position = 0",  # from an event that isn't stored
+        # a private key (the well-known example key), which identify refuses (T-703)
+        "UPDATE identification SET lot = '5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ' "
+        "WHERE position = 0",
+        "UPDATE identification SET identified_at = '2025-03-01T12:00:00.000000'",  # no offset
+        "UPDATE identification SET position = 5 WHERE position = 1",  # a gap in the order
     ],
 )
 def test_a_stored_choice_is_checked_as_identify_would_write_it_t408(
@@ -985,11 +1003,10 @@ def test_a_stored_choice_is_checked_as_identify_would_write_it_t408(
     sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
     ev.identify(conn, sale, (ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN, at=AT)
     assert ev.identifications(conn) == {sale: ((ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN)}
-    for trigger in (
-        "identification_is_replaced_never_edited",
-        "event_with_chosen_lots_keeps_its_account_moment_and_basis",
-    ):
+    for trigger in ("identification_is_replaced_never_edited",):
         conn.execute(f"DROP TRIGGER {trigger}")  # damage that bypasses the module and the schema's rules
     conn.execute(damage)
     with pytest.raises(ev.EventError, match="damaged"):
         ev.identifications(conn)
+    with pytest.raises(ev.EventError, match="damaged"):
+        ev.identification(conn, sale)  # the one-event read too, which identify's checks rely on

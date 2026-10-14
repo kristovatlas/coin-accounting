@@ -53,7 +53,7 @@ class Events:
             try:
                 reader.execute("BEGIN")  # one snapshot for both reads (architecture §3)
                 stored = events.events(reader)
-                chosen = events.identifications(reader)
+                chosen = events.identifications(reader, stored)  # checked against the same events
                 reader.execute("COMMIT")
             finally:
                 reader.close()
