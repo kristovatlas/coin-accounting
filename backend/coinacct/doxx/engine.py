@@ -36,15 +36,14 @@ model are accepted risk R-3.
 The rules run until nothing changes, transactions in spend order (a transaction after those whose
 outputs it spends, then by txid), so a tag crosses a chain of spends in one pass. A tag only strengthens
 (inferred to certain, or a heuristic tag to one that isn't), so they end. Of two equally strong tags the
-earlier reason (manual, received_from, paid_to, change_of, cluster_backward, address_reuse) wins, and of
-two with the same reason the first given stays; each rule takes its source from the strongest holder
-(lowest coin first), so the result doesn't depend on the order of the input, and no tag names its own
-coin as its source. Doxx sets never reach third parties' outputs. The user's overrides persist: one adds
-a tag (certain, `manual`), which then propagates; one removes a tag, which no rule gives back. A
-recorded receipt or an override the engine can't apply (its coin isn't one of the user's, its entity
-doesn't know the user's identity) is returned as `unresolved`, and every tag the removals kept off, on
-the coin named or on the coins it would have reached, as `suppressed`, so the caller can show both
-(T-511: no certain link is lost without a word).
+first given stays, whatever their reasons; each rule takes its source from the strongest holder (lowest
+coin first), so the result doesn't depend on the order of the input. A rule's tag is never stronger than
+its source's, so no tag's sources lead back to it. Doxx sets never reach third parties' outputs. The
+user's overrides persist: one adds a tag (certain, `manual`), which then propagates; one removes a tag,
+which no rule gives back. A recorded receipt or an override the engine can't apply (its coin isn't one
+of the user's, its entity doesn't know the user's identity) is returned as `unresolved`, and every tag
+the removals kept off, on the coin named or on the coins it would have reached, as `suppressed`, so the
+caller can show both (T-511: no certain link is lost without a word).
 """
 
 from __future__ import annotations
@@ -59,14 +58,7 @@ type Confidence = Literal["certain", "inferred"]
 type Reason = Literal["paid_to", "change_of", "received_from", "address_reuse", "cluster_backward", "manual"]
 
 STRENGTH: Final[dict[str, int]] = {"inferred": 1, "certain": 2}
-REASON_ORDER: Final[dict[str, int]] = {
-    "manual": 0,
-    "received_from": 1,
-    "paid_to": 2,
-    "change_of": 3,
-    "cluster_backward": 4,  # before reuse: a coin at a clustered address names the cluster, its origin
-    "address_reuse": 5,
-}
+MAX_VOUT: Final = 0xFFFFFFFF  # an output index is a 32-bit number
 
 
 class DoxxError(ValueError):
@@ -140,7 +132,8 @@ class Unresolved:
 @dataclass(frozen=True)
 class Suggestion:
     """A receipt the graph shows and no `Received` records: `txid` spends a coin of `entity`'s (an input
-    the caller tagged) and pays the user's `outpoint`. Never a tag (ADR 0010: a receipt comes from a
+    the caller tagged), none of the user's, isn't mixing, and pays the user's `outpoint`, which the user
+    hasn't removed `entity` from. Never a tag (ADR 0010: a receipt comes from a
     recorded event); the caller asks the user to record it or dismiss it (T-511)."""
 
     outpoint: str
@@ -188,15 +181,16 @@ def doxx(
                 kept = tags.get(outpoint, {}).get(k)
                 if kept is None or _stronger(value, kept):
                     suppressed.setdefault(outpoint, {})[k] = value
-    recorded = {(r.outpoint, r.entity) for r in received}
+    known = {(r.outpoint, r.entity) for r in received} | removed
     suggested = sorted(
         {
             Suggestion(o.outpoint, i.entity, t.txid)
             for t in order
+            if not t.mixing and not any(i.owned for i in t.inputs)  # a receipt: the user spends nothing
             for i in t.inputs
             if not i.owned and i.entity in identity
             for o in t.outputs
-            if o.owned and (o.outpoint, i.entity) not in recorded
+            if o.owned and (o.outpoint, i.entity) not in known
         },
         key=lambda g: (_key(g.outpoint), g.entity, g.txid),
     )
@@ -297,8 +291,9 @@ def _reuse(state: _State) -> None:
 def _cluster(state: _State, clusters: list[_Cluster]) -> None:
     """Backward cluster: a tag at one address of a common-input cluster is inferred, as a heuristic, at
     the cluster's other addresses, hop by hop from the strongest holder's: each tag names the co-spend
-    transaction of its hop and the coin it was co-spent with, which holds the tag the hop came from (the
-    holder's other coins get it by reuse). So a tag's transactions lead back to the holder."""
+    transaction of its hop and a coin at the hop's other address that holds the tag (the co-spent one
+    where it does), so its transactions lead back to the holder. A hop from an address where no coin
+    holds the tag (the user removed it from all of them) isn't made."""
     for members, edges in clusters:
         best: dict[str, tuple[int, bool, tuple[str, int], str]] = {}  # entity -> its best holder
         for a in members:
@@ -316,10 +311,22 @@ def _cluster(state: _State, clusters: list[_Cluster]) -> None:
                 for txid, there, coin_here, _ in edges[here]:
                     if there in reached:
                         continue
+                    source = _holding(state, here, coin_here, k)
+                    if source is None:  # no coin there holds it (the user removed it): no hop from here
+                        continue
                     reached.add(there)
                     queue.append(there)
                     for c in state.by_address[there]:
-                        state.give(c, k, ("inferred", "cluster_backward", txid, coin_here, True))
+                        state.give(c, k, ("inferred", "cluster_backward", txid, source, True))
+
+
+def _holding(state: _State, address: str, preferred: str, entity: str) -> str | None:
+    """A coin at `address` holding a tag for `entity`: `preferred` if it does, else the lowest that does."""
+    if entity in state.tags.get(preferred, {}):
+        return preferred
+    return min(
+        (c for c in state.by_address[address] if entity in state.tags.get(c, {})), key=_key, default=None
+    )
 
 
 class _State:
@@ -349,10 +356,11 @@ class _State:
 
 
 def _stronger(new: _Value, old: _Value) -> bool:
-    """Stronger confidence, then not heuristic, then the earlier rule; an equal tag doesn't replace."""
+    """More certain, or as certain and not heuristic. An equally strong tag never replaces one: a rule's
+    tag is never stronger than its source's, so no two tags can name each other (no provenance loop)."""
 
-    def rank(v: _Value) -> tuple[int, int, int]:
-        return (-STRENGTH[v[0]], int(v[4]), REASON_ORDER[v[1]])
+    def rank(v: _Value) -> tuple[int, int]:
+        return (-STRENGTH[v[0]], int(v[4]))
 
     return rank(new) < rank(old)
 
@@ -404,7 +412,7 @@ def _vout(outpoint: str) -> int | None:
     txid, sep, vout = outpoint.rpartition(":")
     if not sep or not txid or not (vout.isascii() and vout.isdigit()) or (len(vout) > 1 and vout[0] == "0"):
         return None
-    if len(vout) > 10:  # a vout is a 32-bit number; a longer one isn't, and int() has a digit limit
+    if len(vout) > 10 or int(vout) > MAX_VOUT:  # 32 bits; the length first, for int()'s digit limit
         return None
     return int(vout)
 

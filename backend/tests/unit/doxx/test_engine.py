@@ -3,6 +3,8 @@ exception."""
 
 from __future__ import annotations
 
+from random import Random
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -339,6 +341,7 @@ def test_a_long_chain_is_followed_whatever_its_txids_order() -> None:
         ),
         ([Tx("t", (mine("a:03", "A"),), ())], "its outpoint"),
         ([Tx("t", (mine("a:" + "1" * 11, "A"),), ())], "its outpoint"),
+        ([Tx("t", (mine("a:4294967296", "A"),), ())], "its outpoint"),
         ([Tx("t", (), (mine("t:1", "A"),))], "each at its index"),
         ([Tx("t", (), (mine("t:1", "A"), mine("t:0", "B")))], "each at its index"),
         ([Tx("t", (mine("a:0", "A"),), (theirs("t:0", "A", "exch"),))], "different owners"),
@@ -422,3 +425,153 @@ def test_a_removal_that_only_weakens_a_tag_is_reported_t511() -> None:
     lost = {(t.outpoint, t.entity): t.confidence for t in result.suppressed}
     assert kept[("t1:0", "exch")] == "inferred"
     assert lost[("t1:0", "exch")] == "certain"
+
+
+def _origins(result: Doxx) -> None:
+    """Every tag's sources lead, without a loop, to a tag with no source."""
+    by = {(t.outpoint, t.entity): t for t in result.tags}
+    for tag in result.tags:
+        seen = {(tag.outpoint, tag.entity)}
+        at = tag
+        while at.source is not None:
+            assert at.source != at.outpoint
+            nxt = by.get((at.source, at.entity))
+            assert nxt is not None, f"{at} names a source without the tag"
+            assert (nxt.outpoint, nxt.entity) not in seen, f"a provenance loop through {at}"
+            seen.add((nxt.outpoint, nxt.entity))
+            at = nxt
+
+
+def test_cluster_tags_never_name_each_other_in_a_loop_t504() -> None:
+    # p:0 received from exch; tq co-spends it with q:0 (Q clustered); tf spends q:1 to tf:0 at A (a
+    # heuristic change_of); s:0, also at A, gets it by reuse; tc co-spends s:0 with b:0
+    txs = [
+        Tx("p", (theirs("e:0", "E"),), (mine("p:0", "P"),)),
+        Tx("q", (theirs("e:1", "E"),), (mine("q:0", "Q"), mine("q:1", "Q"))),
+        Tx("tq", (mine("p:0", "P"), mine("q:0", "Q")), (theirs("tq:0", "Y"),)),
+        Tx("tf", (mine("q:1", "Q"),), (mine("tf:0", "A"),)),
+        Tx("s", (theirs("e:2", "E"),), (mine("s:0", "A"),)),
+        Tx("b", (theirs("e:3", "E"),), (mine("b:0", "B"),)),
+        Tx("tc", (mine("s:0", "A"), mine("b:0", "B")), (theirs("tc:0", "Y"),)),
+    ]
+    result = doxx(txs, K, [Received("p:0", "exch")])
+    _origins(result)
+    tags_ = {t.outpoint: t for t in result.tags}
+    assert (tags_["s:0"].reason, tags_["s:0"].source) == ("address_reuse", "tf:0")
+
+
+def test_a_cluster_hop_names_a_coin_that_holds_the_tag_t504() -> None:
+    # the co-spent coin at the holder's address had its tag removed: the hop names another coin there
+    txs = [
+        Tx("f", (theirs("e:0", "E"),), (mine("f:0", "A"), mine("f:1", "A"), mine("f:2", "B"))),
+        Tx("t", (mine("f:1", "A"), mine("f:2", "B")), (theirs("t:0", "Y"),)),
+    ]
+    result = doxx(txs, K, [Received("f:0", "exch")], [Override("f:1", "exch", False)])
+    _origins(result)
+    tags_ = {t.outpoint: t for t in result.tags}
+    assert (tags_["f:2"].txid, tags_["f:2"].source) == ("t", "f:0")
+
+
+def test_a_removal_that_only_changes_a_tags_reason_isnt_reported_t511() -> None:
+    # t1:0 (received) is spent to t2:0 at B, where t3:0 is received too: removing (t1:0, exch) leaves
+    # t2:0 certain by reuse, as strong as it was: only t1:0's own tag is reported
+    txs = [
+        Tx("t1", (theirs("e:0", "E"),), (mine("t1:0", "A"),)),
+        Tx("t2", (mine("t1:0", "A"),), (mine("t2:0", "B"),)),
+        Tx("t3", (theirs("e:1", "E"),), (mine("t3:0", "B"),)),
+    ]
+    received = [Received("t1:0", "exch"), Received("t3:0", "exch")]
+    result = doxx(txs, K, received, [Override("t1:0", "exch", False)])
+    assert [(t.outpoint, t.entity) for t in result.suppressed] == [("t1:0", "exch")]
+
+
+def test_only_receipts_are_suggested_t511() -> None:
+    # a PayJoin with exch (the user spends too), a CoinJoin with an exch input, and a withdrawal the user
+    # removed exch from: none is a suggestion
+    payjoin = Tx(
+        "pj", (mine("a:0", "A"), theirs("x:0", "X", "exch")), (mine("pj:0", "B"), theirs("pj:1", "X", "exch"))
+    )
+    coinjoin = Tx(
+        "cj",
+        (theirs("x:1", "X", "exch"), theirs("z:0", "Z")),
+        (mine("cj:0", "C"), theirs("cj:1", "Z")),
+        mixing=True,
+    )
+    withdrawal = Tx("w", (theirs("x:2", "X", "exch"),), (mine("w:0", "D"),))
+    result = doxx([payjoin, coinjoin, withdrawal], K, overrides=[Override("w:0", "exch", False)])
+    assert result.suggested == ()
+
+
+@st.composite
+def graphs(draw: st.DrawFn) -> tuple[list[Tx], list[Received], list[Override]]:
+    """Small valid graphs: the user's addresses A-D, exch's X, others' Y; random txids, co-spends,
+    reuse, mixing, receipts and overrides."""
+    names = draw(st.permutations([f"t{i}" for i in range(6)]))
+    unspent: list[Coin] = []
+    txs: list[Tx] = []
+    for n, txid in enumerate(names[: draw(st.integers(1, 6))]):
+        spend = draw(st.lists(st.sampled_from(unspent), unique=True, max_size=2)) if unspent else []
+        for c in spend:
+            unspent.remove(c)
+        inputs = (
+            *spend,
+            *([theirs(f"e{n}:0", "X", "exch")] if draw(st.booleans()) else [theirs(f"e{n}:0", "Y")]),
+        )
+        outputs = []
+        for vout in range(draw(st.integers(1, 3))):
+            if draw(st.booleans()):
+                outputs.append(theirs(f"{txid}:{vout}", draw(st.sampled_from(["X", "Y"])), None))
+            else:
+                coin = mine(f"{txid}:{vout}", draw(st.sampled_from("ABCD")))
+                outputs.append(coin)
+                unspent.append(coin)
+        outputs = [Coin(o.outpoint, o.address, False, "exch") if o.address == "X" else o for o in outputs]
+        txs.append(Tx(txid, tuple(inputs), tuple(outputs), mixing=draw(st.booleans())))
+    owned = [c.outpoint for t in txs for c in t.outputs if c.owned]
+    received = (
+        [Received(o, "exch") for o in draw(st.lists(st.sampled_from(owned), unique=True, max_size=2))]
+        if owned
+        else []
+    )
+    removed = draw(st.lists(st.sampled_from(owned), unique=True, max_size=2)) if owned else []
+    return txs, received, [Override(o, "exch", False) for o in removed]
+
+
+@settings(max_examples=150, deadline=None)
+@given(graphs(), st.randoms(use_true_random=False))
+def test_the_rules_keep_their_promises_on_any_graph_t504_t511(
+    graph: tuple[list[Tx], list[Received], list[Override]], rnd: Random
+) -> None:
+    txs, received, overrides = graph
+    result = doxx(txs, K, received, overrides)
+    owned = {c.outpoint for t in txs for c in (*t.inputs, *t.outputs) if c.owned}
+    assert all(t.outpoint in owned for t in result.tags)  # never a third party's output
+    _origins(result)  # provenance ends at an origin, with no loop
+    shuffled = list(txs)
+    rnd.shuffle(shuffled)
+    assert doxx(shuffled, K, received[::-1], overrides[::-1]) == result  # whatever the input order
+    free = {(t.outpoint, t.entity) for t in doxx(txs, K, received).tags}
+    assert {(t.outpoint, t.entity) for t in result.tags} <= free  # removals only take away
+
+
+def test_removing_every_coin_at_an_address_cuts_the_cluster_there_t511() -> None:
+    # A-B co-spent in t1, B-C in t2; exch's tag starts at A. The user removed it from both coins at B,
+    # so the hop to C, which only B links, isn't made: C stays untagged
+    txs = [
+        Tx(
+            "f",
+            (theirs("e:0", "E"),),
+            (mine("f:0", "A"), mine("f:1", "B"), mine("f:2", "B"), mine("f:3", "C")),
+        ),
+        Tx("t1", (mine("f:0", "A"), mine("f:1", "B")), (theirs("t1:0", "Y"),)),
+        Tx("t2", (mine("f:2", "B"), mine("f:3", "C")), (theirs("t2:0", "Y"),)),
+    ]
+    removed = [Override("f:1", "exch", False), Override("f:2", "exch", False)]
+    result = doxx(txs, K, [Received("f:0", "exch")], removed)
+    assert {t.outpoint for t in result.tags} == {"f:0"}
+    assert {t.outpoint for t in result.suppressed} == {"f:1", "f:2", "f:3"}
+
+
+def test_the_largest_vout_is_accepted() -> None:
+    tx = Tx("t", (mine("a:4294967295", "A"),), (theirs("t:0", "X", "exch"),))
+    assert [g.outpoint for g in doxx([tx], K).tags] == ["a:4294967295"]
