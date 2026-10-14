@@ -963,3 +963,33 @@ def test_lot_ids_the_engine_builds_are_accepted(
     bought = ev.add_event(conn, buy(wallet), at=AT)
     sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
     ev.identify(conn, sale, (ev.Choice(lot.format(b=bought), 1_000),), WHEN, at=AT)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "UPDATE identification SET lot = 'e 1' WHERE position = 0",  # outside the engine's id alphabet
+        "UPDATE identification SET lot = 'e2' WHERE position = 0",  # the same lot twice
+        "UPDATE identification SET sats = 300 WHERE position = 0",  # no longer covers the sale
+        # two times for one choice
+        "UPDATE identification SET identified_at = '2025-03-01T12:00:01+00:00' WHERE position = 1",
+        "UPDATE identification SET identified_at = '2025-03-01T17:00:00+05:00'",  # not UTC
+        "UPDATE identification SET identified_at = '2025-03-01T12:00:00Z'",  # not as the module writes it
+        "UPDATE identification SET identified_at = '2008-01-01T00:00:00+00:00'",  # before genesis
+    ],
+)
+def test_a_stored_choice_is_checked_as_identify_would_write_it_t408(
+    conn: sqlite3.Connection, accounts: tuple[int, int], damage: str
+) -> None:
+    wallet, _ = accounts
+    sale = ev.add_event(conn, ev.Event("sell", wallet, WHEN, 1_000, D("50.00")), at=AT)
+    ev.identify(conn, sale, (ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN, at=AT)
+    assert ev.identifications(conn) == {sale: ((ev.Choice("e1", 600), ev.Choice("e2", 400)), WHEN)}
+    for trigger in (
+        "identification_is_replaced_never_edited",
+        "event_with_chosen_lots_keeps_its_account_moment_and_basis",
+    ):
+        conn.execute(f"DROP TRIGGER {trigger}")  # damage that bypasses the module and the schema's rules
+    conn.execute(damage)
+    with pytest.raises(ev.EventError, match="damaged"):
+        ev.identifications(conn)

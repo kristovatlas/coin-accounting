@@ -337,14 +337,41 @@ def _refusals() -> Iterator[None]:
 
 
 def identifications(conn: sqlite3.Connection) -> dict[int, tuple[tuple[Choice, ...], datetime]]:
-    """Every stored choice of lots, by event id, in one query: its lots in order, and when it was made."""
-    out: dict[int, tuple[list[Choice], datetime]] = {}
+    """Every stored choice of lots, by event id, in one query: its lots in order, and when it was made.
+    Each is checked as `identify` would write it (T-408): a damaged one is refused, never half-used."""
+    rows: dict[int, list[tuple[Any, Any, Any]]] = {}
+    for event_id, lot, sats, chosen_at in conn.execute(
+        "SELECT event_id, lot, sats, identified_at FROM identification ORDER BY event_id, position"
+    ):
+        rows.setdefault(event_id, []).append((lot, sats, chosen_at))
     with _damaged():
-        for event_id, lot, sats, chosen_at in conn.execute(
-            "SELECT event_id, lot, sats, identified_at FROM identification ORDER BY event_id, position"
-        ):
-            out.setdefault(event_id, ([], datetime.fromisoformat(chosen_at)))[0].append(Choice(lot, sats))
-    return {k: (tuple(v[0]), v[1]) for k, v in out.items()}
+        return {event_id: _stored_choice(conn, event_id, picks) for event_id, picks in rows.items()}
+
+
+def _stored_choice(
+    conn: sqlite3.Connection, event_id: int, rows: list[tuple[Any, Any, Any]]
+) -> tuple[tuple[Choice, ...], datetime]:
+    """One stored choice, held to `identify`'s rules: lots by the engine's id, each once, whole sats, at
+    most `MAX_CHOICES`, one UTC moment from genesis on, and a fit for its event (`_check_choice`)."""
+    stamps = {chosen_at for _, _, chosen_at in rows}
+    if len(stamps) != 1 or len(rows) > MAX_CHOICES:
+        raise EventError("a stored choice is damaged")
+    (stamp,) = stamps
+    chosen_at = datetime.fromisoformat(stamp)
+    if chosen_at.utcoffset() != timedelta(0) or _moment(chosen_at, "a choice") != stamp:
+        raise EventError("a stored choice is damaged")
+    if chosen_at.date() < GENESIS:
+        raise EventError("a stored choice is damaged")
+    choices = []
+    for lot, sats, _ in rows:
+        if not isinstance(lot, str) or not 1 <= len(lot) <= MAX_LOT or _LOT.fullmatch(lot) is None:
+            raise EventError("a stored choice is damaged")
+        _check_sats(sats, "a choice's sats")
+        choices.append(Choice(lot, sats))
+    if len({c.lot for c in choices}) != len(choices):
+        raise EventError("a stored choice is damaged")
+    _check_choice(_read(conn, event_id), tuple(choices))
+    return tuple(choices), chosen_at
 
 
 def _replace_choice(  # noqa: PLR0913 - as identify's
