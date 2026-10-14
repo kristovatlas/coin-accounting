@@ -134,6 +134,11 @@ def test_no_coin_is_covered_in_2025_t510() -> None:
         box(2025, False, True, True)
 
 
+def test_the_default_needs_a_year_with_rules() -> None:
+    with pytest.raises(EngineError, match="tax year"):
+        Sale.default("exchange", 2030)
+
+
 def test_the_defaults_follow_adr_0011() -> None:
     assert Sale.default("onchain", 2025) == Sale("onchain", reported=False)
     assert Sale.default("exchange", 2025) == Sale("exchange", reported=True)
@@ -197,6 +202,8 @@ def test_a_bad_override_raises_adr0011(sale: Sale, year: int, match: str) -> Non
         ({"basis_reported": 1}, "True or False"),
         ({"broker": D("1.00")}, "a Broker"),
         ({"reported": False, "broker": Broker(D("1.00"))}, "a sale a form reports"),
+        ({"reported": False, "basis_reported": True}, "only on a form"),
+        ({"reason": 5, "override_long": "L"}, "reason"),
     ],
 )
 def test_a_sales_facts_are_checked(kw: dict[str, Any], match: str) -> None:
@@ -414,9 +421,41 @@ def test_a_lot_moved_in_or_inherited_is_never_covered_t510() -> None:
     assert {(r.lot, r.box) for r in rows} == {("w1@d", "H"), ("inh", "K")}
 
 
-def test_an_onchain_disposal_cant_be_reported() -> None:
-    with pytest.raises(EngineError, match="on-chain disposal"):
-        Sale("onchain", reported=True)
+def test_an_onchain_sale_a_1099_da_reports_takes_the_reported_box_adr0043() -> None:
+    # ADR 0043: a sale sent straight from an exchange that a 1099-DA reports anyway takes H/K
+    events: list[Event] = [BUYS[0], sell("s", date(2025, 6, 1), 1_000, "50.00")]
+    assert [r.box for r in report(events, {"s": Sale("onchain", reported=True)}).rows] == ["K"]
+
+
+def test_a_1099_b_with_basis_puts_a_2024_sale_in_a_or_d_t510() -> None:
+    # 2024 i8949: box A/D for sales a 1099-B reports with basis (no covered-coin test before 1099-DAs)
+    events: list[Event] = [BUYS[0], sell("s", date(2024, 6, 1), 1_000, "50.00")]
+    assert [r.box for r in report(events, {"s": Sale("exchange", True, basis_reported=True)}, 2024).rows] == [
+        "D"
+    ]
+
+
+@pytest.mark.parametrize("kind", ["income", "p2p_buy"])
+def test_only_a_buy_in_the_exchange_account_is_covered_t510(kind: str) -> None:
+    # Treas. Reg. §1.6045-1(a)(15)(i)(J): coins bought in that account; income or a peer-to-peer
+    # purchase received into it isn't covered
+    events: list[Event] = [
+        Acquisition("a", "x", date(2026, 1, 5), kind, 1_000, D("10.00")),  # type: ignore[arg-type]
+        sell("s", date(2026, 3, 1), 1_000, "20.00"),
+    ]
+    assert [r.box for r in report(events, {"s": Sale("exchange", True, basis_reported=True)}, 2026).rows] == [
+        "H"
+    ]
+
+
+def test_a_gift_lot_is_never_covered_t510() -> None:
+    events: list[Event] = [
+        Acquisition("g", "x", date(2026, 1, 5), "gift_in", 1_000, D("10.00"), D("12.00"), date(2025, 1, 1)),
+        sell("s", date(2026, 3, 1), 1_000, "20.00"),
+    ]
+    assert [r.box for r in report(events, {"s": Sale("exchange", True, basis_reported=True)}, 2026).rows] == [
+        "K"
+    ]
 
 
 def test_another_years_override_is_checked_in_its_own_years_report_only() -> None:

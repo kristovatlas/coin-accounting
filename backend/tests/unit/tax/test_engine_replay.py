@@ -44,7 +44,15 @@ THREE: list[Event] = [lot("b1", 1, "1.00"), lot("b2", 2, "2.00"), lot("b3", 3, "
 
 def fifo(sale_id: str, day: int, lot_id: str, basis: str, acquired: int) -> Allocation:
     return Allocation(
-        sale_id, lot_id, 10, D(basis), D("50.00"), date(2024, 1, acquired), date(2025, 3, day), True
+        sale_id,
+        lot_id,
+        10,
+        D(basis),
+        D("50.00"),
+        date(2024, 1, acquired),
+        date(2025, 3, day),
+        True,
+        bought=True,
     )
 
 

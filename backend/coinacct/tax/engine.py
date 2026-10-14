@@ -212,6 +212,7 @@ class Allocation:
     lot_basis: Decimal | None = None  # None: the same as `basis`
     lot_loss_basis: Decimal | None = None  # a gift's FMV basis the lot gave up, when it has one
     inherited: bool = False  # the user inherited the lot: Form 8949's (b) is "INHERITED"
+    bought: bool = False  # the lot is a `buy` in the disposal's own account, not moved in
 
     @property
     def gain(self) -> Decimal:
@@ -316,6 +317,7 @@ class _Open:
     created: bool = (
         False  # made by the engine for a withdrawal from an account without lots, or moved from one
     )
+    bought: bool = False  # a `buy` in this very account (never a moved part): Form 8949's covered test
 
 
 def long_term(acquired: date, disposed: date) -> bool:
@@ -476,7 +478,7 @@ class _Engine:
                 raise EngineError(f"acquisition {a.id!r}: only a gift's basis can be unknown")
             basis = _usd(a.basis, a.id)
         lot = Lot(a.id, a.account, acquired, a.sats, basis, always_long, loss_basis, loss_from, unknown)
-        entry = _Open(lot, a.sats, basis, loss_basis, a.kind == "gift_in", a.on)
+        entry = _Open(lot, a.sats, basis, loss_basis, a.kind == "gift_in", a.on, bought=a.kind == "buy")
         self._insert(a.account, entry)
         self._recorded.add(a.account)
 
@@ -807,7 +809,19 @@ class _Engine:
         lot_basis = None if used == basis else basis
         inherited = lot.always_long and not self._lots[lot.id].gift  # a gift's tacked status isn't
         return Allocation(
-            d.id, lot.id, sats, used, proceeds, acquired, d.on, term, rule, lot_basis, loss, inherited
+            d.id,
+            lot.id,
+            sats,
+            used,
+            proceeds,
+            acquired,
+            d.on,
+            term,
+            rule,
+            lot_basis,
+            loss,
+            inherited,
+            self._lots[lot.id].bought,
         )
 
     def _checked_picks(self, d: Disposal | Transfer, chosen: tuple[Pick, ...]) -> list[Pick]:

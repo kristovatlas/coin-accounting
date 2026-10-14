@@ -20,7 +20,7 @@ BOXES: Final[frozenset[str]] = frozenset("ABCDEFGHIJKL")
 
 
 FIRST_YEAR: Final = 2013  # the first year with Form 8949's boxes D-F; earlier years' rules aren't in the app
-LAST_YEAR: Final = 2026  # the last year whose instructions these rules were checked against
+LAST_YEAR: Final = 2026  # 2026 uses the 2025 i8949's rules; re-check when the 2026 instructions are out
 
 
 def rules_for(tax_year: object) -> None:

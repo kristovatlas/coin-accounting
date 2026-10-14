@@ -1,5 +1,8 @@
 """Report builders: pure functions from the engine's result to report rows (PLAN §8; ADR 0011,
 ADR 0040, ADR 0043; T-510). They return values; the CSV writing and the input hash are the caller's.
+The free text in them (`Row.override_reason`, `Row.disposal` and `Row.lot`, `BrokerFee.description`,
+`Row.review`) is the user's or an import's: the CSV writer must escape it against formula injection
+(T-702).
 
 **Form 8949** (`form_8949`): one row per allocation of a sale or spend in the tax year, the engine's
 lot-by-lot figures. A gift given never has a row, and neither does a fee: the engine makes no
@@ -140,8 +143,10 @@ class Sale:
     def __post_init__(self) -> None:
         if self.channel not in ("exchange", "onchain"):
             raise EngineError(f"a sale's channel is exchange or onchain, not {self.channel!r}")
-        if self.channel == "onchain" and self.reported is True:  # no 1099 reports it (ADR 0011, 0043)
-            raise EngineError("an on-chain disposal is one no 1099 reports; override its box, with a reason")
+        if self.basis_reported and not self.reported:
+            raise EngineError("basis is reported only on a form that reports the sale")
+        if self.reason is not None and not isinstance(self.reason, str):
+            raise EngineError("an override's reason is text")
         if type(self.reported) is not bool or type(self.basis_reported) is not bool:
             raise EngineError("a sale's reported and basis_reported are True or False")
         if self.broker is not None and (not isinstance(self.broker, Broker) or not self.reported):
@@ -153,7 +158,9 @@ class Sale:
     @staticmethod
     def default(channel: Channel, tax_year: int) -> Sale:
         """ADR 0011's default: an exchange sale is reported (without basis) from 2025; an on-chain
-        disposal, and an exchange sale through 2024, aren't."""
+        disposal, and an exchange sale through 2024, aren't. (An on-chain sale sent straight from an
+        exchange that a 1099-DA reports anyway is `Sale("onchain", reported=True)`: ADR 0043.)"""
+        rules_for(tax_year)
         return Sale(channel, reported=channel == "exchange" and tax_year > y2024.LAST_YEAR)
 
 
@@ -257,7 +264,8 @@ def describe(sats: int) -> str:
 
 def _row(a: Allocation, sale: Sale, tax_year: int, late: LateIdentification | None) -> Row:
     override = sale.override_long if a.long_term else sale.override_short
-    covered = sale.basis_reported and _covered(a)
+    # a 1099-B through 2024 reports basis as it does; from 2025 a 1099-DA only for covered coins
+    covered = sale.basis_reported and (tax_year <= y2024.LAST_YEAR or _covered(a))
     if override is None:
         chosen, reason = box(tax_year, a.long_term, sale.reported, covered), None
     else:
@@ -282,11 +290,9 @@ def _row(a: Allocation, sale: Sale, tax_year: int, late: LateIdentification | No
 
 def _covered(a: Allocation) -> bool:
     """Whether a row's lot can be a covered security, whose basis a 1099-DA reports: bought in that
-    exchange account from 2026-01-01 (Treas. Reg. §1.6045-1(a)(15)(i)(J); ADR 0011), so not moved in
-    from another account (a `lot@transfer` id), nor inherited, nor a gift."""
-    return (
-        a.acquired >= COVERED_FROM and "@" not in a.lot and not a.inherited and a.rule in ("cost", "unknown")
-    )
+    exchange account from 2026-01-01 (Treas. Reg. §1.6045-1(a)(15)(i)(J); ADR 0011). A lot moved in
+    from another account, inherited, given, received as income or bought peer to peer is not."""
+    return a.bought and a.acquired >= COVERED_FROM
 
 
 def _check_overrides(disposal: str, sale: Sale, tax_year: int) -> None:
