@@ -60,6 +60,10 @@ def test_setting_the_time_zone(conn: sqlite3.Connection) -> None:
         "right/UTC",  # the leap-second variant
         "posix/America/New_York",
         "america/new_york",  # a case-insensitive filesystem would load it
+        "US/Eastern",  # a backward-compatibility alias, missing from some systems
+        "Etc/GMT+5",  # sign-inverted: UTC-5
+        "EST5EDT",
+        "GMT",
     ],
 )
 def test_a_name_that_isnt_a_zone_is_refused_without_echoing_it(
@@ -122,3 +126,23 @@ def test_the_upgrade_from_schema_11_keeps_every_row_adr0038(tmp_path: Path) -> N
         assert ev.events(conn)[0].id == bought
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    "name", ["America/Argentina/Buenos_Aires", "America/Port-au-Prince", "Asia/Kolkata", "Pacific/Kiritimati"]
+)
+def test_canonical_zones_of_every_shape_are_accepted(conn: sqlite3.Connection, name: str) -> None:
+    settings.set_time_zone(conn, name)
+    assert settings.time_zone(conn) == ZoneInfo(name)
+
+
+def test_every_accepted_name_fits_the_pattern_and_the_schema() -> None:
+    zones = settings._zones()
+    assert len(zones) > 100 and "UTC" in zones
+    assert all(settings._ZONE_NAME.fullmatch(z) and len(z) <= 64 for z in zones)
+
+
+def test_without_a_zone_table_only_utc_is_accepted(tmp_path: Path) -> None:
+    assert settings._canonical((str(tmp_path),)) == frozenset()
+    (tmp_path / "zone1970.tab").write_text("# a comment\nUS\t+404251-0740023\tAmerica/New_York\tEastern\n")
+    assert settings._canonical((str(tmp_path),)) == {"America/New_York"}

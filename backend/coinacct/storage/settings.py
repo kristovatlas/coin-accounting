@@ -3,11 +3,14 @@ changed. A change isn't in the change log, whose kinds PLAN §2 lists; every rep
 it used instead (PLAN §8, T-503).
 
 - **`time_zone`:** the IANA zone (such as `America/New_York`) an event's tax date is taken in (PLAN §7).
-  Its default is `UTC` until the user sets one. A name must be a canonical zone of the system's
-  time-zone database, spelled as it lists it: never `localtime` (the machine's own zone), `Factory` or
-  a `posix/` or `right/` variant, so the setting means the same on every machine. It is read here,
-  since the database is files (architecture §2). A stored name is checked again when read: a damaged
-  one, or one this machine's database lacks, is refused with the remedy (T-408).
+  Its default is `UTC` until the user sets one. A name must be a canonical zone, as the system's
+  time-zone database lists them in `zone1970.tab` (IANA's list of zones, without the backward-
+  compatibility aliases such as `US/Eastern` or the sign-inverted `Etc/GMT+5`), spelled as listed, or
+  `UTC`; never `localtime` (the machine's own zone), so the setting means the same on every machine.
+  A host whose database has no `zone1970.tab` accepts only `UTC`. It is read here, since the
+  database is files (architecture §2); a restart picks up a database update. A stored name is
+  checked again when read: a damaged one, or one this machine's database lacks, is refused with the
+  remedy (T-408).
 """
 
 from __future__ import annotations
@@ -15,8 +18,9 @@ from __future__ import annotations
 import re
 import sqlite3
 from functools import cache
+from pathlib import Path
 from typing import Final
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
+from zoneinfo import TZPATH, ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from coinacct.storage.db import DbError, transaction
 
@@ -29,15 +33,27 @@ class SettingsError(DbError):
     """A setting the app refuses, with a fixed message that never echoes the value."""
 
 
-_NOT_ZONES: Final = frozenset({"localtime", "Factory", "posixrules"})
 _DAMAGED: Final = "the stored time zone can't be used here (T-408): set the time zone again"
+
+
+def _canonical(tzpath: tuple[str, ...]) -> frozenset[str]:
+    """The zones the first `zone1970.tab` on `tzpath` lists (its third column), or none."""
+    for directory in tzpath:
+        table = Path(directory) / "zone1970.tab"
+        if table.is_file():
+            lines = table.read_text(encoding="ascii", errors="replace").splitlines()
+            return frozenset(
+                f[2]
+                for line in lines
+                if line and not line.startswith("#") and len(f := line.split("\t")) >= 3
+            )
+    return frozenset()
 
 
 @cache
 def _zones() -> frozenset[str]:
-    """The canonical zones of the system's database (the standard library leaves out `posix/` and
-    `right/`), without the names that aren't zones."""
-    return frozenset(n for n in available_timezones() if n not in _NOT_ZONES) | {DEFAULT_TIME_ZONE}
+    """The canonical zones this machine's database both lists and has, and `UTC`."""
+    return (_canonical(TZPATH) & available_timezones()) | {DEFAULT_TIME_ZONE}
 
 
 def _zone(name: str) -> ZoneInfo:
