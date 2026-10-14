@@ -1,7 +1,7 @@
 // The user's events (PLAN §2, §7, M6): every buy, sale, gift and movement, entered by hand, with its
 // choice of lots. Amounts are typed as BTC and USD text and never pass through floats; moments are
 // entered in UTC. React renders every value as text (T-104); refusals show the app's fixed messages.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type Accounts,
@@ -77,14 +77,19 @@ export function Events({ session }: { session: string }) {
   const [choosing, setChoosing] = useState<number | null>(null);
   const [lots, setLots] = useState("");
 
+  // each load takes a number; only the latest one's answer is used, so a slow earlier load never
+  // overwrites what a later one (after an add or remove) showed
+  const loads = useRef(0);
   const load = useCallback(async () => {
+    const mine = ++loads.current;
     try {
       const [acc, ev] = await Promise.all([getAccounts(session), getEvents(session)]);
+      if (mine !== loads.current) return;
       setAccounts(acc);
       setEvents(ev.events);
       setError(null);
     } catch (e) {
-      setError(message(e));
+      if (mine === loads.current) setError(message(e));
     }
   }, [session]);
 
@@ -109,7 +114,7 @@ export function Events({ session }: { session: string }) {
 
   async function onAdd() {
     const sats = satsOf(amount);
-    const feeSats = !FEE.includes(kind) || fee.trim() === "" || /^0*\.?0*$/.test(fee.trim()) ? 0 : satsOf(fee);
+    const feeSats = !FEE.includes(kind) || fee.trim() === "" || /^0+(\.0{1,8})?$/.test(fee.trim()) ? 0 : satsOf(fee);
     if (sats === null || feeSats === null) return setError("Enter BTC amounts such as 0.015.");
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(at)) return setError("Enter when it happened, in UTC.");
     if (kind === "withdrawal" && (missingBasis.trim() !== "" || missingDate !== "")) {
