@@ -5,7 +5,8 @@ Pure, and in sats only: basis, dates and the fee's tax treatment stay with the e
 this module decides. One call traces one transaction that spends coins of one coin-traced wallet account:
 
 - **Lots leave oldest first** across all the coins the transaction spends: by the moment the lot reached
-  the user, then by its event id (ADR 0041 §2.1). Parts of one lot on several coins are merged.
+  the user, then by its event id (ADR 0041 §2.1), then by the lot's id (one event's lots of the same
+  moment, a fixed order ADR 0041 leaves open). Parts of one lot on several coins are merged.
 - **The leaving outputs take lots first, then the fee, then the change** (§2.2). The fee is the sum of all
   inputs minus the sum of all outputs; the change never bears any of it.
 - **The canonical order** fills outputs of the same role one after another, largest first, then by the
@@ -18,8 +19,9 @@ this module decides. One call traces one transaction that spends coins of one co
   basis joins its row for the same lot, else its oldest: the engine's figures); for a gift given their
   basis isn't recovered. Nothing is carried for either.
 - **Zero-value outputs** (an OP_RETURN, say) carry no sats and get no lots.
-- **Who owns what:** a change output belongs to the wallet's account; a deposit's outputs to one of the
-  user's custodial (exchange) accounts, a transfer's to another of the user's self-custody wallets; a
+- **Who owns what:** a change output belongs to the wallet's account; a deposit's outputs to the one
+  custodial (exchange) account of the user's its event names, a transfer's to the one other self-custody
+  wallet it names; a
   sale's, spend's or gift's to nobody the user records. An input the user doesn't own carries no lots
   (`fragments=()`). A zero-value coin carries none either.
 - **The caller resolves links and the pool first** (ADR 0041 §1, §4): each of the wallet's inputs must
@@ -80,11 +82,13 @@ class Fragment:
 
 @dataclass(frozen=True)
 class Input:
-    """A coin the transaction spends; `account` is its owner among the user's accounts, or None."""
+    """A coin the transaction spends, by its input index `vin`; `account` is its owner among the user's
+    accounts, or None."""
 
     account: str | None
     value: int
     fragments: tuple[Fragment, ...]
+    vin: int
 
 
 @dataclass(frozen=True)
@@ -102,11 +106,13 @@ class Output:
 
 @dataclass(frozen=True)
 class Leaving:
-    """The transaction's one leaving event: its id, kind and sats (what its outputs receive, not the fee)."""
+    """The transaction's one leaving event: its id, kind and sats (what its outputs receive, not the fee),
+    and for a deposit or transfer the one account of the user's it goes to."""
 
     id: str
     kind: LeavingKind
     sats: int
+    account: str | None = None
 
 
 @dataclass(frozen=True)
@@ -160,18 +166,17 @@ def trace(tx: WalletTx) -> Traced | Blocked:
     filled += [(o, stream.take(o.value)) for o in change]
     if not filled:
         return Blocked(tx.txid, "fee_only", "every sat goes to the fee")
-    same = _identical(filled)
-    if same is not None:
-        return Blocked(tx.txid, "identical_outputs", f"outputs {_list(same)} would get different lots")
     carries: tuple[FeeCarry, ...] = ()
     carried = tx.leaving is None or tx.leaving.kind in CARRIED
     if fee_parts and carried:
         destination = filled[: len(leaving)] if leaving else filled
         carries = tuple(_carry(f, destination) for f in fee_parts)
-        twins = _twins(filled, {c.vout for c in carries})
-        if twins is not None:
-            detail = f"outputs {_list(twins)} would get different basis from the fee"
-            return Blocked(tx.txid, "identical_outputs", detail)
+    same = set(_identical(filled) or ())
+    twins = set(_twins(filled, {c.vout for c in carries}) or ())
+    if same or twins:  # every ambiguous output, both kinds named
+        what = " and ".join(w for w, hit in (("lots", same), ("basis from the fee", twins)) if hit)
+        detail = f"outputs {_list(sorted(same | twins))} would get different {what}"
+        return Blocked(tx.txid, "identical_outputs", detail)
     return Traced(tuple(sorted((o.vout, parts) for o, parts in filled)), fee_parts, carries)
 
 
@@ -181,9 +186,9 @@ def _unsupported(tx: WalletTx) -> Blocked | None:
 
 
 def _foreign_inputs(tx: WalletTx) -> Blocked | None:
-    unowned = [n for n, i in enumerate(tx.inputs) if i.account is None]
+    unowned = sorted(i.vin for i in tx.inputs if i.account is None)
     if unowned:
-        return Blocked(tx.txid, "shared", f"inputs {_list(unowned)} aren't the user's")
+        return Blocked(tx.txid, "shared", f"{_named('input', unowned)} {_is(unowned)}n't the user's")
     others = sorted({i.account for i in tx.inputs if i.account is not None and i.account != tx.account})
     if others:
         return Blocked(tx.txid, "several_accounts", f"inputs from accounts {', '.join(map(repr, others))}")
@@ -195,37 +200,48 @@ def _unsupported_outputs(tx: WalletTx) -> Blocked | None:
     events = {o.event for o in paid if o.event is not None}
     if len(events) > 1:
         vouts = sorted(o.vout for o in paid if o.event is not None)
-        detail = f"events {', '.join(sorted(events))} on outputs {_list(vouts)}"
+        detail = f"events {', '.join(map(repr, sorted(events)))} on outputs {_list(vouts)}"
         return Blocked(tx.txid, "several_leaving_events", detail)
     if events and (tx.leaving is None or events != {tx.leaving.id}):
         raise EngineError(f"tx {tx.txid}: an output names an event that isn't its leaving event")
     stray = sorted(o.vout for o in paid if o.event is None and o.account != tx.account)
     if stray:
-        return Blocked(tx.txid, "unclassified_output", f"outputs {_list(stray)} have no recorded event")
+        detail = f"{_named('output', stray)} {'have' if len(stray) > 1 else 'has'} no recorded event"
+        return Blocked(tx.txid, "unclassified_output", detail)
     if tx.leaving is None:
         return None
     leaving = [o for o in paid if o.event is not None]
     if not leaving:
         raise EngineError(f"tx {tx.txid}: leaving event {tx.leaving.id!r} pays no output")
-    mismatched = sorted(o.vout for o in leaving if not _owner_fits(o, tx.leaving.kind, tx.account))
+    mismatched = sorted(o.vout for o in leaving if not _owner_fits(o, tx.leaving, tx.account))
     if mismatched:
-        detail = f"outputs {_list(mismatched)} aren't owned as a {tx.leaving.kind} needs"
+        detail = f"{_named('output', mismatched)} {_is(mismatched)}n't owned as a {tx.leaving.kind} needs"
         return Blocked(tx.txid, "mismatched_owner", detail)
     paid_out = sum(o.value for o in leaving)
     if paid_out != tx.leaving.sats:
-        detail = f"event {tx.leaving.id!r} has {tx.leaving.sats} sats, its outputs {paid_out}"
+        vouts = sorted(o.vout for o in leaving)
+        detail = f"event {tx.leaving.id!r} has {tx.leaving.sats} sats, its outputs {_list(vouts)} {paid_out}"
         return Blocked(tx.txid, "amount_mismatch", detail)
     return None
 
 
-def _owner_fits(o: Output, kind: str, account: str) -> bool:
-    """A deposit pays one of the user's exchange accounts, a transfer another of the user's wallets; a
-    disposal pays nobody the user records."""
-    if kind == "deposit":
-        return o.account is not None and o.account != account and o.kind == "custodial"
-    if kind == "transfer":
-        return o.account is not None and o.account != account and o.kind == "self_custody"
+def _owner_fits(o: Output, leaving: Leaving, account: str) -> bool:
+    """A deposit pays its one exchange account of the user's, a transfer its one other wallet of the
+    user's (`leaving.account`); a disposal pays nobody the user records."""
+    if leaving.kind == "deposit":
+        return o.account == leaving.account != account and o.kind == "custodial"
+    if leaving.kind == "transfer":
+        return o.account == leaving.account != account and o.kind == "self_custody"
     return o.account is None
+
+
+def _named(word: str, items: Sequence[int]) -> str:
+    """ "output 0" or "outputs 0, 1": the noun in the number the list needs."""
+    return f"{word}{'s' if len(items) > 1 else ''} {_list(items)}"
+
+
+def _is(items: Sequence[int]) -> str:
+    return "are" if len(items) > 1 else "is"
 
 
 def _list(vouts: Sequence[int]) -> str:
@@ -310,18 +326,27 @@ def _check(tx: object) -> None:
         raise EngineError(f"tx {tx.txid}: the inputs and outputs must be tuples, with at least one input")
     for i in tx.inputs:
         _check_input(i, tx)
+    if len({i.vin for i in tx.inputs}) != len(tx.inputs):
+        raise EngineError(f"tx {tx.txid}: two inputs have the same vin (a coin is spent once)")
     _check_outputs(tx)
     if tx.leaving is not None:
         if not isinstance(tx.leaving, Leaving) or not _name(tx.leaving.id):
             raise EngineError(f"tx {tx.txid}: the leaving event must be a Leaving with an id")
         if not isinstance(tx.leaving.kind, str) or tx.leaving.kind not in LEAVING_KINDS:
             raise EngineError(f"tx {tx.txid}: unknown leaving kind")
+        if tx.leaving.kind in CARRIED:
+            if not _name(tx.leaving.account) or tx.leaving.account == tx.account:
+                raise EngineError(f"tx {tx.txid}: a {tx.leaving.kind} names the one other account it goes to")
+        elif tx.leaving.account is not None:
+            raise EngineError(f"tx {tx.txid}: a {tx.leaving.kind} goes to nobody the user records")
         _sats(tx.leaving.sats, tx.txid)
 
 
 def _check_input(i: object, tx: WalletTx) -> None:
     if not isinstance(i, Input) or not _optional_name(i.account) or not isinstance(i.fragments, tuple):
         raise EngineError(f"tx {tx.txid}: an input must be an Input, its account a name or None")
+    if isinstance(i.vin, bool) or not isinstance(i.vin, int) or i.vin < 0:
+        raise EngineError(f"tx {tx.txid}: a vin must be a whole number of 0 or more")
     if not (type(i.value) is int and i.value == 0 and not i.fragments):
         _sats(i.value, tx.txid)
     for f in i.fragments:
@@ -346,7 +371,7 @@ def _check_outputs(tx: WalletTx) -> None:
             raise EngineError(f"tx {tx.txid}: an output of the user's has its account's kind, and only then")
         if o.account == tx.account and o.kind != "self_custody":
             raise EngineError(f"tx {tx.txid}: a change output is the wallet's own, so self-custody")
-        if o.value == 0 and type(o.value) is int and o.event is not None:
+        if type(o.value) is int and o.value == 0 and o.event is not None:
             raise EngineError(f"tx {tx.txid}: a zero-value output pays no event")
         if isinstance(o.vout, bool) or not isinstance(o.vout, int) or o.vout < 0:
             raise EngineError(f"tx {tx.txid}: a vout must be a whole number of 0 or more")
