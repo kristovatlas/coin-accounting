@@ -9,8 +9,8 @@ both timezone-aware UTC (ENGINEERING §5.2). A disposal's tax date is within a d
 date (time zones run from UTC-12 to UTC+14), and disposals come in the order of their moments.
 
 - **Acquisitions** (`buy`, `p2p_buy`, `income`, `inherit`, `gift_in`) each create one lot: its sats, its
-  basis (cost plus fees, or the FMV the caller computed) and its date. The 2025 opening allocation,
-  movements between accounts, fees by role and UTXO tracing come in later slices.
+  basis (cost plus fees, or the FMV the caller computed) and its date. The 2025 opening allocation and
+  UTXO tracing come in later slices.
 - **A gift received** (`gift_in`; IRC §1015(a), Treas. Reg. §1.1015-1(a)) has a **dual basis**. Its gain
   basis is the donor's basis, held from the donor's date (tacked, IRC §1223(2)). If the FMV at the gift
   was lower, that FMV is its loss basis, held from the gift date. At a disposal, proceeds above the
@@ -42,15 +42,14 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
     basis), and each figure carries its own basis and dates: they are never keys into the `Result`.
     The replay holds the same sats in every account as the real run (checked after every event, for
     the accounts it touched), so the standing method is never short there; it **stops** wherever the
-    two would part: when the runs disagree on whether a
-    withdrawal creates a lot for unrecorded sats (one may count an account's lots as recorded and the
-    other not), or when the replay can't apply an event at all (a fee that would use up the last sats
-    of a gift's part). `Result.replay_stopped` then names the event, and every later late choice is
+    two would part: when the runs disagree on whether a withdrawal creates a lot for unrecorded sats
+    (one may count an account's lots as recorded and the other not), or when the replay can't apply an
+    event at all. `Result.replay_stopped` then names the event, and every later late choice is
     judged and figured on the lots as the user's choices left them, its warning marked
     `replayed=False`: a late choice that matches the user's lots but not what the replay would have
     held is then not warned about. Reports must show a stopped replay (ADR 0040). A late choice at the
     very event the replay stops at is still figured in the replay (its state before the event), so
-    `replayed=True`; dust the replay couldn't carry shows as parts with nothing arriving.
+    `replayed=True`.
 - **Splits are exact.** Bases and proceeds are split by sats with `domain.money.share`, always as a share
   of what remains, and the last part takes the remainder. So every split adds up to the whole, to the
   cent. All money arithmetic runs in the fixed `domain.money` context (T-502).
@@ -65,25 +64,24 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   to another: each moved part keeps its lot's basis, dates and status, under a new id (`lot@transfer`),
   and keeps its FIFO place: the date it reached the user (a gift by the day it was received, #241).
   Lots are chosen as for a disposal, with the same late check (ADR 0008 §3 and §4); a late choice's
-  warning shows the standing method's whole result, its fee disposal included (dust the standing
-  method could not carry is shown as its own parts, none arriving: the user's choice still stands).
+  warning shows the standing method's whole result: the parts it would move, with their bases. A
+  choice may also name only the sats that arrive: the fee then takes the standing method's next sats
+  besides them (ADR 0043). Those fee lots are part of the identification: the late check judges the
+  whole, which sats arrive included, and the replay follows the whole (or falls back, whole).
   **A self-transfer is refused** (`EngineError`) until UTXO tracing exists (the owner's decision on
   #243): between the user's own wallets the spent outputs identify the lots (ADR 0008 §2, ADR 0009), and
   the account's FIFO order would silently give other figures. **Deposits and spends from a self-custody
   wallet have the same gap** and still use the account's order: the engine doesn't know which accounts
   are wallets. UTXO tracing, the next M6 slice, covers all three, and lifts the refusal (or limits it,
   once a wallet can record whole-wallet FIFO, ADR 0008 §2); it blocks release.
-  - **A network fee** on a deposit or self-transfer (`fee_sats` of the sats that leave) is, by default,
-    no disposal: its basis stays with the coins that arrive. With `fee_treatment="dispose"` it is a
-    small taxable disposal at `fee_value`, its FMV (ADR 0009's stated tax position, printed on reports).
-  - **An exchange's BTC withdrawal fee** is a small disposal at its FMV (ADR 0009's default; no other
-    treatment is offered yet).
-  - A fee that is disposed needs its FMV (`fee_value`): without one, the engine refuses rather than book
-    a loss at proceeds 0.00. A short transfer's fee value is split by the sats covered; the rest goes
-    with the missing basis.
-  - The fee is taken from the chosen lots in proportion to their sats, every moved part keeping at
-    least one sat where it can, the smallest parts paying any rest first; a part that is all fee (dust
-    only) carries its basis to the transfer's last moved part, which records it (`carried_from`).
+  - **A fee is never a taxable event** (ADR 0043): a network fee on a deposit, or an exchange's BTC
+    withdrawal fee (`fee_sats` of the sats that leave), is no disposal and has no Form 8949 row. The
+    sats that arrive take the transfer's lots first, in the account's FIFO order; the fee takes the
+    last sats. A lot that both arrives and pays fee keeps the fee's basis on its moved part; a lot that
+    the fee uses up entirely (dust) passes its basis to the transfer's oldest moved part (first in the
+    account's FIFO order, whatever its basis), which records it (`carried_from`). From a gift's lot
+    (two bases) the lower one passes, and a moved part with two bases takes it on both. A lot of
+    unknown basis passes none, and stays blocking.
   - **A withdrawal from an account with no lots the user recorded and no sats held** (its buys were
     never entered) creates a lot for its sats in that account first (ADR 0009, PLAN §7): with the
     basis and original date the user supplies (`missing_basis` and `missing_acquired`, both or
@@ -112,7 +110,6 @@ type AcquisitionKind = Literal["buy", "p2p_buy", "income", "inherit", "gift_in"]
 type DisposalKind = Literal["sell", "spend", "gift_out"]
 type Method = Literal["fifo"]
 type TransferKind = Literal["deposit", "withdrawal", "self_transfer"]
-type FeeTreatment = Literal["carry", "dispose"]
 # How an allocation's basis was found: the lot's own basis; a gift's donor basis (a gain) or FMV at the
 # gift (a loss); between the two, neither; or a gift's donor basis that isn't known (blocking).
 type BasisRule = Literal["cost", "donor", "fmv_at_gift", "no_gain_or_loss", "unknown"]
@@ -121,7 +118,6 @@ ACQUISITION_KINDS: Final[frozenset[str]] = frozenset({"buy", "p2p_buy", "income"
 DISPOSAL_KINDS: Final[frozenset[str]] = frozenset({"sell", "spend", "gift_out"})
 METHODS: Final[frozenset[str]] = frozenset({"fifo"})
 TRANSFER_KINDS: Final[frozenset[str]] = frozenset({"deposit", "withdrawal", "self_transfer"})
-FEE_TREATMENTS: Final[frozenset[str]] = frozenset({"carry", "dispose"})
 ZERO: Final = Decimal("0.00")
 GENESIS: Final = date(2009, 1, 3)  # no bitcoin was acquired before the genesis block
 RESERVED: Final = ("@",)  # the separator in the lot ids the engine builds (lot@transfer)
@@ -176,7 +172,6 @@ class Transfer:
     kind: TransferKind
     sats: int  # the sats that leave `account`, the fee included
     fee_sats: int = 0  # of those, the network or withdrawal fee
-    fee_value: Decimal | None = None  # USD FMV of the fee sats: a fee disposal's proceeds
     picks: tuple[Pick, ...] | None = None  # None: the source account's standing method
     identified_at: datetime | None = None  # when the user chose `picks`, timezone-aware UTC
     missing_basis: Decimal | None = None  # withdrawal only: the basis of sats the account holds no lots for
@@ -255,7 +250,7 @@ class Moved:
     sats: int
     basis: Decimal
     acquired: date
-    carried_fee: int = 0  # fee sats whose basis this part carries (the carry treatment)
+    carried_fee: int = 0  # fee sats whose basis this part carries (ADR 0043: no fee is a disposal)
     carried_from: tuple[str, ...] = ()  # other lots whose all-fee dust parts' basis this part carries
 
 
@@ -264,11 +259,11 @@ class LateIdentification:
     """A choice made after its disposal whose lots differ from the standing method's (ADR 0021 §2).
     `standing` is what the standing method would have used, with its figures, shown with the warning
     (ADR 0008 §4): allocations for a sale or spend, gift records (no gain or loss) for a gift given, and
-    for a transfer, its fee disposal's allocations (if the fee is disposed) and the parts it would move."""
+    for a transfer, the parts it would move (no fee is a disposal, ADR 0043)."""
 
     disposal: str
     identified_at: datetime
-    standing: tuple[Allocation, ...] | tuple[GiftGiven, ...] | tuple[Allocation | Moved, ...]
+    standing: tuple[Allocation, ...] | tuple[GiftGiven, ...] | tuple[Moved, ...]
     replayed: bool = True  # figured in the replay; False once it had stopped (Result.replay_stopped)
 
 
@@ -336,23 +331,14 @@ def long_term(acquired: date, disposed: date) -> bool:
     return disposed > anniversary
 
 
-def run(
-    events: Sequence[Event],
-    methods: Mapping[str, Method] | None = None,
-    fee_treatment: FeeTreatment = "carry",
-) -> Result:
-    """Apply `events` in order. `methods` holds each account's standing method (FIFO if absent);
-    `fee_treatment` is the user's choice for network fees on deposits and self-transfers (ADR 0009)."""
-    if fee_treatment not in FEE_TREATMENTS:
-        raise EngineError(f"unknown fee treatment {fee_treatment!r}")
+def run(events: Sequence[Event], methods: Mapping[str, Method] | None = None) -> Result:
+    """Apply `events` in order. `methods` holds each account's standing method (FIFO if absent)."""
     with localcontext(CONTEXT):
-        return _Engine(methods or {}, fee_treatment).run(events)
+        return _Engine(methods or {}).run(events)
 
 
 class _Engine:
-    def __init__(
-        self, methods: Mapping[str, Method], fee_treatment: FeeTreatment = "carry", *, replay: bool = False
-    ) -> None:
+    def __init__(self, methods: Mapping[str, Method], *, replay: bool = False) -> None:
         for account, method in methods.items():
             if method not in METHODS:
                 raise EngineError(f"account {account!r}: unknown standing method {method!r}")
@@ -368,12 +354,16 @@ class _Engine:
         self._created: list[Lot] = []
         self._recorded: set[str] = set()  # accounts holding lots the user recorded (not created lots)
         self._keys: dict[str, list[date]] = {}  # account -> its lots' FIFO keys, in step with _open
-        self._fee_treatment = fee_treatment
         # The replay (#238): the same events with every late choice disregarded. Only the real run has
         # one; the replay itself is `replay=True` and records no warnings.
         self._replay = replay
-        self._shadow: _Engine | None = None if replay else _Engine(methods, fee_treatment, replay=True)
+        self._shadow: _Engine | None = None if replay else _Engine(methods, replay=True)
         self._replay_stopped: str | None = None
+        self._arriving: dict[str, dict[str, int]] = {}  # a transfer whose picks named only its arriving sats
+        # such a transfer's whole identification (the fee's lots the standing method added, and the
+        # arriving sats), recorded by the real run and handed to the replay to follow (ADR 0040, 0043)
+        self._identified: dict[str, tuple[tuple[Pick, ...], dict[str, int]]] = {}
+        self._given: dict[str, tuple[tuple[Pick, ...], dict[str, int]]] = {}
 
     def run(self, events: Sequence[Event]) -> Result:
         last: date | None = None
@@ -433,8 +423,11 @@ class _Engine:
         created a lot for unrecorded sats, say), stops the replay there. Every event is checked, so
         while the replay runs it holds the same sats in every account as the real run."""
         shadow = self._shadow
+        identified = self._identified.pop(event.id, None)
         if shadow is None:
             return
+        if identified is not None:
+            shadow._given[event.id] = identified
         try:
             if isinstance(event, Acquisition):
                 shadow._acquire(event)
@@ -519,9 +512,14 @@ class _Engine:
             picks, missing = self._standing(e.account, e.sats)
             return picks, missing, None
         if self._replay:  # the replay disregards a late choice, and an on-time one it can't follow
+            given = self._given.pop(e.id, None)  # the real run's whole identification, fee lots included
             if e.identified_at is not None and e.identified_at <= e.at:
                 try:
-                    return self._checked_picks(e, e.picks), 0, None
+                    if given is None:
+                        return self._checked_picks(e, e.picks), 0, None
+                    picks = self._checked_picks(e, given[0])
+                    self._arriving[e.id] = dict(given[1])
+                    return picks, 0, None
                 except EngineError:
                     pass
             picks, missing = self._standing(e.account, e.sats)
@@ -539,9 +537,19 @@ class _Engine:
             # their basis differs by the rounding an earlier late choice left behind, or by how much of
             # the source moved with them. That difference is the earlier choice's, already warned
             # about; the warning shows the replay's own figures (ADR 0040, its "Lot ids" bullet)
-            if _merged(picks) != _merged(standing):
+            if _merged(picks) != _merged(standing) or self._arrive_otherwise(e, judge, standing):
                 return picks, 0, _Late(judge, tuple(standing), judge is not self)
         return picks, 0, None
+
+    def _arrive_otherwise(self, e: Disposal | Transfer, judge: _Engine, standing: list[Pick]) -> bool:
+        """Whether a choice naming a transfer's arriving sats has other sats arrive than the standing
+        method would, with the same lots in all: the fee's lots are part of the identification, so the
+        late check judges the whole (ADR 0043)."""
+        named = self._arriving.get(e.id)
+        if named is None or not isinstance(e, Transfer):
+            return False
+        fifo = _fifo_arrivals(e, judge._in_fifo_order(e.account, standing))
+        return {lot: n for lot, n in named.items() if n} != {p.lot: n for p, n in fifo if n}
 
     def _dispose(self, d: Disposal) -> None:
         if d.kind not in DISPOSAL_KINDS:
@@ -564,7 +572,7 @@ class _Engine:
             self._blocking.append(MissingLots(d.id, missing, rest))
 
     def _transfer(self, t: Transfer) -> None:
-        fee_value = _checked_transfer(t, self._fee_treatment)
+        _checked_transfer(t)
         if t.kind == "self_transfer":
             raise EngineError(
                 f"transfer {t.id!r}: a self-transfer's lots follow the outputs it spends, which needs UTXO"
@@ -573,46 +581,26 @@ class _Engine:
         self._unrecorded_if_needed(t)
         picks, missing, late = self._choose(t)
         if late is not None and t.identified_at is not None:
-            alternative = late.engine._alternative(t, late.picks, fee_value)
+            alternative = late.engine._alternative(t, late.picks)
             self._late.append(LateIdentification(t.id, t.identified_at, alternative, late.replayed))
-        # A shortfall is blocking anyway; the fee comes out of what is covered, leaving a sat to arrive,
-        # and its value follows its sats: the uncovered part goes with the missing basis.
-        picks = self._in_fifo_order(t.account, picks)
-        covered = sum(p.sats for p in picks)
-        fees = _fee_shares(min(t.fee_sats, covered - 1), picks) if picks else []
-        charged = sum(fees)
-        value = share(fee_value, charged, t.fee_sats) if t.fee_sats else ZERO
-        if missing:
-            self._blocking.append(MissingLots(t.id, missing, subtract(fee_value, value)))
+        if missing:  # a shortfall is blocking; what is covered arrives first, the fee after it
+            self._blocking.append(MissingLots(t.id, missing, ZERO))
         if not picks:
             return
-        dispose = t.kind == "withdrawal" or self._fee_treatment == "dispose"
-        if dispose and charged:
-            fee_picks = [Pick(p.lot, f) for p, f in zip(picks, fees, strict=True) if f]
-            disposal = Disposal(t.id, t.account, t.on, t.at, "spend", charged, value)
-            allocations, _ = self._split(disposal, value, fee_picks, apply=True)
-            self._allocations.extend(allocations)
-        orphans: list[tuple[_Open, Decimal]] = []
         moved: list[Moved] = []
-        for pick, fee in zip(picks, fees, strict=True):
-            moving = pick.sats - fee
-            if dispose:
-                if moving:
-                    moved.append(self._move(t, pick.lot, moving))
-                continue
-            if moving:  # carry: the whole part leaves the lot, its fee's basis with the sats that arrive
-                moved.append(self._move(t, pick.lot, pick.sats, arrive=moving))
-            else:  # a part that is all fee (dust): its basis goes to a moved part of the same kind
-                o = self._lots[pick.lot]
-                orphans.append((o, self._take(pick.lot, pick.sats)[0]))
-        if orphans:  # a moved part always exists: fees leave a sat to arrive
-            sources = [o for o, _ in orphans]
-            target = _dust_target(moved, sources, {m.into: self._lots[m.lot] for m in moved}, t.id)
+        orphans: list[tuple[Decimal, int, str]] = []
+        for pick, arrive in self._arrivals(t, picks):
+            if arrive:  # the whole part leaves its lot; the fee's basis arrives with the sats that do
+                moved.append(self._move(t, pick.lot, pick.sats, arrive=arrive))
+            else:  # all fee: its basis (the lower of a gift's two) passes to the oldest moved part
+                basis, loss = self._take(pick.lot, pick.sats)
+                orphans.append((_lower(basis, loss), pick.sats, pick.lot))
+        if orphans:  # a moved part always exists: the fee leaves a sat to arrive
             self._carry(
-                target,
-                sum((b for _, b in orphans), ZERO),
-                sum(f for p, f in zip(picks, fees, strict=True) if p.sats == f),
-                tuple(o.lot.id for o in sources),
+                moved[0],  # the oldest moved part: first in the account's FIFO order
+                sum((b for b, _, _ in orphans), ZERO),
+                sum(n for _, n, _ in orphans),
+                tuple(lot for _, _, lot in orphans),
             )
 
     def _unrecorded_if_needed(self, t: Transfer) -> None:
@@ -651,68 +639,51 @@ class _Engine:
         o.sats, o.basis, o.loss_basis = o.sats - sats, rest, loss_rest
         return basis, loss
 
+    def _arrivals(self, t: Transfer, picks: Sequence[Pick]) -> list[tuple[Pick, int]]:
+        """Each pick, in the account's FIFO order, with the sats of it that arrive. Where the user named
+        only the arriving sats, those arrive and the fee is the rest; otherwise the arriving sats take the
+        lots first in FIFO order and the fee the last sats (ADR 0043)."""
+        ordered = self._in_fifo_order(t.account, picks)
+        named = self._arriving.pop(t.id, None)
+        if named is None:
+            return _fifo_arrivals(t, ordered)
+        return [(p, named.get(p.lot, 0)) for p in ordered]
+
     def _in_fifo_order(self, account: str, picks: Sequence[Pick]) -> list[Pick]:
-        """`picks` in the account's FIFO order, so a transfer's fee roles and its dust carry depend only
+        """`picks` in the account's FIFO order, so which sats arrive and where a fee's basis goes depend only
         on which lots it uses, not on the order they were named in."""
         place = {o.lot.id: k for k, o in enumerate(self._open.get(account, []))}
         return sorted(picks, key=lambda p: place[p.lot])
 
-    def _alternative(
-        self, t: Transfer, picks: Sequence[Pick], fee_value: Decimal
-    ) -> tuple[Allocation | Moved, ...]:
-        """What `picks` would give, nothing used up: the fee disposal's allocations (when the fee is
-        disposed) and the parts that would arrive, with their bases (ADR 0008 §4). Dust parts that would
-        be all fee are left out."""
-        picks = self._in_fifo_order(t.account, picks)
-        fees = _fee_shares(min(t.fee_sats, sum(p.sats for p in picks) - 1), picks)
-        dispose = t.kind == "withdrawal" or self._fee_treatment == "dispose"
-        out: list[Allocation | Moved] = []
-        orphans: list[tuple[_Open, Decimal, int]] = []
-        charged = sum(fees)
-        if dispose and charged > 0:  # the fee's value follows its sats, as in the real run
-            value = share(fee_value, charged, t.fee_sats)
-            disposal = Disposal(t.id, t.account, t.on, t.at, "spend", charged, value)
-            fee_picks = [Pick(p.lot, f) for p, f in zip(picks, fees, strict=True) if f]
-            out.extend(self._split(disposal, value, fee_picks, apply=False)[0])
-        for pick, fee in zip(picks, fees, strict=True):
+    def _alternative(self, t: Transfer, picks: Sequence[Pick]) -> tuple[Moved, ...]:
+        """What `picks` would give, nothing used up: the parts that would arrive, with their bases, as the
+        real run would move them (ADR 0008 §4, ADR 0043)."""
+        out: list[Moved] = []
+        orphans: list[tuple[Decimal, int, str]] = []
+        for pick, arrive in _fifo_arrivals(t, self._in_fifo_order(t.account, picks)):
             o = self._lots[pick.lot]
-            moving = pick.sats - fee
-            if not moving:
-                # all fee: under carry its share of the lot's basis goes to a moved part, as in the real run
-                orphans.append((o, share(o.basis, pick.sats, o.sats), pick.sats))
-                continue
-            if dispose:  # the fee's basis leaves with the fee: the rest is a share of what remains
-                fee_basis = share(o.basis, fee, o.sats)
-                basis = share(subtract(o.basis, fee_basis), moving, o.sats - fee)
-                out.append(Moved(t.id, pick.lot, f"{pick.lot}@{t.id}", t.to, moving, basis, o.lot.acquired))
-            else:  # carry: the whole part's basis arrives with the sats that arrive
-                basis = share(o.basis, pick.sats, o.sats)
+            basis = share(o.basis, pick.sats, o.sats)
+            if arrive:
+                into = f"{pick.lot}@{t.id}"
                 out.append(
-                    Moved(t.id, pick.lot, f"{pick.lot}@{t.id}", t.to, moving, basis, o.lot.acquired, fee)
+                    Moved(t.id, pick.lot, into, t.to, arrive, basis, o.lot.acquired, pick.sats - arrive)
                 )
-        if orphans and not dispose:
-            moved = [m for m in out if isinstance(m, Moved)]
-            sources = [o for o, _, _ in orphans]
-            lots = {m.into: self._lots[m.lot] for m in moved}
-            if all(_plain(o) for o in sources) and any(_plain(lots[m.into]) for m in moved):
-                target = _dust_target(moved, sources, lots, t.id)
-                i = out.index(target)
-                out[i] = Moved(
-                    target.transfer,
-                    target.lot,
-                    target.into,
-                    target.to,
-                    target.sats,
-                    add(target.basis, sum((b for _, b, _ in orphans), ZERO)),
-                    target.acquired,
-                    target.carried_fee + sum(n for _, _, n in orphans),
-                    tuple(o.lot.id for o, _, _ in orphans),
-                )
-            else:  # dust the real run would refuse: shown as its own parts, none arriving (warn-only)
-                out.extend(
-                    Moved(t.id, o.lot.id, f"{o.lot.id}@{t.id}", t.to, 0, b, o.lot.acquired, n)
-                    for o, b, n in orphans
-                )
+            else:
+                loss = None if o.loss_basis is None else share(o.loss_basis, pick.sats, o.sats)
+                orphans.append((_lower(basis, loss), pick.sats, pick.lot))
+        if orphans:
+            first = out[0]
+            out[0] = Moved(
+                first.transfer,
+                first.lot,
+                first.into,
+                first.to,
+                first.sats,
+                add(first.basis, sum((b for b, _, _ in orphans), ZERO)),
+                first.acquired,
+                first.carried_fee + sum(n for _, n, _ in orphans),
+                tuple(lot for _, _, lot in orphans),
+            )
         return tuple(out)
 
     def _move(self, t: Transfer, lot_id: str, sats: int, *, arrive: int | None = None) -> Moved:
@@ -740,9 +711,11 @@ class _Engine:
         return moved
 
     def _carry(self, moved: Moved, basis: Decimal, sats: int, lots: tuple[str, ...]) -> None:
-        """Add the basis of fee parts (`sats` of them) to a moved part (the carry treatment's dust case)."""
+        """Add the basis of all-fee parts (`sats` of them) to a moved part (ADR 0043's dust case)."""
         entry = self._lots[moved.into]
         entry.basis = add(entry.basis, basis)
+        if entry.loss_basis is not None:  # a gift's moved part takes it on both its bases (ADR 0043)
+            entry.loss_basis = add(entry.loss_basis, basis)
         i = next(k for k in range(len(self._moves) - 1, -1, -1) if self._moves[k].into == moved.into)
         self._moves[i] = Moved(
             moved.transfer,
@@ -849,30 +822,47 @@ class _Engine:
             wanted[pick.lot] = wanted.get(pick.lot, 0) + pick.sats
             if wanted[pick.lot] > entry.sats:
                 raise EngineError(f"event {d.id!r}: lot {pick.lot!r} holds fewer sats than chosen")
-        if sum(wanted.values()) != d.sats:
+        chosen_sats = sum(wanted.values())
+        fee = d.fee_sats if isinstance(d, Transfer) else 0
+        if (
+            isinstance(d, Transfer) and chosen_sats == d.sats - fee and fee
+        ):  # the arriving sats named: the fee takes the standing
+            return self._with_fee(d, wanted)  # method's next sats, part of the identification (ADR 0043)
+        if chosen_sats != d.sats:
             raise EngineError(f"event {d.id!r}: the chosen lots don't add up to its sats")
         return [Pick(lot, sats) for lot, sats in wanted.items()]
 
+    def _with_fee(self, t: Transfer, wanted: dict[str, int]) -> list[Pick]:
+        """`wanted` (the arriving sats' lots) and, for the fee, the account's standing method (FIFO) over
+        what those leave in it. The fee's lots are part of the identification, so the late check judges
+        the whole (ADR 0008 §4, ADR 0043)."""
+        need = t.fee_sats
+        picks = dict(wanted)
+        for o in self._open.get(t.account, []):
+            if not need:
+                break
+            take = min(o.sats - picks.get(o.lot.id, 0), need)
+            if take > 0:
+                picks[o.lot.id] = picks.get(o.lot.id, 0) + take
+                need -= take
+        if need:
+            raise EngineError(
+                f"event {t.id!r}: the account holds too few sats for the fee besides the chosen lots"
+            )
+        self._arriving[t.id] = dict(wanted)  # these arrive; the rest of the picks is the fee
+        chosen = [Pick(lot, sats) for lot, sats in picks.items()]
+        self._identified[t.id] = (tuple(chosen), dict(wanted))
+        return chosen
 
-def _checked_transfer(t: Transfer, fee_treatment: FeeTreatment) -> Decimal:
-    """Check a transfer's own fields; return its fee value (0.00 when its fee isn't disposed)."""
+
+def _checked_transfer(t: Transfer) -> None:
+    """Check a transfer's own fields."""
     if t.kind not in TRANSFER_KINDS:
         raise EngineError(f"transfer {t.id!r}: unknown kind {t.kind!r}")
     if not isinstance(t.to, str) or not t.to or t.to == t.account:
         raise EngineError(f"transfer {t.id!r}: it moves coins to another account")
     if isinstance(t.fee_sats, bool) or not isinstance(t.fee_sats, int) or not 0 <= t.fee_sats < t.sats:
         raise EngineError(f"transfer {t.id!r}: its fee is a whole number of sats below the sats it moves")
-    disposed = t.fee_sats > 0 and (t.kind == "withdrawal" or fee_treatment == "dispose")
-    if t.fee_value is None:
-        if disposed:  # refuse rather than book a loss at proceeds 0.00
-            raise EngineError(f"transfer {t.id!r}: a fee that is disposed needs its value (fee_value)")
-        fee_value = ZERO
-    else:
-        fee_value = _usd(t.fee_value, t.id)
-        if t.fee_sats == 0:
-            raise EngineError(f"transfer {t.id!r}: a fee value needs fee sats")
-        if not disposed:
-            fee_value = ZERO  # a carried fee is no disposal: its value plays no part
     if t.kind != "withdrawal" and (t.missing_basis is not None or t.missing_acquired is not None):
         raise EngineError(f"transfer {t.id!r}: only a withdrawal names a basis for unrecorded sats")
     if (t.missing_basis is None) != (t.missing_acquired is None):
@@ -883,47 +873,24 @@ def _checked_transfer(t: Transfer, fee_treatment: FeeTreatment) -> Decimal:
         raise EngineError(f"transfer {t.id!r}: unrecorded sats' date must be from genesis to the withdrawal")
     if t.picks is not None and t.missing_basis is not None:
         raise EngineError(f"transfer {t.id!r}: a chosen set of lots leaves no sats unrecorded")
-    return fee_value
 
 
-def _fee_shares(fee: int, picks: Sequence[Pick]) -> list[int]:
-    """The fee sats each pick pays, the picks in the account's FIFO order: in proportion to its sats,
-    rounded down, then one more sat each to the picks with the largest remainders (ties in order),
-    while each part keeps at least one sat. Any rest after that (dust: fewer sats than the parts can
-    spare) is paid by the smallest picks first, which then arrive empty."""
-    total = sum(p.sats for p in picks)
-    shares = [fee * p.sats // total for p in picks]
-    rest = fee - sum(shares)  # fewer than len(picks)
-    for i in sorted(range(len(picks)), key=lambda i: (-(fee * picks[i].sats % total), i)):
-        if rest and shares[i] < picks[i].sats - 1:
-            shares[i] += 1
-            rest -= 1
-    for i in sorted(range(len(picks)), key=lambda i: (picks[i].sats, i)):
-        room = min(rest, picks[i].sats - shares[i])
-        shares[i] += room
-        rest -= room
-    return shares
+def _fifo_arrivals(t: Transfer, picks: Sequence[Pick]) -> list[tuple[Pick, int]]:
+    """Each pick, in the account's FIFO order, with the sats of it that arrive: the arriving sats take the
+    lots first and the fee the last sats (ADR 0043). On a short transfer the picks all arrive, up to the
+    sats that arrive, and the fee falls on the missing sats (a blocking shortfall)."""
+    arriving = min(sum(p.sats for p in picks), t.sats - t.fee_sats)
+    out: list[tuple[Pick, int]] = []
+    for p in picks:
+        arrive = min(p.sats, arriving)
+        arriving -= arrive
+        out.append((p, arrive))
+    return out
 
 
-def _plain(o: _Open) -> bool:
-    """A lot with one known cost basis: not a gift (no donor's basis or loss basis) and not unknown."""
-    return not o.gift and o.loss_basis is None and not o.lot.unknown_basis
-
-
-def _dust_target(
-    moved: Sequence[Moved], orphans: Sequence[_Open], lots: Mapping[str, _Open], tid: str
-) -> Moved:
-    """The moved part that takes all-fee dust parts' basis: the last plain one in FIFO order. Basis is
-    only carried between plain lots (one known cost basis each): a gift's dual basis or an unknown
-    basis can't be merged into another lot, so dust that is such a lot, or that has no plain moved part
-    to go to, is refused rather than mis-stated."""
-    plain = [m for m in moved if _plain(lots[m.into])]
-    if not all(_plain(o) for o in orphans) or not plain:
-        raise EngineError(
-            f"transfer {tid!r}: a fee that uses up a part of a gift or unknown-basis lot, or with no plain "
-            "lot moving to take its basis, can't carry the basis to another lot; use fee_treatment='dispose'"
-        )
-    return plain[-1]
+def _lower(basis: Decimal, loss: Decimal | None) -> Decimal:
+    """The basis a fee part passes to another lot: the lower of a gift's two, the conservative one."""
+    return basis if loss is None else min(basis, loss)
 
 
 def _merged(picks: Sequence[Pick]) -> dict[str, int]:
