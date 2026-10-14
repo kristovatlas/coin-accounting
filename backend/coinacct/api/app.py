@@ -497,8 +497,10 @@ class Subject(Strict):
 USD = Annotated[str, Field(pattern=r"^-?[0-9]{1,15}(\.[0-9]{1,2})?$")]  # exact cents, as text
 
 
-_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_ISO_MOMENT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})")
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)  # ASCII digits only
+_ISO_MOMENT = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})", re.ASCII
+)
 
 
 def _iso_date(value: object) -> object:

@@ -3,6 +3,7 @@ Synthetic data only."""
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,7 +18,7 @@ from coinacct.services.startup import NodeStatus
 from coinacct.storage import accounts as ac
 from coinacct.storage.chain_state import record_chain
 from coinacct.storage.datadir import open_data_dir
-from coinacct.storage.db import open_db, open_reader
+from coinacct.storage.db import open_db, open_reader, transaction
 
 from .asgi import PORT, Reply, call
 
@@ -26,11 +27,11 @@ WIF = "5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ"  # the well-known ex
 
 
 class World:
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, timeout: float = 5.0) -> None:
         d = tmp_path / "data"
         d.mkdir(mode=0o700)
         data = open_data_dir(str(d))
-        self.db = open_db(data)
+        self.db = open_db(data, timeout=timeout)
         record_chain(self.db, "regtest")
         self.wallet = ac.add_tax_account(self.db, "Wallet", "self_custody")
         exchange = ac.add_entity(self.db, "Some exchange", "exchange")
@@ -103,7 +104,9 @@ def test_an_event_is_added_listed_edited_and_removed(world: World) -> None:
 
 
 def test_a_choice_of_lots_is_set_now_and_listed_adr0008(world: World) -> None:
-    assert world.post("/api/events", buy(world)).json()["id"] == 1  # the lot chosen: event 1's
+    assert (
+        world.post("/api/events", buy(world, account=world.exchange)).json()["id"] == 1
+    )  # the lot chosen: event 1's, bought in the sale's account
     sale = world.post("/api/events", sell(world)).json()["id"]
     assert (
         world.post("/api/events/identify", {"id": sale, "choices": [{"lot": "1", "sats": 1000}]}).status
@@ -135,6 +138,7 @@ def test_a_choice_of_lots_is_set_now_and_listed_adr0008(world: World) -> None:
         ({"at": "1740830400"}, 422),  # nor one written as text
         ({"at": "1740830400.5"}, 422),
         ({"at": "2025-03-01"}, 422),  # a date isn't a moment
+        ({"at": "\uff12\uff10\uff12\uff15-03-01T12:00:00Z"}, 422),  # full-width digits: ASCII only
         ({"valuation_source": f"from {WIF}"}, 422),  # a private key in free text (T-703)
         ({"at": "0001-01-01T00:00:00+05:00"}, 422),  # a moment at the calendar's edge
         ({"kind": "swap"}, 422),
@@ -183,7 +187,9 @@ def test_an_unknown_event_is_not_found(world: World) -> None:
     ],
 )
 def test_invalid_choices_are_refused_and_nothing_is_logged(world: World, choices: list[Any]) -> None:
-    assert world.post("/api/events", buy(world)).json()["id"] == 1  # the lot chosen: event 1's
+    assert (
+        world.post("/api/events", buy(world, account=world.exchange)).json()["id"] == 1
+    )  # the lot chosen: event 1's, bought in the sale's account
     sale = world.post("/api/events", sell(world)).json()["id"]
     before = world.db.execute("SELECT count(*) FROM change_log").fetchone()
     reply = world.post("/api/events/identify", {"id": sale, "choices": choices})
@@ -193,11 +199,18 @@ def test_invalid_choices_are_refused_and_nothing_is_logged(world: World, choices
 
 
 def test_an_edit_with_a_key_or_a_misfit_is_refused(world: World) -> None:
-    assert world.post("/api/events", buy(world)).json()["id"] == 1  # the lot chosen: event 1's
+    assert (
+        world.post("/api/events", buy(world, account=world.exchange)).json()["id"] == 1
+    )  # the lot chosen: event 1's, bought in the sale's account
     sale = world.post("/api/events", sell(world)).json()["id"]
     world.post("/api/events/identify", {"id": sale, "choices": [{"lot": "1", "sats": 1000}]})
+    before = (world.get("/api/events").json(), world.db.execute("SELECT count(*) FROM change_log").fetchone())
     assert world.post("/api/events/update", {"id": sale, "event": sell(world, note=WIF)}).status == 422
     assert world.post("/api/events/update", {"id": sale, "event": buy(world)}).status == 422  # its choice
+    assert world.post("/api/events/remove", {"id": 1}).status == 422  # its lot is named
+    assert world.post("/api/events/update", {"id": 1, "event": buy(world, sats=2000)}).status == 422
+    after = (world.get("/api/events").json(), world.db.execute("SELECT count(*) FROM change_log").fetchone())
+    assert after == before
 
 
 def test_every_field_round_trips_and_events_list_by_moment(world: World) -> None:
@@ -365,3 +378,49 @@ def test_a_movement_to_its_own_account_gets_the_storage_layers_message(world: Wo
     reply = world.post("/api/events", body)
     assert reply.status == 422
     assert b"another account" in reply.body
+
+
+@pytest.mark.parametrize("lot", ["57", "05"])
+def test_identify_refuses_a_lot_of_no_stored_event(world: World, lot: str) -> None:
+    sale = world.post("/api/events", sell(world)).json()["id"]
+    reply = world.post("/api/events/identify", {"id": sale, "choices": [{"lot": lot, "sats": 1000}]})
+    assert reply.status == 422
+    assert world.db.execute("SELECT count(*) FROM identification").fetchone() == (0,)
+
+
+def test_identify_refuses_a_choice_on_an_acquisition(world: World) -> None:
+    bought = world.post("/api/events", buy(world)).json()["id"]
+    reply = world.post(
+        "/api/events/identify", {"id": bought, "choices": [{"lot": str(bought), "sats": 1000}]}
+    )
+    assert reply.status == 422 and b"disposal or a movement" in reply.body
+
+
+def test_a_damaged_stored_event_is_a_422_with_the_remedy_t408(world: World) -> None:
+    world.post("/api/events", buy(world))
+    world.db.execute("UPDATE event SET usd = '1.001'")  # damage that bypasses the module
+    reply = world.get("/api/events")
+    assert reply.status == 422
+    assert reply.json() == {"error": "a stored event is damaged (T-408): restore the user DB from a backup"}
+
+
+def test_a_busy_db_is_a_503(tmp_path: Path) -> None:
+    w = World(tmp_path, timeout=0.1)
+    inside, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with transaction(w.db):
+            inside.set()
+            release.wait(5)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    try:
+        assert inside.wait(5)
+        for path, body in (("/api/events", buy(w)), ("/api/events/identify", {"id": 1, "choices": []})):
+            reply = w.post(path, body)
+            assert reply.status == 503 and "busy" in reply.json()["error"]
+    finally:
+        release.set()
+        t.join(5)
+        w.db.close()

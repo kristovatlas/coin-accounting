@@ -5,7 +5,8 @@ The time recorded is the app's clock, in UTC, and so is when a choice of lots wa
 it (ADR 0008 §3), so a late choice can't be made to look timely (T-508). An unknown event is `NotFound`.
 A refusal is `ImportRefused` with the storage layer's fixed message, which names the field and never the
 value (T-403); a busy DB is `Busy`; a private key in free text is refused before it reaches the DB
-(T-703).
+(T-703). These are the import and graph services' error types, which the API maps to 422, 404 and 503:
+a change to them changes the event routes' statuses too.
 """
 
 from __future__ import annotations
@@ -45,8 +46,9 @@ class Events:
         self._writer, self._open_reader, self._now = writer, open_reader, now
 
     def list(self) -> list[tuple[Stored, tuple[tuple[Choice, ...], datetime.datetime | None]]]:
-        """Every event in the order of its moment, with its choice of lots, from one snapshot."""
-        with db_errors():
+        """Every event in the order of its moment, with its choice of lots, from one snapshot. A damaged
+        stored row is storage's T-408 refusal, with its remedy."""
+        with _refused():
             reader = self._open_reader()
             try:
                 reader.execute("BEGIN")  # one snapshot for both reads (architecture §3)
@@ -96,9 +98,9 @@ class Events:
 
     def identify(self, event_id: int, choices: tuple[Choice, ...]) -> None:
         """The user's choice of lots, made now: the app records when (ADR 0008 §3, T-508)."""
-        now = self._now()
-        made = datetime.datetime.fromisoformat(now) if choices else None
-        with _refused():
+        with _refused(), transaction(self._writer):  # the clock is read under the writer's lock (T-508)
+            now = self._now()
+            made = datetime.datetime.fromisoformat(now) if choices else None
             events.identify(self._writer, event_id, choices, made, at=now)
 
 
