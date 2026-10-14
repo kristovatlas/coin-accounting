@@ -318,6 +318,8 @@ def test_the_runtime_serves_imports_and_connects_them_to_the_chain_jobs(tmp_path
     tag = {"script": p2wpkh(2)[1], "entity_id": ac.ME, "tax_account_id": wallet.json()["id"]}
     assert call(rt.app, "POST", "/api/tags/address", headers=auth, json_body=tag).json() == {"new": True}
     assert requested == ["sync", "sync"]
+    # and the event routes
+    assert call(rt.app, "GET", "/api/events", headers=auth).json() == {"events": []}
     db.close()
 
 

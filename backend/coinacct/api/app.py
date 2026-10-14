@@ -21,6 +21,10 @@ Routes:
   A refusal is a 422 with the service's fixed message, which never repeats the upload (T-403,
   T-703); a busy DB is a 503; a descriptor while offline is a 409 (T-203). Upload size is bounded by
   the security layer's body limit, before any of this runs.
+- Events (bearer; PLAN §2, §7, T-408, T-508), through `services.events.Events`: `GET /api/events`
+  (every event with its choice of lots), `POST /api/events` (add), `/api/events/update`,
+  `/api/events/remove` and `/api/events/identify` (when, from the app's clock). An unknown event is
+  404, a refusal 422 with a fixed message, a busy DB 503.
 - History (bearer; PLAN §3), through `services.history.History`, from the chain cache only, as of the
   last finished sync (`as_of`; each address's `scanned_to` says how far its own history is scanned):
   - `GET /api/addresses[?tax_account_id=N]`: every address, with its owner, balance, UTXO count and
@@ -40,18 +44,23 @@ third-party assets (T-106), and the default error body echoes the request input.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Mapping
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field
 
 from coinacct.api.placeholder import APP_JS, INDEX_HTML
 from coinacct.api.security import MAX_BODY_BYTES, SecurityMiddleware
 from coinacct.api.session import ClaimError, Sessions
+from coinacct.domain.chain import MAX_SATS
 from coinacct.domain.keys import PrivateKeyError
+from coinacct.services import events as event_service
 from coinacct.services import imports as import_service
 from coinacct.services.graph import Graph, NotFound
 from coinacct.services.history import History
@@ -156,6 +165,7 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
     history: History | None = None,
     graph: Graph | None = None,
     tagging: Tagging | None = None,
+    events: event_service.Events | None = None,
 ) -> SecurityMiddleware:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -245,6 +255,8 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
         _graph_routes(app, graph, authenticated)
     if tagging is not None:
         _tag_routes(app, tagging, authenticated)
+    if events is not None:
+        _event_routes(app, events, authenticated)
     return SecurityMiddleware(app, port=port)
 
 
@@ -458,7 +470,9 @@ def _graph_routes(app: FastAPI, graph: Graph, authenticated: list[Any]) -> None:
         }
 
 
-RowId = Annotated[int, Field(ge=1, le=2**63 - 1)]  # SQLite's integer range: no OverflowError, no 500
+RowId = Annotated[
+    int, Field(strict=True, ge=1, le=2**63 - 1)
+]  # SQLite's integer range: no OverflowError, no 500
 
 
 class AddressTag(Strict):
@@ -478,6 +492,155 @@ class MixingFlag(Strict):
 class Subject(Strict):
     kind: Literal["address_tag", "tx_flag"]  # a 32-byte script and a txid look alike
     subject: str = Field(pattern=r"^(?:[0-9a-f]{2}){1,10000}$")  # a script or a txid
+
+
+USD = Annotated[str, Field(pattern=r"^-?[0-9]{1,15}(\.[0-9]{1,2})?$")]  # exact cents, as text
+
+
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)  # ASCII digits only
+_ISO_MOMENT = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})", re.ASCII
+)
+
+
+def _iso_date(value: object) -> object:
+    """A date is ISO 8601 text: pydantic would read a number, or a number as text, as a Unix time."""
+    if not isinstance(value, str) or not _ISO_DATE.fullmatch(value):
+        raise ValueError("an ISO 8601 date")
+    return value
+
+
+def _iso_moment(value: object) -> object:
+    """A moment is ISO 8601 text with its zone, never a Unix time in any form."""
+    if not isinstance(value, str) or not _ISO_MOMENT.fullmatch(value):
+        raise ValueError("an ISO 8601 moment")
+    return value
+
+
+class EventBody(Strict):
+    kind: Literal[
+        "buy",
+        "p2p_buy",
+        "income",
+        "gift_in",
+        "inherit",
+        "self_transfer",
+        "deposit",
+        "withdrawal",
+        "sell",
+        "spend",
+        "gift_out",
+    ]
+    account: RowId
+    to: RowId | None = None
+    at: Annotated[AwareDatetime, BeforeValidator(_iso_moment)]
+    sats: int = Field(strict=True, ge=1, le=MAX_SATS)
+    usd: USD | None = None
+    fee_sats: int = Field(default=0, strict=True, ge=0, le=MAX_SATS)
+    valuation_source: str | None = Field(default=None, min_length=1, max_length=200)
+    txid: str | None = Field(default=None, pattern=HASH)
+    fmv: USD | None = None
+    donor_acquired: Annotated[date, BeforeValidator(_iso_date)] | None = None
+    donor_always_long: bool = Field(default=False, strict=True)
+    missing_basis: USD | None = None
+    missing_acquired: Annotated[date, BeforeValidator(_iso_date)] | None = None
+    note: str | None = Field(default=None, min_length=1, max_length=2000)
+
+    def event(self) -> event_service.Event:
+        def money(v: str | None) -> Decimal | None:
+            return None if v is None else Decimal(v)
+
+        return event_service.Event(
+            self.kind,
+            self.account,
+            self.at,
+            self.sats,
+            money(self.usd),
+            self.to,
+            self.fee_sats,
+            self.valuation_source,
+            self.txid,
+            money(self.fmv),
+            self.donor_acquired,
+            self.donor_always_long,
+            money(self.missing_basis),
+            self.missing_acquired,
+            self.note,
+        )
+
+
+class EventEdit(Strict):
+    id: RowId
+    event: EventBody
+
+
+class EventRef(Strict):
+    id: RowId
+
+
+class ChoiceBody(Strict):
+    lot: str = Field(pattern=r"^[0-9A-Za-z_.:@#-]{1,400}$")  # the engine's lot ids
+    sats: int = Field(strict=True, ge=1, le=MAX_SATS)
+
+
+class Identification(Strict):
+    """A choice of lots made now: the app records when (ADR 0008 §3), so the body doesn't say."""
+
+    id: RowId
+    choices: list[ChoiceBody] = Field(max_length=1000)
+
+
+def _event_json(
+    stored: event_service.Stored, choice: tuple[tuple[event_service.Choice, ...], datetime | None]
+) -> dict[str, Any]:
+    e = stored.event
+    choices, chosen_at = choice
+    return {
+        "id": stored.id,
+        "kind": e.kind,
+        "account": e.account,
+        "to": e.to,
+        "at": e.at.isoformat(),
+        "sats": e.sats,
+        "usd": None if e.usd is None else str(e.usd),
+        "fee_sats": e.fee_sats,
+        "valuation_source": e.valuation_source,
+        "txid": e.txid,
+        "fmv": None if e.fmv is None else str(e.fmv),
+        "donor_acquired": None if e.donor_acquired is None else e.donor_acquired.isoformat(),
+        "donor_always_long": e.donor_always_long,
+        "missing_basis": None if e.missing_basis is None else str(e.missing_basis),
+        "missing_acquired": None if e.missing_acquired is None else e.missing_acquired.isoformat(),
+        "note": e.note,
+        "choices": [{"lot": c.lot, "sats": c.sats} for c in choices],
+        "identified_at": None if chosen_at is None else chosen_at.isoformat(),
+    }
+
+
+def _event_routes(app: FastAPI, service: event_service.Events, authenticated: list[Any]) -> None:
+    @app.get("/api/events", dependencies=authenticated)
+    def list_events() -> dict[str, Any]:
+        return {"events": [_event_json(s, c) for s, c in service.list()]}
+
+    @app.post("/api/events", status_code=201, dependencies=authenticated)
+    def add_event(body: EventBody) -> dict[str, int]:
+        return {"id": service.add(body.event())}
+
+    @app.post("/api/events/update", dependencies=authenticated)
+    def update_event(body: EventEdit) -> dict[str, int]:
+        service.update(body.id, body.event.event())
+        return {"id": body.id}
+
+    @app.post("/api/events/remove", dependencies=authenticated)
+    def remove_event(body: EventRef) -> dict[str, int]:
+        service.remove(body.id)
+        return {"id": body.id}
+
+    @app.post("/api/events/identify", dependencies=authenticated)
+    def identify(body: Identification) -> dict[str, int]:
+        choices = tuple(event_service.Choice(c.lot, c.sats) for c in body.choices)
+        service.identify(body.id, choices)
+        return {"id": body.id}
 
 
 # POST bodies, as for the graph: scripts and txids stay out of URLs (T-105).
