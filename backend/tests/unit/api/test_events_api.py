@@ -103,22 +103,23 @@ def test_an_event_is_added_listed_edited_and_removed(world: World) -> None:
 
 
 def test_a_choice_of_lots_is_set_now_and_listed_adr0008(world: World) -> None:
+    assert world.post("/api/events", buy(world)).json()["id"] == 1  # the lot chosen: event 1's
     sale = world.post("/api/events", sell(world)).json()["id"]
     assert (
-        world.post("/api/events/identify", {"id": sale, "choices": [{"lot": "7", "sats": 1000}]}).status
+        world.post("/api/events/identify", {"id": sale, "choices": [{"lot": "1", "sats": 1000}]}).status
         == 200
     )
-    (listed,) = world.get("/api/events").json()["events"]
+    (listed,) = [e for e in world.get("/api/events").json()["events"] if e["id"] == sale]
     # the app records when the choice was made: its clock, never the client's say (T-508)
     assert (listed["choices"], listed["identified_at"]) == (
-        [{"lot": "7", "sats": 1000}],
+        [{"lot": "1", "sats": 1000}],
         "2026-10-14T12:00:00+00:00",
     )
     assert world.post("/api/events/identify", {"id": sale, "choices": []}).status == 200
-    assert world.get("/api/events").json()["events"][0]["choices"] == []
+    assert [e["choices"] for e in world.get("/api/events").json()["events"] if e["id"] == sale] == [[]]
     reply = world.post(
         "/api/events/identify",
-        {"id": sale, "choices": [{"lot": "7", "sats": 1000}], "identified_at": "2025-01-01T00:00:00Z"},
+        {"id": sale, "choices": [{"lot": "1", "sats": 1000}], "identified_at": "2025-01-01T00:00:00Z"},
     )
     assert reply.status == 422  # the body can't say when
 
@@ -131,6 +132,9 @@ def test_a_choice_of_lots_is_set_now_and_listed_adr0008(world: World) -> None:
         ({"sats": 0}, 422),
         ({"sats": "1000"}, 422),  # strict: no number as text
         ({"at": 1740830400}, 422),  # strict: no Unix time for a moment
+        ({"at": "1740830400"}, 422),  # nor one written as text
+        ({"at": "1740830400.5"}, 422),
+        ({"at": "2025-03-01"}, 422),  # a date isn't a moment
         ({"valuation_source": f"from {WIF}"}, 422),  # a private key in free text (T-703)
         ({"at": "0001-01-01T00:00:00+05:00"}, 422),  # a moment at the calendar's edge
         ({"kind": "swap"}, 422),
@@ -147,6 +151,7 @@ def test_invalid_events_are_refused_without_echoing_them(
     assert reply.status == status
     assert WIF.encode() not in reply.body and b"10.001" not in reply.body
     assert world.get("/api/events").json()["events"] == []
+    assert world.db.execute("SELECT count(*) FROM change_log").fetchone() == (0,)
 
 
 @pytest.mark.parametrize(
@@ -172,12 +177,13 @@ def test_an_unknown_event_is_not_found(world: World) -> None:
 @pytest.mark.parametrize(
     "choices",
     [
-        [{"lot": "7", "sats": 600}],  # short of the sale
+        [{"lot": "1", "sats": 600}],  # short of the sale
         [{"lot": WIF, "sats": 1000}],  # a key, though in the lot-id alphabet (T-703)
         [{"lot": "7 ; x", "sats": 1000}],
     ],
 )
 def test_invalid_choices_are_refused_and_nothing_is_logged(world: World, choices: list[Any]) -> None:
+    assert world.post("/api/events", buy(world)).json()["id"] == 1  # the lot chosen: event 1's
     sale = world.post("/api/events", sell(world)).json()["id"]
     before = world.db.execute("SELECT count(*) FROM change_log").fetchone()
     reply = world.post("/api/events/identify", {"id": sale, "choices": choices})
@@ -187,8 +193,9 @@ def test_invalid_choices_are_refused_and_nothing_is_logged(world: World, choices
 
 
 def test_an_edit_with_a_key_or_a_misfit_is_refused(world: World) -> None:
+    assert world.post("/api/events", buy(world)).json()["id"] == 1  # the lot chosen: event 1's
     sale = world.post("/api/events", sell(world)).json()["id"]
-    world.post("/api/events/identify", {"id": sale, "choices": [{"lot": "7", "sats": 1000}]})
+    world.post("/api/events/identify", {"id": sale, "choices": [{"lot": "1", "sats": 1000}]})
     assert world.post("/api/events/update", {"id": sale, "event": sell(world, note=WIF)}).status == 422
     assert world.post("/api/events/update", {"id": sale, "event": buy(world)}).status == 422  # its choice
 
@@ -320,3 +327,41 @@ def test_the_apps_clock_rounds_up_to_the_second_t508() -> None:
     sale = datetime(2025, 3, 1, 12, 0, 0, tzinfo=UTC)
     assert _second_up(sale) == sale
     assert _second_up(sale.replace(microsecond=1)) == sale + timedelta(seconds=1)  # never before the sale
+
+
+@pytest.mark.parametrize("donor_acquired", ["1577836800", "2020-01-01T00:00:00Z", "20200101"])
+def test_a_donor_date_is_an_iso_date_only(world: World, donor_acquired: str) -> None:
+    gift = {
+        "kind": "gift_in",
+        "account": world.wallet,
+        "at": "2025-02-01T00:00:00Z",
+        "sats": 10,
+        "fmv": "1.00",
+        "donor_acquired": donor_acquired,
+    }
+    assert world.post("/api/events", gift).status == 422
+    assert world.get("/api/events").json()["events"] == []
+
+
+def test_an_unknown_event_is_404_whatever_the_body(world: World) -> None:
+    wrong_way = {
+        "kind": "deposit",
+        "account": world.exchange,
+        "to": world.wallet,
+        "at": "2025-03-01T12:00:00Z",
+        "sats": 10,
+    }
+    assert world.post("/api/events/update", {"id": 12345, "event": wrong_way}).status == 404
+
+
+def test_a_movement_to_its_own_account_gets_the_storage_layers_message(world: World) -> None:
+    body = {
+        "kind": "deposit",
+        "account": world.wallet,
+        "to": world.wallet,
+        "at": "2025-03-01T12:00:00Z",
+        "sats": 10,
+    }
+    reply = world.post("/api/events", body)
+    assert reply.status == 422
+    assert b"another account" in reply.body

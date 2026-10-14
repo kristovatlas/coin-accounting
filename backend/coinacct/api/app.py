@@ -44,6 +44,7 @@ third-party assets (T-106), and the default error body echoes the request input.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from decimal import Decimal
@@ -496,10 +497,21 @@ class Subject(Strict):
 USD = Annotated[str, Field(pattern=r"^-?[0-9]{1,15}(\.[0-9]{1,2})?$")]  # exact cents, as text
 
 
-def _iso_text(value: object) -> object:
-    """A moment or a date is ISO 8601 text: pydantic would read a number as a Unix time."""
-    if not isinstance(value, str):
-        raise ValueError("ISO 8601 text")
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_ISO_MOMENT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})")
+
+
+def _iso_date(value: object) -> object:
+    """A date is ISO 8601 text: pydantic would read a number, or a number as text, as a Unix time."""
+    if not isinstance(value, str) or not _ISO_DATE.fullmatch(value):
+        raise ValueError("an ISO 8601 date")
+    return value
+
+
+def _iso_moment(value: object) -> object:
+    """A moment is ISO 8601 text with its zone, never a Unix time in any form."""
+    if not isinstance(value, str) or not _ISO_MOMENT.fullmatch(value):
+        raise ValueError("an ISO 8601 moment")
     return value
 
 
@@ -519,17 +531,17 @@ class EventBody(Strict):
     ]
     account: RowId
     to: RowId | None = None
-    at: Annotated[AwareDatetime, BeforeValidator(_iso_text)]
+    at: Annotated[AwareDatetime, BeforeValidator(_iso_moment)]
     sats: int = Field(strict=True, ge=1, le=MAX_SATS)
     usd: USD | None = None
     fee_sats: int = Field(default=0, strict=True, ge=0, le=MAX_SATS)
     valuation_source: str | None = Field(default=None, min_length=1, max_length=200)
     txid: str | None = Field(default=None, pattern=HASH)
     fmv: USD | None = None
-    donor_acquired: Annotated[date, BeforeValidator(_iso_text)] | None = None
+    donor_acquired: Annotated[date, BeforeValidator(_iso_date)] | None = None
     donor_always_long: bool = Field(default=False, strict=True)
     missing_basis: USD | None = None
-    missing_acquired: Annotated[date, BeforeValidator(_iso_text)] | None = None
+    missing_acquired: Annotated[date, BeforeValidator(_iso_date)] | None = None
     note: str | None = Field(default=None, min_length=1, max_length=2000)
 
     def event(self) -> event_service.Event:

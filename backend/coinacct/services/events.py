@@ -59,18 +59,20 @@ class Events:
 
     def add(self, event: Event) -> int:
         with _refused(), transaction(self._writer):  # the check and the write, under the writer's lock
-            self._check_direction(event)
-            return events.add_event(self._writer, event, at=self._now())
+            event_id = events.add_event(self._writer, event, at=self._now())
+            self._check_direction(event)  # a refusal rolls the write back
+            return event_id
 
     def update(self, event_id: int, event: Event) -> None:
         with _refused(), transaction(self._writer):
-            self._check_direction(event)
-            events.update_event(self._writer, event_id, event, at=self._now())
+            events.update_event(self._writer, event_id, event, at=self._now())  # an unknown event: 404
+            self._check_direction(event)  # a refusal rolls the write back
 
     def _check_direction(self, event: Event) -> None:
         """A movement goes the way its kind says (PLAN §7): a deposit from a self-custody account into a
         custodial one, a withdrawal out of a custodial one (into a wallet, or another exchange account),
-        a self-transfer between self-custody ones. Called inside the write's transaction."""
+        a self-transfer between self-custody ones. Called after the write, inside its transaction, so the
+        storage layer's refusals (an unknown event or account) come first."""
         if event.to is None or event.kind not in events.MOVEMENTS:
             return  # the storage layer refuses a destination on anything else
         kinds = {a.id: a.kind for a in accounts.tax_accounts(self._writer)}
