@@ -249,12 +249,6 @@ def test_a_transfer_moves_to_another_account() -> None:
         run([*BUYS, move("t", "w", "w", BTC)])
 
 
-def test_there_is_no_fee_treatment_setting_adr0043() -> None:
-    # ADR 0043 removed the "fee is a disposal" setting: run() takes events and methods only
-    with pytest.raises(TypeError):
-        run([], fee_treatment="dispose")  # type: ignore[call-arg]
-
-
 # Property: any mix of buys, deposits, withdrawals and sales conserves sats (fees leave the books, their
 # basis stays with the coins) and basis (T-502, ADR 0043).
 
@@ -311,10 +305,6 @@ def test_outpoint_style_ids_are_allowed() -> None:
     assert lot.id.endswith(":0")
 
 
-def test_a_carried_fee_needs_no_value_adr0043() -> None:
-    assert run([*BUYS, move("d", "w", "x", 10, fee_sats=1)]).allocations == ()
-
-
 @pytest.mark.parametrize("kw", [{"missing_basis": D("1.00")}, {"missing_acquired": date(2024, 1, 1)}])
 def test_unrecorded_sats_need_both_a_basis_and_an_original_date(kw: dict[str, Any]) -> None:
     with pytest.raises(EngineError, match="both"):
@@ -356,13 +346,14 @@ def test_a_moved_gift_keeps_its_fifo_place_by_the_day_it_was_received_241() -> N
     assert a.lot == "e"
 
 
-def test_a_short_deposits_fee_comes_out_of_what_is_covered() -> None:
-    # 10 sats leave, the wallet holds 5: the fee takes at most 4 of them (one sat must arrive), the rest
-    # of the transfer is missing basis.
+def test_a_short_deposits_known_sats_arrive_first_adr0043() -> None:
+    # 10 sats leave, the wallet holds 5. The arriving sats take the lots first: with a 4-sat fee 6 sats
+    # arrive, so all 5 known sats arrive and the fee falls on the missing sats; with an 8-sat fee 2
+    # arrive and 3 of b's sats are fee (ADR 0043). The rest of the transfer is missing basis.
     b = Acquisition("b", "w", date(2024, 1, 1), "buy", 5, D("5.00"))
-    for fee in (4, 8):
+    for fee, arrive in ((4, 5), (8, 2)):
         result = run([b, move("d", "w", "x", 10, fee_sats=fee)])
-        assert result.moves == (Moved("d", "b", "b@d", "x", 1, D("5.00"), date(2024, 1, 1), 4),)
+        assert result.moves == (Moved("d", "b", "b@d", "x", arrive, D("5.00"), date(2024, 1, 1), 5 - arrive),)
         assert result.blocking == (MissingLots("d", 5, D("0.00")),)
 
 
@@ -382,7 +373,7 @@ def test_a_chosen_set_of_lots_leaves_no_sats_unrecorded() -> None:
         run([*BUYS, wd])
 
 
-def test_a_late_deposits_warning_under_carry_shows_the_fee_basis_arriving() -> None:
+def test_a_late_deposits_warning_shows_the_fee_basis_arriving() -> None:
     # FIFO would have taken b1 (10 sats, 1.00) with a 2-sat carried fee: 8 sats arrive with all 1.00.
     events: list[Event] = [
         Acquisition("b1", "w", date(2024, 1, 1), "buy", 10, D("1.00")),
@@ -419,7 +410,7 @@ def test_a_fee_over_many_lots_takes_the_last_ones_adr0043() -> None:
     assert result.moves[0].basis == D("20.00") and len(result.moves[0].carried_from) == 19
 
 
-def test_a_late_choice_of_fifos_lots_in_another_order_gets_the_same_fee_roles() -> None:
+def test_a_late_choice_of_fifos_lots_in_another_order_moves_the_same_sats() -> None:
     # Two 2-sat lots and a 1-sat fee: the fee falls on the same lot whichever order the
     # user names them in, so a late choice of FIFO's own lots needs no warning.
     events: list[Event] = [
@@ -595,3 +586,65 @@ def test_a_self_transfer_is_refused_until_utxo_tracing_exists(picks: tuple[Pick,
     ]
     with pytest.raises(EngineError, match=r"transfer 't1': .* needs UTXO tracing \(not built yet, #243\)"):
         run(events)
+
+
+EXCHANGE: list[Event] = [
+    Acquisition("e1", "x", date(2024, 1, 1), "buy", 10, D("1.00")),
+    Acquisition("e2", "x", date(2024, 2, 1), "buy", 10, D("3.00")),
+]
+
+
+def test_a_choice_of_only_the_arriving_sats_takes_the_fee_by_the_standing_method_adr0043() -> None:
+    # 10 sats leave e's exchange, 2 of them the fee; the user names 8 of e2 (on time). The fee takes the
+    # standing method's next sats besides those, FIFO: 2 of e1. All of e1's part is fee, so its 0.20 of
+    # basis joins e2's moved part: 8 sats with 2.40 + 0.20.
+    wd = move(
+        "wd", "x", "w", 10, kind="withdrawal", fee_sats=2, picks=(Pick("e2", 8),), identified_at=at(DAY, 9)
+    )
+    result = run([*EXCHANGE, wd])
+    assert result.moves == (Moved("wd", "e2", "e2@wd", "w", 8, D("2.60"), date(2024, 2, 1), 2, ("e1",)),)
+    assert result.late == ()
+
+
+def test_a_late_choice_of_only_the_arriving_sats_is_judged_with_its_fee_lots_adr0043() -> None:
+    # Late, the same choice is judged as a whole (e2 8, e1 2) against FIFO's (e1 10): it differs, and the
+    # warning shows FIFO's: 8 of e1 arriving with all of its 1.00
+    wd = move(
+        "wd", "x", "w", 10, kind="withdrawal", fee_sats=2, picks=(Pick("e2", 8),), identified_at=at(DAY, 18)
+    )
+    (late,) = run([*EXCHANGE, wd]).late
+    assert late.standing == (Moved("wd", "e1", "e1@wd", "w", 8, D("1.00"), date(2024, 1, 1), 2),)
+
+
+def test_a_choice_of_the_arriving_sats_needs_sats_left_for_the_fee() -> None:
+    lone = Acquisition("e", "x", date(2024, 1, 1), "buy", 8, D("1.00"))
+    wd = move(
+        "wd", "x", "w", 10, kind="withdrawal", fee_sats=2, picks=(Pick("e", 8),), identified_at=at(DAY, 9)
+    )
+    with pytest.raises(EngineError, match="too few sats for the fee"):
+        run([lone, wd])
+
+
+def test_an_unknown_basis_fee_lot_passes_none_and_stays_blocking_adr0043() -> None:
+    # The buy's sat arrives; the unknown gift's sat is all fee: it passes 0.00, and still blocks
+    events: list[Event] = [
+        Acquisition("b", "w", date(2024, 1, 1), "buy", 1, D("1.00")),
+        Acquisition("g", "w", date(2024, 1, 2), "gift_in", 1, None, D("2.00"), date(2020, 1, 1)),
+        move("d", "w", "x", 2, fee_sats=1),
+    ]
+    result = run(events)
+    assert result.moves == (Moved("d", "b", "b@d", "x", 1, D("1.00"), date(2024, 1, 1), 1, ("g",)),)
+    assert UnknownBasis("g") in result.blocking
+
+
+def test_carried_basis_skips_an_unknown_basis_part_adr0043() -> None:
+    # The unknown gift is the oldest moved part, so the all-fee lot's 1.00 goes to the next part, the buy,
+    # rather than into a figure flagged unknown
+    events: list[Event] = [
+        Acquisition("g", "w", date(2024, 1, 1), "gift_in", 1, None, D("2.00"), date(2020, 1, 1)),
+        Acquisition("b", "w", date(2024, 1, 2), "buy", 1, D("1.00")),
+        Acquisition("c", "w", date(2024, 1, 3), "buy", 1, D("1.00")),
+        move("d", "w", "x", 3, fee_sats=1),
+    ]
+    moved = {m.lot: (m.basis, m.carried_from) for m in run(events).moves}
+    assert moved == {"g": (D("0.00"), ()), "b": (D("2.00"), ("c",))}

@@ -94,7 +94,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from calendar import monthrange
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, localcontext
@@ -247,7 +247,7 @@ class Moved:
     sats: int
     basis: Decimal
     acquired: date
-    carried_fee: int = 0  # fee sats whose basis this part carries (the carry treatment)
+    carried_fee: int = 0  # fee sats whose basis this part carries (ADR 0043: no fee is a disposal)
     carried_from: tuple[str, ...] = ()  # other lots whose all-fee dust parts' basis this part carries
 
 
@@ -256,11 +256,11 @@ class LateIdentification:
     """A choice made after its disposal whose lots differ from the standing method's (ADR 0021 §2).
     `standing` is what the standing method would have used, with its figures, shown with the warning
     (ADR 0008 §4): allocations for a sale or spend, gift records (no gain or loss) for a gift given, and
-    for a transfer, its fee disposal's allocations (if the fee is disposed) and the parts it would move."""
+    for a transfer, the parts it would move (no fee is a disposal, ADR 0043)."""
 
     disposal: str
     identified_at: datetime
-    standing: tuple[Allocation, ...] | tuple[GiftGiven, ...] | tuple[Allocation | Moved, ...]
+    standing: tuple[Allocation, ...] | tuple[GiftGiven, ...] | tuple[Moved, ...]
     replayed: bool = True  # figured in the replay; False once it had stopped (Result.replay_stopped)
 
 
@@ -356,6 +356,7 @@ class _Engine:
         self._replay = replay
         self._shadow: _Engine | None = None if replay else _Engine(methods, replay=True)
         self._replay_stopped: str | None = None
+        self._arriving: dict[str, dict[str, int]] = {}  # a transfer whose picks named only its arriving sats
 
     def run(self, events: Sequence[Event]) -> Result:
         last: date | None = None
@@ -557,13 +558,13 @@ class _Engine:
         if late is not None and t.identified_at is not None:
             alternative = late.engine._alternative(t, late.picks)
             self._late.append(LateIdentification(t.id, t.identified_at, alternative, late.replayed))
-        if missing:  # a shortfall is blocking; the fee comes out of what is covered, leaving a sat to arrive
+        if missing:  # a shortfall is blocking; what is covered arrives first, the fee after it
             self._blocking.append(MissingLots(t.id, missing, ZERO))
         if not picks:
             return
         moved: list[Moved] = []
         orphans: list[tuple[Decimal, int, str]] = []
-        for pick, arrive in _arrivals(t, self._in_fifo_order(t.account, picks)):
+        for pick, arrive in self._arrivals(t, picks):
             if arrive:  # the whole part leaves its lot; the fee's basis arrives with the sats that do
                 moved.append(self._move(t, pick.lot, pick.sats, arrive=arrive))
             else:  # all fee: its basis (the lower of a gift's two) passes to the oldest moved part
@@ -571,7 +572,7 @@ class _Engine:
                 orphans.append((_lower(basis, loss), pick.sats, pick.lot))
         if orphans:  # a moved part always exists: the fee leaves a sat to arrive
             self._carry(
-                moved[0],
+                _receiver(moved, lambda m: self._lots[m.into].lot.unknown_basis),
                 sum((b for b, _, _ in orphans), ZERO),
                 sum(n for _, n, _ in orphans),
                 tuple(lot for _, _, lot in orphans),
@@ -613,18 +614,28 @@ class _Engine:
         o.sats, o.basis, o.loss_basis = o.sats - sats, rest, loss_rest
         return basis, loss
 
+    def _arrivals(self, t: Transfer, picks: Sequence[Pick]) -> list[tuple[Pick, int]]:
+        """Each pick, in the account's FIFO order, with the sats of it that arrive. Where the user named
+        only the arriving sats, those arrive and the fee is the rest; otherwise the arriving sats take the
+        lots first in FIFO order and the fee the last sats (ADR 0043)."""
+        ordered = self._in_fifo_order(t.account, picks)
+        named = self._arriving.pop(t.id, None)
+        if named is None:
+            return _fifo_arrivals(t, ordered)
+        return [(p, named.get(p.lot, 0)) for p in ordered]
+
     def _in_fifo_order(self, account: str, picks: Sequence[Pick]) -> list[Pick]:
-        """`picks` in the account's FIFO order, so a transfer's fee roles and its dust carry depend only
+        """`picks` in the account's FIFO order, so which sats arrive and where a fee's basis goes depend only
         on which lots it uses, not on the order they were named in."""
         place = {o.lot.id: k for k, o in enumerate(self._open.get(account, []))}
         return sorted(picks, key=lambda p: place[p.lot])
 
-    def _alternative(self, t: Transfer, picks: Sequence[Pick]) -> tuple[Allocation | Moved, ...]:
+    def _alternative(self, t: Transfer, picks: Sequence[Pick]) -> tuple[Moved, ...]:
         """What `picks` would give, nothing used up: the parts that would arrive, with their bases, as the
         real run would move them (ADR 0008 §4, ADR 0043)."""
         out: list[Moved] = []
         orphans: list[tuple[Decimal, int, str]] = []
-        for pick, arrive in _arrivals(t, self._in_fifo_order(t.account, picks)):
+        for pick, arrive in _fifo_arrivals(t, self._in_fifo_order(t.account, picks)):
             o = self._lots[pick.lot]
             basis = share(o.basis, pick.sats, o.sats)
             if arrive:
@@ -636,8 +647,8 @@ class _Engine:
                 loss = None if o.loss_basis is None else share(o.loss_basis, pick.sats, o.sats)
                 orphans.append((_lower(basis, loss), pick.sats, pick.lot))
         if orphans:
-            first = out[0]
-            out[0] = Moved(
+            first = _receiver(out, lambda m: self._lots[m.lot].lot.unknown_basis)
+            out[out.index(first)] = Moved(
                 first.transfer,
                 first.lot,
                 first.into,
@@ -786,9 +797,33 @@ class _Engine:
             wanted[pick.lot] = wanted.get(pick.lot, 0) + pick.sats
             if wanted[pick.lot] > entry.sats:
                 raise EngineError(f"event {d.id!r}: lot {pick.lot!r} holds fewer sats than chosen")
-        if sum(wanted.values()) != d.sats:
+        chosen_sats = sum(wanted.values())
+        fee = d.fee_sats if isinstance(d, Transfer) else 0
+        if chosen_sats == d.sats - fee and fee:  # the arriving sats named: the fee takes the standing
+            return self._with_fee(d, wanted)  # method's next sats, part of the identification (ADR 0043)
+        if chosen_sats != d.sats:
             raise EngineError(f"event {d.id!r}: the chosen lots don't add up to its sats")
         return [Pick(lot, sats) for lot, sats in wanted.items()]
+
+    def _with_fee(self, t: Disposal | Transfer, wanted: dict[str, int]) -> list[Pick]:
+        """`wanted` (the arriving sats' lots) and, for the fee, the account's standing method (FIFO) over
+        what those leave in it. The fee's lots are part of the identification, so the late check judges
+        the whole (ADR 0008 §4, ADR 0043)."""
+        need = t.fee_sats if isinstance(t, Transfer) else 0
+        picks = dict(wanted)
+        for o in self._open.get(t.account, []):
+            if not need:
+                break
+            take = min(o.sats - picks.get(o.lot.id, 0), need)
+            if take > 0:
+                picks[o.lot.id] = picks.get(o.lot.id, 0) + take
+                need -= take
+        if need:
+            raise EngineError(
+                f"event {t.id!r}: the account holds too few sats for the fee besides the chosen lots"
+            )
+        self._arriving[t.id] = dict(wanted)  # these arrive; the rest of the picks is the fee
+        return [Pick(lot, sats) for lot, sats in picks.items()]
 
 
 def _checked_transfer(t: Transfer) -> None:
@@ -811,18 +846,23 @@ def _checked_transfer(t: Transfer) -> None:
         raise EngineError(f"transfer {t.id!r}: a chosen set of lots leaves no sats unrecorded")
 
 
-def _arrivals(t: Transfer, picks: Sequence[Pick]) -> list[tuple[Pick, int]]:
+def _fifo_arrivals(t: Transfer, picks: Sequence[Pick]) -> list[tuple[Pick, int]]:
     """Each pick, in the account's FIFO order, with the sats of it that arrive: the arriving sats take the
-    lots first and the fee the last sats (ADR 0043). The fee comes out of what the picks cover, leaving
-    at least one sat to arrive (a shortfall is blocking anyway)."""
-    covered = sum(p.sats for p in picks)
-    arriving = covered - min(t.fee_sats, covered - 1)
+    lots first and the fee the last sats (ADR 0043). On a short transfer the picks all arrive, up to the
+    sats that arrive, and the fee falls on the missing sats (a blocking shortfall)."""
+    arriving = min(sum(p.sats for p in picks), t.sats - t.fee_sats)
     out: list[tuple[Pick, int]] = []
     for p in picks:
         arrive = min(p.sats, arriving)
         arriving -= arrive
         out.append((p, arrive))
     return out
+
+
+def _receiver(moved: Sequence[Moved], unknown: Callable[[Moved], bool]) -> Moved:
+    """The moved part that takes all-fee lots' basis: the oldest (first in the account's FIFO order, a
+    gift by the day it was received) of known basis, else the oldest (ADR 0043)."""
+    return next((m for m in moved if not unknown(m)), moved[0])
 
 
 def _lower(basis: Decimal, loss: Decimal | None) -> Decimal:
