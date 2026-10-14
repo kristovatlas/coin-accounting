@@ -85,7 +85,7 @@ def test_only_a_fifo_standing_order_is_passed_on() -> None:
 def test_the_ledger_runs_the_stored_events(db: tuple[sqlite3.Connection, Ledger]) -> None:
     conn, ledger = db
     exchange = ac.add_entity(conn, "Some exchange", "exchange")
-    x = ac.add_tax_account(conn, "Exchange", "custodial", entity_id=exchange)
+    x = ac.add_tax_account(conn, "Exchange", "custodial", entity_id=exchange, automatic=False)  # lots chosen
     bought = ev.add_event(
         conn, ev.Event("buy", x, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT
     )
@@ -116,3 +116,37 @@ def test_the_ledger_takes_tax_dates_in_the_stored_time_zone(db: tuple[sqlite3.Co
     settings.set_time_zone(conn, "America/New_York")
     (local,), _ = ledger.run()
     assert local.on == date(2024, 12, 31)
+
+
+@pytest.mark.parametrize(("automatic", "lot"), [(True, "first"), (False, "second")])
+def test_an_automatic_account_takes_the_standing_method_adr0021(
+    db: tuple[sqlite3.Connection, Ledger], automatic: bool, lot: str
+) -> None:
+    conn, ledger = db
+    exchange = ac.add_entity(conn, "Some exchange", "exchange")
+    x = ac.add_tax_account(conn, "Exchange", "custodial", entity_id=exchange, automatic=automatic)
+    first = ev.add_event(conn, ev.Event("buy", x, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT)
+    second = ev.add_event(
+        conn, ev.Event("buy", x, datetime(2024, 6, 2, tzinfo=UTC), 1_000, D("50.00")), at=AT
+    )
+    sale = ev.add_event(
+        conn, ev.Event("sell", x, datetime(2025, 3, 1, 12, tzinfo=UTC), 1_000, D("60.00")), at=AT
+    )
+    ev.identify(conn, sale, (ev.Choice(str(second), 1_000),), datetime(2025, 3, 1, 11, tzinfo=UTC), at=AT)
+    inputs, result = ledger.run()
+    (sold,) = [e for e in inputs if e.id == str(sale)]
+    assert isinstance(sold, Disposal)
+    assert sold.picks == (None if automatic else (Pick(str(second), 1_000),))
+    (row,) = result.allocations
+    assert row.lot == {"first": str(first), "second": str(second)}[lot]  # FIFO's oldest, or the choice
+    assert result.late == ()
+
+
+def test_engine_events_drops_a_choice_on_an_automatic_account() -> None:
+    when = datetime(2025, 3, 1, 12, tzinfo=UTC)
+    sale = ev.Stored(2, ev.Event("sell", 7, when, 1_000, D("50.00")))
+    chosen = {2: ((ev.Choice("1", 1_000),), when)}
+    (manual,) = engine_events([sale], chosen, NEW_YORK)
+    (auto,) = engine_events([sale], chosen, NEW_YORK, frozenset({7}))
+    assert isinstance(manual, Disposal) and isinstance(auto, Disposal)
+    assert (manual.picks, auto.picks, auto.identified_at) == ((Pick("1", 1_000),), None, None)

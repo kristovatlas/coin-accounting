@@ -10,7 +10,9 @@ run (THREAT_MODEL T-501, T-507, T-508).
 - **Fees.** A buy's fee was withheld from the sats bought (ADR 0043): its lot holds the sats credited, the
   sats less the fee, at the full cash paid. A movement's fee is the engine's `fee_sats`.
 - **Choices.** An event's stored choice of lots becomes its picks, with when it was made; an event
-  without one uses its account's standing method.
+  without one uses its account's standing method. So does every event of an account in automatic mode
+  (ADR 0021 §1, the default): the app selects its lots by the standing method, a stored choice is not
+  used, and nothing there is late.
 - **Methods.** An account's standing order of FIFO is passed on; a standing order of specific
   identification, or none, leaves FIFO, the engine's only standing method and the statutory fallback.
 
@@ -33,14 +35,17 @@ from coinacct.tax.engine import Acquisition, Disposal, Event, Method, Pick, Resu
 type Chosen = Mapping[int, tuple[tuple[Choice, ...], datetime]]
 
 
-def engine_events(stored: Sequence[Stored], chosen: Chosen, zone: ZoneInfo) -> list[Event]:
-    """The engine's input for `stored` (in the order of their moments), with their choices of lots."""
+def engine_events(
+    stored: Sequence[Stored], chosen: Chosen, zone: ZoneInfo, automatic: frozenset[int] = frozenset()
+) -> list[Event]:
+    """The engine's input for `stored` (in the order of their moments), with their choices of lots. An
+    event of an account in `automatic` mode takes the standing method, whatever choice is stored."""
     out: list[Event] = []
     for s in sorted(stored, key=lambda s: (s.event.at, s.id)):
         e = s.event
         on = e.at.astimezone(zone).date()
         ident, account = str(s.id), str(e.account)
-        choice = chosen.get(s.id)
+        choice = None if e.account in automatic else chosen.get(s.id)
         picks = None if choice is None else tuple(Pick(c.lot, c.sats) for c in choice[0])
         identified_at = None if choice is None else choice[1]
         if e.kind in ACQUISITIONS:
@@ -100,10 +105,12 @@ class Ledger:
                 reader.execute("BEGIN")
                 stored = events.events(reader)
                 chosen = events.identifications(reader)
-                methods = standing_methods(accounts.tax_accounts(reader))
+                tax_accounts = accounts.tax_accounts(reader)
+                methods = standing_methods(tax_accounts)
+                automatic = frozenset(a.id for a in tax_accounts if a.automatic)
                 zone = settings.time_zone(reader)
                 reader.execute("COMMIT")
             finally:
                 reader.close()
-        inputs = engine_events(stored, chosen, zone)
+        inputs = engine_events(stored, chosen, zone, automatic)
         return inputs, engine.run(inputs, methods)
