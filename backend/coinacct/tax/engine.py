@@ -105,6 +105,7 @@ from typing import Final, Literal
 
 from coinacct.domain.chain import MAX_SATS
 from coinacct.domain.money import CONTEXT, add, share, signed_usd, subtract, usd
+from coinacct.tax.errors import EngineError as EngineError  # noqa: PLC0414  (re-exported for callers)
 
 type AcquisitionKind = Literal["buy", "p2p_buy", "income", "inherit", "gift_in"]
 type DisposalKind = Literal["sell", "spend", "gift_out"]
@@ -122,10 +123,6 @@ ZERO: Final = Decimal("0.00")
 GENESIS: Final = date(2009, 1, 3)  # no bitcoin was acquired before the genesis block
 RESERVED: Final = ("@",)  # the separator in the lot ids the engine builds (lot@transfer)
 UNRECORDED: Final = "@@unrecorded"  # a created lot's suffix: no event or moved lot id can contain "@@"
-
-
-class EngineError(ValueError):
-    """The events are invalid input: the caller must not have produced them."""
 
 
 @dataclass(frozen=True)

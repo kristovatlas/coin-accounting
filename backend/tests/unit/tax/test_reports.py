@@ -14,6 +14,7 @@ from coinacct.tax.reports import (
     POSITIONS,
     Blocked,
     Broker,
+    BrokerFee,
     Form8949,
     Row,
     Sale,
@@ -377,17 +378,6 @@ def test_a_basis_difference_is_flagged_adr0011() -> None:
     assert row.review == ("basis differs from the broker's",)
 
 
-def test_the_fee_position_states_adr_0043_in_full() -> None:
-    (fee,) = [p for p in POSITIONS if p.startswith("ADR 0043")]
-    for words in (
-        "no Form 8949 row",
-        "oldest row",
-        "Treas. Reg. §1.1012-1(h)",
-        "gift's fee basis isn't recovered",
-    ):
-        assert words in fee
-
-
 @pytest.mark.parametrize(
     ("sats", "text"),
     [
@@ -399,3 +389,93 @@ def test_the_fee_position_states_adr_0043_in_full() -> None:
 )
 def test_the_description_names_the_amount_in_btc(sats: int, text: str) -> None:
     assert describe(sats) == text
+
+
+def test_only_covered_lots_get_the_basis_reported_box_t510() -> None:
+    # A 2026 sale with basis reported, taking a 2025 lot (noncovered: H) and a 2026 lot (covered: G).
+    # Treas. Reg. §1.6045-1(a)(15)(i)(J): covered from 2026-01-01, bought in that account (ADR 0011)
+    events: list[Event] = [
+        Acquisition("y25", "x", date(2025, 6, 1), "buy", 1_000, D("10.00")),
+        Acquisition("y26", "x", date(2026, 1, 5), "buy", 1_000, D("20.00")),
+        sell("s", date(2026, 3, 1), 2_000, "40.00"),
+    ]
+    rows = report(events, {"s": Sale("exchange", True, basis_reported=True)}, 2026).rows
+    assert [(r.lot, r.box) for r in rows] == [("y26", "G"), ("y25", "H")]
+
+
+def test_a_lot_moved_in_or_inherited_is_never_covered_t510() -> None:
+    events: list[Event] = [
+        Acquisition("w1", "w", date(2026, 1, 5), "buy", 1_000, D("10.00")),
+        Transfer("d", "w", "x", date(2026, 1, 6), at(date(2026, 1, 6)), "deposit", 1_000),
+        Acquisition("inh", "x", date(2026, 1, 7), "inherit", 1_000, D("10.00")),
+        sell("s", date(2026, 3, 1), 2_000, "40.00"),
+    ]
+    rows = report(events, {"s": Sale("exchange", True, basis_reported=True)}, 2026).rows
+    assert {(r.lot, r.box) for r in rows} == {("w1@d", "H"), ("inh", "K")}
+
+
+def test_an_onchain_disposal_cant_be_reported() -> None:
+    with pytest.raises(EngineError, match="on-chain disposal"):
+        Sale("onchain", reported=True)
+
+
+def test_another_years_override_is_checked_in_its_own_years_report_only() -> None:
+    events: list[Event] = [
+        BUYS[0],
+        sell("s24", date(2024, 3, 1), 500, "20.00"),
+        sell("s25", date(2025, 6, 1), 500, "30.00"),
+    ]
+    sales = {"s24": Sale("exchange", False, override_long="F", reason="no 1099-B"), "s25": EXCHANGE_2025}
+    assert [r.box for r in report(events, sales, 2025).rows] == ["K"]
+    assert [r.box for r in report(events, sales, 2024).rows] == ["F"]
+
+
+@pytest.mark.parametrize(
+    "broker",
+    [
+        {"proceeds": 1.5},
+        {"proceeds": "1.50"},
+        {"proceeds": D("1.505")},
+        {"proceeds": D("1.00"), "basis": D("-1.00")},
+        {"proceeds": D("1.00"), "acquired": datetime(2025, 1, 1, tzinfo=UTC)},
+    ],
+)
+def test_broker_figures_are_checked(broker: dict[str, Any]) -> None:
+    with pytest.raises(EngineError, match="broker's"):
+        Broker(**broker)
+
+
+@pytest.mark.parametrize("year", [2027, 9999])
+def test_a_year_past_the_checked_rules_is_refused(year: int) -> None:
+    with pytest.raises(EngineError, match="2013 to 2026"):
+        box(year, False, False, False)
+
+
+@pytest.mark.parametrize("blocking", ["x", iter(())])
+def test_blocking_is_a_list_or_tuple(blocking: Any) -> None:
+    with pytest.raises(EngineError, match="list or tuple"):
+        form_8949(run([]), {}, 2025, blocking=blocking)
+
+
+def test_a_fee_the_broker_lists_as_a_sale_is_listed_for_review_adr0043() -> None:
+    fee = BrokerFee("0.00000100 BTC (fee)", date(2025, 6, 1), D("0.10"))
+    old = BrokerFee("fee", date(2024, 6, 1), D("0.10"))
+    form = form_8949(run([]), {}, 2025, blocking=(), broker_fees=[fee, old])
+    assert isinstance(form, Form8949) and form.broker_fees == (fee,)
+    with pytest.raises(EngineError, match="BrokerFees"):
+        form_8949(run([]), {}, 2025, blocking=(), broker_fees=["fee"])  # type: ignore[list-item]
+    with pytest.raises(EngineError, match="broker's"):
+        BrokerFee("fee", date(2025, 1, 1), 0.1)  # type: ignore[arg-type]
+
+
+def test_the_fee_position_prints_all_five_of_adr_0043s_bullets() -> None:
+    text = " ".join(p for p in POSITIONS if p.startswith("ADR 0043"))
+    for words in (
+        "sales and spends",
+        "buys",
+        "transfers, deposits and withdrawals",
+        "gifts",
+        "brokers",
+        "§1.1001-7(b)(2)",
+    ):
+        assert words in text

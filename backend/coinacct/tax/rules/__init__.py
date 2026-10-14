@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Final, Literal
 
-from coinacct.tax.engine import EngineError
+from coinacct.tax.errors import EngineError
 from coinacct.tax.rules import y2024, y2025
 
 type Box = Literal["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
@@ -20,13 +20,15 @@ BOXES: Final[frozenset[str]] = frozenset("ABCDEFGHIJKL")
 
 
 FIRST_YEAR: Final = 2013  # the first year with Form 8949's boxes D-F; earlier years' rules aren't in the app
+LAST_YEAR: Final = 2026  # the last year whose instructions these rules were checked against
 
 
 def rules_for(tax_year: object) -> None:
     """Check that the app has a rule set for `tax_year` (`EngineError` otherwise)."""
-    if type(tax_year) is not int or tax_year < FIRST_YEAR:
+    if type(tax_year) is not int or not FIRST_YEAR <= tax_year <= LAST_YEAR:
         raise EngineError(
-            f"a tax year is a whole number from {FIRST_YEAR} (earlier years' rules aren't in the app)"
+            f"a tax year is a whole number from {FIRST_YEAR} to {LAST_YEAR} (other years' rules aren't"
+            " in the app)"
         )
 
 
