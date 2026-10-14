@@ -345,6 +345,7 @@ UNNAMED = "the lot engine can't use the stored events: check them, or restore fr
     [
         ("event '12': lot 'x' isn't held in account '3'", NAMED.format(12)),
         ("transfer '7': its fee is a whole number of sats below the sats it moves", NAMED.format(7)),
+        ("gift '9': its FMV basis is above the donor's", NAMED.format(9)),
         ("an event names its id and its account", UNNAMED),
         ("event 'x@1' appears twice", UNNAMED),
         ("event '012' appears twice", UNNAMED),
@@ -352,3 +353,31 @@ UNNAMED = "the lot engine can't use the stored events: check them, or restore fr
 )
 def test_an_engine_refusal_names_only_the_event_t403(message: str, expected: str) -> None:
     assert str(refused(engine.EngineError(message))) == expected
+
+
+def test_a_withdrawals_choice_in_an_account_left_without_lots_falls_back(
+    db: tuple[sqlite3.Connection, Ledger],
+) -> None:
+    """A deposit without a choice moved lot a into the exchange, and a withdrawal chose it there; a sale
+    added before the deposit takes a, so the exchange gets no lots and the choice names none: it is
+    stale, and the withdrawal's sats become an unrecorded lot of unknown basis."""
+    conn, ledger = db
+    wallet = ac.add_tax_account(conn, "Wallet", "self_custody")
+    exchange = ac.add_entity(conn, "Some exchange", "exchange")
+    x = ac.add_tax_account(conn, "Exchange", "custodial", entity_id=exchange, automatic=False)
+    cold = ac.add_tax_account(conn, "Cold", "self_custody")
+    a = ev.add_event(
+        conn, ev.Event("buy", wallet, datetime(2024, 1, 2, tzinfo=UTC), 1_000, D("10.00")), at=AT
+    )
+    deposit = ev.add_event(
+        conn, ev.Event("deposit", wallet, datetime(2024, 3, 2, tzinfo=UTC), 1_000, to=x), at=AT
+    )
+    out = ev.add_event(
+        conn, ev.Event("withdrawal", x, datetime(2024, 4, 2, tzinfo=UTC), 1_000, to=cold), at=AT
+    )
+    ev.identify(conn, out, (ev.Choice(f"{a}@{deposit}", 1_000),), datetime(2024, 4, 2, tzinfo=UTC), at=AT)
+    assert ledger.run().stale == ()
+    ev.add_event(conn, ev.Event("sell", wallet, datetime(2024, 2, 1, tzinfo=UTC), 1_000, D("20.00")), at=AT)
+    run = ledger.run()
+    assert (run.automatic, run.stale) == ((), (out,))
+    assert [type(b).__name__ for b in run.result.blocking] == ["MissingLots", "UnknownBasis"]

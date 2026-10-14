@@ -667,12 +667,42 @@ def _part(part: Any) -> dict[str, Any]:
             "disposed": part.disposed.isoformat(),
             "long_term": part.long_term,
             "rule": part.rule,
+            "lot_basis": _maybe_usd(part.lot_basis),
+            "lot_loss_basis": _maybe_usd(part.lot_loss_basis),
         }
     elif isinstance(part, ledger_service.GiftGiven):
-        out |= {"event": int(part.disposal), "unknown_basis": part.unknown_basis}
+        out |= {
+            "event": int(part.disposal),
+            "unknown_basis": part.unknown_basis,
+            "always_long": part.always_long,
+        }
     elif isinstance(part, ledger_service.Moved):
-        out |= {"event": int(part.transfer), "into": part.into, "to": int(part.to)}
+        out |= {
+            "event": int(part.transfer),
+            "into": part.into,
+            "to": int(part.to),
+            "carried_fee": part.carried_fee,
+            "carried_from": list(part.carried_from),
+        }
     return out
+
+
+def _maybe_usd(amount: Decimal | None) -> str | None:
+    return None if amount is None else _usd(amount)
+
+
+def _lot(lot: Any) -> dict[str, Any]:
+    return {
+        "lot": lot.id,
+        "account": int(lot.account),
+        "acquired": lot.acquired.isoformat(),
+        "sats": lot.sats,
+        "basis": _usd(lot.basis),
+        "loss_basis": _maybe_usd(lot.loss_basis),
+        "loss_from": None if lot.loss_from is None else lot.loss_from.isoformat(),
+        "always_long": lot.always_long,
+        "unknown_basis": lot.unknown_basis,
+    }
 
 
 def _ledger_json(run: ledger_service.Run) -> dict[str, Any]:
@@ -683,18 +713,8 @@ def _ledger_json(run: ledger_service.Run) -> dict[str, Any]:
         "allocations": [_part(a) for a in r.allocations],
         "gifts": [_part(g) for g in r.gifts],
         "moves": [_part(m) for m in r.moves],
-        "holdings": [
-            {
-                "lot": lot.id,
-                "account": int(lot.account),
-                "acquired": lot.acquired.isoformat(),
-                "sats": lot.sats,
-                "basis": _usd(lot.basis),
-                "always_long": lot.always_long,
-                "unknown_basis": lot.unknown_basis,
-            }
-            for lot in r.holdings
-        ],
+        "holdings": [_lot(lot) for lot in r.holdings],
+        "created": [_lot(lot) for lot in r.created],  # lots made for a withdrawal's unrecorded sats
         "late": [
             {
                 "event": int(late.disposal),
@@ -705,7 +725,7 @@ def _ledger_json(run: ledger_service.Run) -> dict[str, Any]:
             for late in r.late
         ],
         "blocking": [
-            {"kind": "missing_lots", "event": int(b.disposal), "sats": b.sats}
+            {"kind": "missing_lots", "event": int(b.disposal), "sats": b.sats, "proceeds": _usd(b.proceeds)}
             if isinstance(b, ledger_service.MissingLots)
             else {"kind": "unknown_basis", "lot": b.lot}
             for b in r.blocking

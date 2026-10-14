@@ -98,6 +98,8 @@ def test_automatic_mode_shows_the_lots_it_used_adr0021(world: World) -> None:
             "disposed": "2025-03-01",
             "long_term": True,
             "rule": "cost",
+            "lot_basis": None,
+            "lot_loss_basis": None,
         }
     ]
     assert out["holdings"] == [
@@ -107,10 +109,13 @@ def test_automatic_mode_shows_the_lots_it_used_adr0021(world: World) -> None:
             "acquired": "2024-02-02",
             "sats": 1_000,
             "basis": "20.00",
+            "loss_basis": None,
+            "loss_from": None,
             "always_long": False,
             "unknown_basis": False,
         }
     ]
+    assert out["created"] == []
     assert (out["automatic"], out["stale"], out["late"], out["blocking"], out["replay_stopped"]) == (
         [],
         [],
@@ -146,10 +151,11 @@ def test_moves_gifts_and_what_blocks_a_report(world: World) -> None:
         world.exchange,
         500,
     )
-    assert [(g["event"], g["lot"], g["sats"], g["unknown_basis"]) for g in out["gifts"]] == [
-        (gift, str(a), 400, False)
-    ]
-    assert out["blocking"] == [{"kind": "missing_lots", "event": short, "sats": 400}]
+    assert [
+        (g["event"], g["lot"], g["sats"], g["unknown_basis"], g["always_long"]) for g in out["gifts"]
+    ] == [(gift, str(a), 400, False, False)]
+    assert (move["carried_fee"], move["carried_from"]) == (100, [])  # the fee's basis rides on (ADR 0043)
+    assert out["blocking"] == [{"kind": "missing_lots", "event": short, "sats": 400, "proceeds": "20.00"}]
 
 
 def test_an_automatic_accounts_stored_choice_is_listed_unused(world: World) -> None:
@@ -173,3 +179,55 @@ def test_a_damaged_stored_event_is_a_422_with_the_remedy_t408(world: World) -> N
 @pytest.mark.parametrize(("amount", "text"), [("1E+2", "100"), ("0.10", "0.10"), ("-5.00", "-5.00")])
 def test_money_is_written_without_an_exponent(amount: str, text: str) -> None:
     assert _usd(Decimal(amount)) == text
+
+
+def test_an_engine_refusal_is_a_422_naming_only_the_event_t403(world: World) -> None:
+    world.add("buy", world.wallet, "2024-01-02T12:00:00Z", 1_000, usd="10.00")
+    cold = ac.add_tax_account(world.db, "Cold wallet", "self_custody")
+    move = world.add("self_transfer", world.wallet, "2024-03-02T12:00:00Z", 1_000, to=cold)  # not traced yet
+    reply = world.ledger()
+    assert reply.status == 422
+    assert reply.json() == {
+        "error": f"the lot engine can't use event {move} as stored: check it, its accounts and its lots"
+    }
+
+
+def test_a_gift_without_its_donors_basis_blocks_a_report(world: World) -> None:
+    gift = world.add(
+        "gift_in", world.wallet, "2024-01-02T12:00:00Z", 1_000, fmv="10.00", donor_acquired="2020-01-01"
+    )
+    out = world.ledger().json()
+    assert out["blocking"] == [{"kind": "unknown_basis", "lot": str(gift)}]
+    (held,) = out["holdings"]
+    assert (held["lot"], held["unknown_basis"]) == (str(gift), True)
+
+
+def test_stale_choices_are_listed_apart_and_fall_back(world: World) -> None:
+    """A deposit with no choice moves FIFO's oldest lot; two exchange sales chose the lot it would
+    otherwise have moved, so both are stale at once, and each takes FIFO (the exchange is manual)."""
+    exchange = ac.add_entity(world.db, "Another exchange", "exchange")
+    x = ac.add_tax_account(world.db, "Manual exchange", "custodial", entity_id=exchange, automatic=False)
+    a = world.add("buy", world.wallet, "2024-01-02T12:00:00Z", 1_000, usd="10.00")
+    b = world.add("buy", world.wallet, "2024-02-02T12:00:00Z", 1_000, usd="20.00")
+    deposit = world.add("deposit", world.wallet, "2024-03-02T12:00:00Z", 1_000, to=x)
+    first = world.add("sell", x, "2025-03-01T12:00:00Z", 500, usd="30.00")
+    second = world.add("sell", x, "2025-03-02T12:00:00Z", 500, usd="30.00")
+    world.identify(first, (f"{b}@{deposit}", 500))
+    world.identify(second, (f"{b}@{deposit}", 500))
+    out = world.ledger().json()
+    assert (out["automatic"], out["stale"]) == ([], [first, second])
+    assert [r["lot"] for r in out["allocations"]] == [f"{a}@{deposit}"] * 2
+
+
+def test_a_late_transfer_shows_the_parts_the_standing_method_would_move(world: World) -> None:
+    exchange = ac.add_entity(world.db, "Another exchange", "exchange")
+    x = ac.add_tax_account(world.db, "Manual exchange", "custodial", entity_id=exchange, automatic=False)
+    a = world.add("buy", world.manual, "2024-01-02T12:00:00Z", 1_000, usd="10.00")
+    b = world.add("buy", world.manual, "2024-02-02T12:00:00Z", 1_000, usd="20.00")
+    deposit = world.add("deposit", world.manual, "2024-03-02T12:00:00Z", 1_000, to=x)
+    world.identify(deposit, (b, 1_000))  # now: late, and not FIFO's
+    (late,) = world.ledger().json()["late"]
+    assert late["event"] == deposit
+    assert [(p["event"], p["lot"], p["into"], p["to"]) for p in late["standing"]] == [
+        (deposit, str(a), f"{a}@{deposit}", x)
+    ]

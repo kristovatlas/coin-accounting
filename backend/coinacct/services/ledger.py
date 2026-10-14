@@ -13,9 +13,12 @@ run (THREAT_MODEL T-501, T-507, T-508).
   without one uses its account's standing method. So does every event of an account in automatic mode
   over a FIFO standing order or none (ADR 0021 §1, the default): the app selects its lots by the
   standing method, a stored choice is not used, and nothing there is late. A choice that went stale,
-  naming a lot the run doesn't make, more sats than that lot holds, or leaving no other sats for a
-  transfer's fee (an edit elsewhere moved other lots), takes the standing method too: the engine
-  refuses it, and the run drops that choice and runs again. A choice naming a lot the run does make
+  naming a lot the run doesn't make, more sats than that lot holds, lots of an account the run leaves
+  without any, or no other sats for a transfer's fee (an edit elsewhere moved other lots, or, until
+  #313, the choice named another account's lot), takes the standing method too: the engine refuses
+  it, and the run drops that choice and runs again. A withdrawal's stored basis for unrecorded sats
+  is the event's own data, not a choice, so an account that has lots after an edit still refuses it,
+  naming the event. A choice naming a lot the run does make
   stands. The run lists both apart: automatic mode's unused choices, and the stale ones, which a
   report shows with a warning, since the user's identification wasn't used.
 - **Methods.** An account's standing order of FIFO is passed on; a standing order of specific
@@ -79,21 +82,24 @@ def ignored_choices(stored: Sequence[Stored], chosen: Chosen, automatic: frozens
 
 
 # the engine's refusal of a stored choice naming a lot the run doesn't make, more sats than a lot holds
-# (`tax.engine` `_checked_picks`), or leaving no other sats for a transfer's fee (`_with_fee`): the
-# choice went stale after an edit elsewhere
+# (`tax.engine` `_checked_picks`), leaving no other sats for a transfer's fee (`_with_fee`), or naming
+# lots in an account the run leaves without any (`_unrecorded_if_needed`): the choice went stale after
+# an edit elsewhere, or, until a choice is checked when it is made (#313), named another account's lot
 _STALE: Final = re.compile(
-    r"event '([1-9][0-9]{0,18})': (?:lot .* (?:isn't held in account|holds fewer sats than chosen)"
-    r"|the account holds too few sats for the fee besides the chosen lots$)",
+    r"(?:event '(?P<event>[1-9][0-9]{0,18})': "
+    r"(?:lot .* (?:isn't held in account|holds fewer sats than chosen)"
+    r"|the account holds too few sats for the fee besides the chosen lots$)"
+    r"|transfer '(?P<transfer>[1-9][0-9]{0,18})': an account without lots has none to choose$)",
     re.ASCII,
 )
 # the event an engine refusal names, as `str(id)` of a stored event (`engine_events`)
-_REFUSED: Final = re.compile(r"(?:event|acquisition|disposal|transfer) '([1-9][0-9]{0,18})'", re.ASCII)
+_REFUSED: Final = re.compile(r"(?:event|acquisition|disposal|transfer|gift) '([1-9][0-9]{0,18})'", re.ASCII)
 
 
 def _stale_choice(error: engine.EngineError, chosen: Chosen, ignored: set[int]) -> int | None:
     """The event whose stored choice `error` refuses as stale, if it is one the run can ignore."""
     match = _STALE.match(str(error))
-    event_id = None if match is None else int(match.group(1))
+    event_id = None if match is None else int(match.group("event") or match.group("transfer"))
     return event_id if event_id in chosen and event_id not in ignored else None
 
 
