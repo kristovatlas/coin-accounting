@@ -123,6 +123,7 @@ export function Imports({ session }: { session: string }) {
   const [entity, setEntity] = useState(ME);
   const [account, setAccount] = useState<number | null>(null);
   const [newWallet, setNewWallet] = useState("");
+  const [chooseLots, setChooseLots] = useState(false);
   const [chosenClients, setChosenClients] = useState<number[]>([]);
   const [newClient, setNewClient] = useState("");
   const [newClientKind, setNewClientKind] = useState("hardware");
@@ -222,8 +223,9 @@ export function Imports({ session }: { session: string }) {
 
   const onNewWallet = () =>
     run(async () => {
-      const { id } = await addTaxAccount(session, newWallet, "self_custody");
+      const { id } = await addTaxAccount(session, newWallet, "self_custody", undefined, !chooseLots);
       setNewWallet("");
+      setChooseLots(false);
       await reload(id);
     });
 
@@ -266,6 +268,10 @@ export function Imports({ session }: { session: string }) {
           maxLength={200}
           onChange={(e) => setNewWallet(e.target.value)}
         />
+        <label>
+          <input autoComplete="off" id="new-wallet-manual" type="checkbox" disabled={busy} checked={chooseLots} onChange={(e) => setChooseLots(e.target.checked)} />
+          I choose this wallet's lots myself (otherwise its standing method, FIFO, does)
+        </label>
         <button id="new-wallet" type="button" disabled={busy || newWallet.trim() === ""} onClick={onNewWallet}>
           Add wallet
         </button>

@@ -140,6 +140,24 @@ def test_accounts_are_listed_and_added(world: World) -> None:
         "entities"
     ]
     assert [a["id"] for a in body["tax_accounts"]] == [wallet, custodial]
+    # whether an account selects its lots by its standing method (ADR 0021 §1), for the lot picker
+    assert body["tax_accounts"][1] == {
+        "id": custodial,
+        "name": "Exchange account",
+        "kind": "custodial",
+        "entity_id": exchange,
+        "standing_method": None,
+        "automatic": True,
+    }
+    manual = world.post(
+        "/api/tax-accounts", {"name": "Cold", "kind": "self_custody", "automatic": False}
+    ).json()["id"]
+    (listed,) = [a for a in world.get("/api/accounts").json()["tax_accounts"] if a["id"] == manual]
+    assert listed["automatic"] is False
+    assert (
+        world.post("/api/tax-accounts", {"name": "X", "kind": "self_custody", "automatic": "no"}).status
+        == 422
+    )
     assert body["clients"] == [{"id": phone, "name": "A phone wallet", "kind": "mobile"}]
     assert world.readers and all(_closed(r) for r in world.readers)  # read through readers, each closed
 
