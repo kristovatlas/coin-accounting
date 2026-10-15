@@ -38,6 +38,7 @@ The module reads no clock: the caller passes the batch's time.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -66,6 +67,10 @@ _DAMAGED: Final = "a stored price is damaged (T-408): restore the user DB from a
 # typical price, an ECB conversion (`prices.coinmetrics`, `prices.bitstamp`, `prices.fx`)
 _FAMILY: Final = {"reference": "coinmetrics", "typical": "bitstamp", "fx": "ecb"}
 _REFRESH_FLAGS: Final = ("revised", "kept_import", "upgraded", "display_updated")  # the module's own
+# the review flags a refresh's caller records (`services.price_cache.flags_of`): three lists of
+# records, and two maps holding a list of records per currency (T-303)
+REVIEW_LISTS: Final = ("mismatches", "reference_gaps", "reference_outliers")
+REVIEW_PER_CURRENCY: Final = ("gaps", "outliers")
 
 # a price with the batch that wrote it, checked together on read; a LEFT JOIN, so a price whose batch
 # is gone is refused rather than hidden
@@ -103,6 +108,32 @@ class Batch:
     usd_stale: bool
     hashes: dict[str, str]
     flags: dict[str, Any]
+
+
+def _read[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+    """A reader whose SQLite errors are the module's fixed messages too (`_sqlite_refusal`)."""
+
+    @functools.wraps(fn)
+    def reading(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.Error as e:
+            raise _sqlite_refusal(e, "read from") from None
+
+    return reading
+
+
+def _sqlite_refusal(e: sqlite3.Error, how: str) -> DbError:
+    """A SQLite error as a fixed message, with only its error code in the log (its text can name the
+    constraint or the file): busy is `DbBusy`; a damaged file names the backup (T-408); anything else
+    (a full disk, an I/O error) says the DB can't be used now."""
+    code = str(getattr(e, "sqlite_errorname", None) or type(e).__name__)
+    log.warning("prices couldn't be %s the user DB: %s", how, code)
+    if code.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+        return DbBusy("the user DB is busy; try again in a moment")
+    if code.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB")):
+        return PriceStoreError(_DAMAGED)
+    return PriceStoreError("the user DB can't be used right now; see the log")
 
 
 def store_refresh(  # noqa: PLR0912, PLR0913 - a refresh's prices and what it recorded, each checked
@@ -145,6 +176,8 @@ def store_refresh(  # noqa: PLR0912, PLR0913 - a refresh's prices and what it re
         raise PriceStoreError("the reference rate's last day is the last reference price the refresh stores")
     if not isinstance(flags, Mapping) or set(_REFRESH_FLAGS) & set(flags):
         raise PriceStoreError("a refresh's revisions are the module's own record")
+    if not _review_flags(flags):
+        raise PriceStoreError("a refresh records every kind of review flag, each as a list of records")
     if any("*" in k for k in hashes):
         raise PriceStoreError("a source's name has no '*'")
     if not all(_covered(p.source, hashes, "refresh") for p in rows):
@@ -256,6 +289,7 @@ def clear_import(conn: sqlite3.Connection, days: Iterable[date], currency: str, 
         return batch
 
 
+@_read
 def fetched_through(conn: sqlite3.Connection) -> date | None:
     """The last day any refresh's reference rate priced, from the refreshes' own records: where a
     refresh's range may start (T-301). An import, which overwrites price rows, never moves it. The
@@ -270,6 +304,19 @@ def fetched_through(conn: sqlite3.Connection) -> date | None:
         return _stored_batch(row).usd_through
 
 
+@_read
+def refresh_status(conn: sqlite3.Connection) -> tuple[Batch | None, date | None]:
+    """The last refresh's batch and `fetched_through`, read in one snapshot on a reader connection."""
+    conn.execute("BEGIN")
+    try:
+        out = last_refresh(conn), fetched_through(conn)
+    finally:
+        if conn.in_transaction:  # SQLite may have ended it itself after an error: keep that error
+            conn.execute("ROLLBACK")  # a read only: nothing to commit
+    return out
+
+
+@_read
 def batch(conn: sqlite3.Connection, batch_id: int) -> Batch | None:
     """The batch that wrote a price (`Price.batch`), with its hashes: a price's provenance (T-303)."""
     if isinstance(batch_id, bool) or not isinstance(batch_id, int):
@@ -293,6 +340,7 @@ def _stored_day(text: object) -> date:
     return d
 
 
+@_read
 def price_on(conn: sqlite3.Connection, day: date, currency: str) -> Price | None:
     """The stored price for `day` in `currency`, if there is one."""
     if type(day) is not date or currency not in CURRENCIES:
@@ -307,6 +355,7 @@ def price_on(conn: sqlite3.Connection, day: date, currency: str) -> Price | None
         return _price(row, {})
 
 
+@_read
 def prices(conn: sqlite3.Connection, currency: str) -> list[Price]:
     """Every stored price in `currency`, by day."""
     if currency not in CURRENCIES:
@@ -320,6 +369,7 @@ def prices(conn: sqlite3.Connection, currency: str) -> list[Price]:
         return [_price(r, checked) for r in rows]
 
 
+@_read
 def last_refresh(conn: sqlite3.Connection) -> Batch | None:
     """The latest refresh's batch: its hashes, the reference rate's state and its review flags."""
     row = conn.execute(
@@ -450,9 +500,12 @@ _SNAPSHOT_KEYS: Final = frozenset({"day", "currency", "price", "method", "source
 
 
 def _check_flags(kind: str, flags: dict[str, Any]) -> None:
-    """A batch's flags hold the record its kind always writes (T-408): a refresh its four lists, an
+    """A batch's flags hold the record its kind always writes (T-408): a refresh its own four lists and
+    the caller's five review kinds (`_review_flags`), an
     import the prices it replaced, a clear its currency and the prices it removed."""
     if kind == "refresh":
+        if set(flags) != {*REVIEW_LISTS, *REVIEW_PER_CURRENCY, *_REFRESH_FLAGS} or not _review_flags(flags):
+            raise PriceStoreError(_DAMAGED)  # a kind missing, extra or reshaped: never "nothing to review"
         records = [flags.get(k) for k in _REFRESH_FLAGS]
     elif kind == "import":
         records = [flags.get("replaced")]
@@ -463,6 +516,48 @@ def _check_flags(kind: str, flags: dict[str, Any]) -> None:
     for record in records:
         if not isinstance(record, list) or not all(_snapshot(r) for r in record):
             raise PriceStoreError(_DAMAGED)
+
+
+# each review kind's record, as `services.price_cache.flags_of` writes it from `prices`' Mismatch, Gap
+# and Outlier: its fields, each a day or a price as text
+_REVIEW_RECORDS: Final = {
+    "mismatches": {"day": "day", "reference": "price", "typical": "price"},
+    "reference_gaps": {"first": "day", "last": "day"},
+    "reference_outliers": {"day": "day", "previous": "price", "price": "price"},
+    "gaps": {"first": "day", "last": "day"},
+    "outliers": {"day": "day", "previous": "price", "price": "price"},
+}
+
+
+def _review_flags(flags: Mapping[str, Any]) -> bool:
+    """The caller's review flags as a refresh records them: every kind, each in its shape (a list, or
+    a list per currency for `gaps` and `outliers`), every record with exactly its kind's fields, each a
+    day or a price in the form the module writes, a gap's days in order."""
+
+    def record(kind: str, r: object) -> bool:
+        fields = _REVIEW_RECORDS[kind]
+        if not isinstance(r, dict) or set(r) != set(fields):
+            return False
+        for name, form in fields.items():
+            value = r[name]
+            pattern = _DAY if form == "day" else _PRICE
+            if not isinstance(value, str) or pattern.fullmatch(value) is None:
+                return False
+        return "first" not in r or r["first"] <= r["last"]
+
+    def records(kind: str, value: object) -> bool:
+        return isinstance(value, list) and all(record(kind, r) for r in value)
+
+    if set(flags) - set(_REFRESH_FLAGS) != {*REVIEW_LISTS, *REVIEW_PER_CURRENCY}:
+        return False
+    if not all(records(k, flags[k]) for k in REVIEW_LISTS):
+        return False
+    return all(
+        isinstance(m := flags[k], dict)
+        and set(m) == set(CURRENCIES)
+        and all(records(k, v) for v in m.values())
+        for k in REVIEW_PER_CURRENCY
+    )
 
 
 def _snapshot(r: object) -> bool:
@@ -519,21 +614,13 @@ def _distinct(rows: Sequence[Price]) -> None:
 @contextmanager
 def _refusals() -> Iterator[None]:
     """The schema's refusals, and any other SQLite error while writing or committing, as the module's
-    fixed messages, with only SQLite's error code in the log (its text can name the constraint or the
-    file): busy is `DbBusy`; a damaged file names the backup (T-408); anything else (a full disk, an
-    I/O error) says the DB can't be used now."""
+    fixed messages (`_sqlite_refusal`)."""
     try:
         yield
     except sqlite3.IntegrityError:
         raise PriceStoreError("the prices break a rule of the price table") from None
     except sqlite3.Error as e:
-        code = str(getattr(e, "sqlite_errorname", None) or type(e).__name__)
-        log.warning("prices couldn't be written to the user DB: %s", code)
-        if code.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
-            raise DbBusy("the user DB is busy; try again in a moment") from None
-        if code.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB")):
-            raise PriceStoreError(_DAMAGED) from None
-        raise PriceStoreError("the user DB can't be used right now; see the log") from None
+        raise _sqlite_refusal(e, "written to") from None
 
 
 def _row(p: Price, batch: int) -> tuple[str, str, str, str, str, int]:
@@ -624,6 +711,8 @@ __all__ = [
     "CURRENCIES",
     "FIRST_DAY",
     "METHODS",
+    "REVIEW_LISTS",
+    "REVIEW_PER_CURRENCY",
     "Batch",
     "Price",
     "PriceStoreError",
@@ -633,6 +722,7 @@ __all__ = [
     "last_refresh",
     "price_on",
     "prices",
+    "refresh_status",
     "store_import",
     "store_refresh",
 ]

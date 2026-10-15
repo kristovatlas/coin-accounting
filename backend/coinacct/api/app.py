@@ -30,6 +30,13 @@ Routes:
   each move's, the lots held, the late choices with the standing method's figures, what blocks a
   report, and which stored choices weren't used (automatic mode's, and stale ones, to warn about). A
   refusal is a 422 with a fixed message naming at most the event's id, a busy DB 503.
+- Prices (bearer; PLAN §6, ADR 0039), through `services.price_cache.PriceReader`, from the cache only
+  (no download): `GET /api/prices?currency=USD|EUR|GBP`, every cached price in that currency by day,
+  each with its method, source and the batch that wrote it; `GET /api/prices/status`, the last
+  refresh (when, the reference rate's last day and staleness, each source's SHA-256, how many review
+  flags of each kind) and the reference rate's last day any refresh priced (`reference_through`;
+  later days may be Bitstamp's fill, ADR 0039). A damaged price is a 422 with the backup
+  remedy, a busy DB 503.
 - History (bearer; PLAN §3), through `services.history.History`, from the chain cache only, as of the
   last finished sync (`as_of`; each address's `scanned_to` says how far its own history is scanned):
   - `GET /api/addresses[?tax_account_id=N]`: every address, with its owner, balance, UTXO count and
@@ -68,6 +75,7 @@ from coinacct.domain.keys import PrivateKeyError
 from coinacct.services import events as event_service
 from coinacct.services import imports as import_service
 from coinacct.services import ledger as ledger_service
+from coinacct.services import price_cache
 from coinacct.services.graph import Graph, NotFound
 from coinacct.services.history import History
 from coinacct.services.imports import Busy, ImportRefused, Imports, OfflineError, Owner
@@ -173,6 +181,7 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
     tagging: Tagging | None = None,
     events: event_service.Events | None = None,
     ledger: ledger_service.Ledger | None = None,
+    prices: price_cache.PriceReader | None = None,
 ) -> SecurityMiddleware:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -266,6 +275,8 @@ def create_app(  # noqa: PLR0913 - each is a value or callback the launcher hand
         _event_routes(app, events, authenticated)
     if ledger is not None:
         _ledger_routes(app, ledger, authenticated)
+    if prices is not None:
+        _price_routes(app, prices, authenticated)
     return SecurityMiddleware(app, port=port)
 
 
@@ -748,6 +759,52 @@ def _ledger_routes(app: FastAPI, ledger: ledger_service.Ledger, authenticated: l
     @app.get("/api/ledger", dependencies=authenticated)
     def run_ledger() -> dict[str, Any]:
         return _ledger_json(ledger.run())
+
+
+def _price_routes(app: FastAPI, reader: price_cache.PriceReader, authenticated: list[Any]) -> None:
+    @app.get("/api/prices", dependencies=authenticated)
+    def list_prices(currency: Annotated[Literal["USD", "EUR", "GBP"], Query()] = "USD") -> dict[str, Any]:
+        return {
+            "currency": currency,
+            "prices": [
+                {
+                    "day": p.day.isoformat(),
+                    "price": format(p.price, "f"),  # never an exponent
+                    "method": p.method,
+                    "source": p.source,
+                    "batch": p.batch,
+                }
+                for p in reader.prices(currency)
+            ],
+        }
+
+    @app.get("/api/prices/status", dependencies=authenticated)
+    def price_status() -> dict[str, Any]:
+        last, through = reader.status()
+        refresh = None
+        if last is not None:
+            refresh = {
+                "batch": last.id,
+                "at": last.at.isoformat(),
+                "usd_through": None if last.usd_through is None else last.usd_through.isoformat(),
+                "usd_stale": last.usd_stale,
+                "hashes": dict(sorted(last.hashes.items())),
+                "flags": {k: _flag_count(v) for k, v in sorted(last.flags.items())},
+            }
+        return {
+            "last_refresh": refresh,
+            "reference_through": None if through is None else through.isoformat(),
+        }
+
+
+def _flag_count(value: object) -> int:
+    """How many review flags of one kind a refresh recorded: a list's length, or a per-currency map's
+    total. Storage has checked every kind's shape as it read the batch (`storage.prices._check_flags`)."""
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, dict) and all(isinstance(v, list) for v in value.values()):
+        return sum(len(v) for v in value.values())
+    raise TypeError("a review flag of a shape the service didn't check")  # never shown as 0
 
 
 # POST bodies, as for the graph: scripts and txids stay out of URLs (T-105).

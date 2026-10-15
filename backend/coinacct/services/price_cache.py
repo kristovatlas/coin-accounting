@@ -7,8 +7,8 @@ T-301, T-303, T-304).
   failure anywhere stores nothing (T-304); a cancel, even one that arrives while the batch is being
   stored, stores nothing and returns None (the batch commits only after a last check). A cancel that
   arrives after that commit loses to it: the job wiring must report such a job done, not cancelled.
-  It is meant to run as a job on the job worker (architecture §3); the job wiring and the route are
-  the next slice,
+  It is meant to run as a job on the job worker (architecture §3); the job wiring and the CSV upload
+  route are still to come (`PriceReader` serves the read routes),
   which must carry a refusal's fixed message to the user (the job worker keeps only an error's class
   today), so a stored-data refusal still names its remedy.
 - **An import** (`PriceCache.import_csv`) parses the user's file (`prices.csv_import`), refuses it
@@ -121,6 +121,35 @@ class PriceCache:
             return store.store_import(self._conn, rows, file_hash=content_hash(data), at=moment)
 
 
+class PriceReader:
+    """The cached prices and the last refresh, read from a reader connection (architecture §3), for
+    the API's price routes."""
+
+    def __init__(self, open_reader: Callable[[], Connection]) -> None:
+        self._open_reader = open_reader
+
+    def prices(self, currency: str) -> list[store.Price]:
+        """Every cached price in `currency`, by day; each names the batch that wrote it."""
+        with _refusals():
+            reader = self._open_reader()
+            try:
+                return store.prices(reader, currency)
+            finally:
+                reader.close()
+
+    def status(self) -> tuple[store.Batch | None, date | None]:
+        """The last refresh's batch and the reference rate's last day any refresh priced, from one
+        snapshot. Storage checks each refresh batch's whole record as it reads it, so a damaged review
+        flag is refused, never read as nothing to review (T-303, T-408)."""
+        with _refusals():
+            reader = self._open_reader()
+            try:
+                last, through = store.refresh_status(reader)
+            finally:
+                reader.close()
+        return last, through
+
+
 @contextmanager
 def _refusals() -> Iterator[None]:
     """Storage's refusals, with their fixed messages, and a busy DB, as the services' (`db_errors`)."""
@@ -131,4 +160,4 @@ def _refusals() -> Iterator[None]:
             raise ImportRefused(str(e)) from None
 
 
-__all__ = ["PriceCache", "flags_of"]
+__all__ = ["PriceCache", "PriceReader", "flags_of"]

@@ -321,6 +321,11 @@ def test_the_runtime_serves_imports_and_connects_them_to_the_chain_jobs(tmp_path
     # and the event routes
     assert call(rt.app, "GET", "/api/events", headers=auth).json() == {"events": []}
     assert call(rt.app, "GET", "/api/ledger", headers=auth).json()["allocations"] == []
+    assert call(rt.app, "GET", "/api/prices", headers=auth).json() == {"currency": "USD", "prices": []}
+    assert call(rt.app, "GET", "/api/prices/status", headers=auth).json() == {
+        "last_refresh": None,
+        "reference_through": None,
+    }
     db.close()
 
 

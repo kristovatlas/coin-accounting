@@ -16,7 +16,7 @@ from coinacct.storage import events as ev
 from coinacct.storage import prices as pr
 from coinacct.storage.chain_state import record_chain
 from coinacct.storage.datadir import open_data_dir
-from coinacct.storage.db import DbBusy, open_db
+from coinacct.storage.db import DbBusy, open_db, open_reader
 from coinacct.storage.db import transaction as db_transaction
 from coinacct.storage.migrations import STEPS
 
@@ -53,13 +53,25 @@ def bypass(conn: sqlite3.Connection) -> None:
         conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
 
 
+def review(**kw: Any) -> dict[str, Any]:
+    """A refresh's review flags with every kind present, as the price cache records them."""
+    empty: dict[str, list[Any]] = {"USD": [], "EUR": [], "GBP": []}
+    return {
+        "mismatches": [],
+        "reference_gaps": [],
+        "reference_outliers": [],
+        "gaps": empty,
+        "outliers": empty,
+    } | kw
+
+
 def refresh(conn: sqlite3.Connection, *rows: pr.Price, **kw: Any) -> int:
     reference = [r.day for r in rows if r.currency == "USD" and r.method == "reference"]
     args: dict[str, Any] = {
         "hashes": {"coinmetrics": HASH, "ecb": HASH, "bitstamp": HASH},
         "usd_stale": not reference,
     }
-    args |= {"usd_through": max(reference) if reference else None, "flags": {"mismatches": []}, "at": AT} | kw
+    args |= {"usd_through": max(reference) if reference else None, "flags": review(), "at": AT} | kw
     batch = pr.store_refresh(conn, rows, **args)
     assert batch is not None
     return batch
@@ -83,7 +95,7 @@ def test_a_refresh_is_stored_with_its_batch_and_read_back(conn: sqlite3.Connecti
         date(2025, 1, 2),
         False,
         {"coinmetrics": HASH, "ecb": HASH, "bitstamp": HASH},
-        {"mismatches": [], "revised": [], "kept_import": [], "upgraded": [], "display_updated": []},
+        review(revised=[], kept_import=[], upgraded=[], display_updated=[]),
     )
 
 
@@ -159,9 +171,23 @@ def test_a_refresh_with_any_bad_price_stores_nothing_t304(conn: sqlite3.Connecti
         {"hashes": {"coinmetrics": "not-a-hash"}},
         {"usd_stale": 1},
         {"usd_through": "2025-01-02"},
-        {"flags": {"x": float("nan")}},
+        {"flags": review(mismatches=[{"x": float("nan")}])},
         {"at": datetime(2026, 10, 14, 12)},  # no zone
-        {"flags": {"error": ValueError("boom")}},  # not plain data: never stored as its text
+        {
+            "flags": review(mismatches=[{"error": ValueError("boom")}])
+        },  # not plain data: never stored as its text
+        {"flags": {"mismatches": []}},  # a kind missing
+        {"flags": review(extra=[])},  # a kind no refresh writes
+        {"flags": review(gaps={"USD": []})},  # a currency missing
+        {"flags": review(mismatches=[5])},  # an entry that isn't a record
+        {"flags": review(mismatches=[{}])},  # a record without its fields
+        {
+            "flags": review(
+                mismatches=[{"day": "2025-01-01", "reference": "1.00", "typical": "1.00", "x": "1"}]
+            )
+        },
+        {"flags": review(reference_gaps=[{"first": "2025-01-02", "last": "2025-01-01"}])},  # out of order
+        {"flags": review(reference_outliers=[{"day": "2025-01-01", "previous": "1", "price": "2.00"}])},
         {"usd_through": date(2008, 1, 1)},
         {"usd_through": datetime(2025, 1, 2, tzinfo=UTC)},  # a moment, not a day
         {"hashes": {}},  # a refresh records its sources' hashes
@@ -680,7 +706,7 @@ def test_a_refresh_over_a_damaged_day_names_the_backup_remedy_t408(conn: sqlite3
 def test_before_commit_rolls_the_refresh_back(conn: sqlite3.Connection) -> None:
     hashes = {"coinmetrics": HASH}
     rows = [p("2025-01-01", "93000.12")]
-    kw: dict[str, Any] = {"usd_through": date(2025, 1, 1), "usd_stale": False, "flags": {}, "at": AT}
+    kw: dict[str, Any] = {"usd_through": date(2025, 1, 1), "usd_stale": False, "flags": review(), "at": AT}
     assert pr.store_refresh(conn, rows, hashes=hashes, before_commit=lambda: True, **kw) is None
     assert conn.execute(
         "SELECT (SELECT count(*) FROM price), (SELECT count(*) FROM price_batch)"
@@ -744,3 +770,24 @@ def test_a_busy_commit_is_busy(conn: sqlite3.Connection, monkeypatch: pytest.Mon
     monkeypatch.setattr(pr, "transaction", busy_commit)
     with pytest.raises(DbBusy):
         refresh(conn, p("2025-01-01", "93000.12"))
+
+
+def test_the_refresh_status_is_one_snapshot(
+    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refresh that commits between the status's two reads isn't half seen."""
+    refresh(conn, p("2025-01-01", "93000.12"))
+    reader = open_reader(open_data_dir(str(tmp_path / "data")))
+    real = pr.last_refresh
+
+    def then_a_refresh_commits(c: sqlite3.Connection) -> pr.Batch | None:
+        last = real(c)
+        refresh(conn, p("2025-01-02", "94000.00"), at=datetime(2026, 10, 15, 12, tzinfo=UTC))  # on the writer
+        return last
+
+    monkeypatch.setattr(pr, "last_refresh", then_a_refresh_commits)
+    try:
+        last, through = pr.refresh_status(reader)
+    finally:
+        reader.close()
+    assert last is not None and (last.usd_through, through) == (date(2025, 1, 1), date(2025, 1, 1))
