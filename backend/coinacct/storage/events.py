@@ -230,7 +230,7 @@ def identify(  # noqa: PLR0913 - the event, its choices, when they were made, an
             raise EventError("a choice of lots can't be dated before the one it replaces")
         if event.kind in MOVEMENTS and changed and _named_by_others(conn, event_id):
             raise EventError(_NAMED)
-        _replace_choice(conn, event_id, choices, stamp, at=at, origin=origin)
+        _replace_choice(conn, event_id, choices, stamp, at=at, origin=origin, old=(before, before_at))
 
 
 def _log_time(at: str) -> datetime:
@@ -372,11 +372,13 @@ def _stored_choice(event: Event, rows: Sequence[tuple[Any, ...]]) -> tuple[tuple
     lot once, none holding a key, the user's specific choice not yet judged late (the only method and
     flag the module writes), whole sats, at most `MAX_CHOICES`, one UTC moment from genesis on, and
     a fit for `event` (`_check_choice`). The caller checks that each lot starts from a stored event when
-    it starts from one. The one rule a read can't check is that the choice wasn't dated after it was
-    recorded."""
+    it starts from one. A choice's time isn't checked against the change log, so a stored time moved
+    earlier outside the module passes (#325)."""
     stamps = {chosen_at for _, _, _, chosen_at, _, _ in rows}
     if [p for p, *_ in rows] != list(range(len(rows))):
         raise EventError("a stored choice is damaged")
+    # the module writes no other method, and no late flag until the services record the engine's
+    # judgment: that change must widen this rule in the same PR
     if any(method != "specific" or late != 0 for *_, method, late in rows):
         raise EventError("a stored choice is damaged")
     if len(stamps) != 1 or len(rows) > MAX_CHOICES:
@@ -410,11 +412,14 @@ def _replace_choice(  # noqa: PLR0913 - as identify's
     *,
     at: str,
     origin: Origin,
+    old: tuple[tuple[Choice, ...], datetime | None] | None = None,
 ) -> None:
-    old, old_at = identification(conn, event_id)
+    """Replace event `event_id`'s stored choice, logged; `old` is the stored one, if the caller has
+    read it already in this transaction."""
+    old_choices, old_at = identification(conn, event_id) if old is None else old
     before = None
-    if old and old_at is not None:
-        before = {"choices": [asdict(c) for c in old], "identified_at": old_at.isoformat()}
+    if old_choices and old_at is not None:
+        before = {"choices": [asdict(c) for c in old_choices], "identified_at": old_at.isoformat()}
     after = None if not choices else {"choices": [asdict(c) for c in choices], "identified_at": stamp}
     if before == after:
         return
