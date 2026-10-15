@@ -68,6 +68,9 @@ _DAMAGED: Final = "a stored price is damaged (T-408): restore the user DB from a
 # the source family each fetched method comes from (ADR 0039): Coin Metrics' reference rate, Bitstamp's
 # typical price, an ECB conversion (`prices.coinmetrics`, `prices.bitstamp`, `prices.fx`)
 _FAMILY: Final = {"reference": "coinmetrics", "typical": "bitstamp", "fx": "ecb"}
+# a batch records only complete days, before its own UTC date: a write of a later one is refused (a
+# clock set back can cause it, though the bound doesn't detect every clock change)
+_EARLIER: Final = "a batch records only days before its own UTC date: check the system clock"
 _REFRESH_FLAGS: Final = ("revised", "kept_import", "upgraded", "display_updated")  # the module's own
 # the review flags a refresh's caller records (`services.price_cache.flags_of`): three lists of
 # records, and two maps holding a list of records per currency (T-303)
@@ -178,7 +181,9 @@ def store_refresh(  # noqa: PLR0912, PLR0913 - a refresh's prices and what it re
         raise PriceStoreError("the reference rate's last day is the last reference price the refresh stores")
     if not isinstance(flags, Mapping) or set(_REFRESH_FLAGS) & set(flags):
         raise PriceStoreError("a refresh's revisions are the module's own record")
-    bound = at.astimezone(UTC).date() if isinstance(at, datetime) and at.utcoffset() is not None else None
+    bound = _bound(at)
+    if bound is not None and any(p.day >= bound for p in rows):
+        raise PriceStoreError(_EARLIER)
     if not _review_flags(flags, before=bound):
         raise PriceStoreError("a refresh records every kind of review flag, each as a list of records")
     if any("*" in k for k in hashes):
@@ -186,9 +191,6 @@ def store_refresh(  # noqa: PLR0912, PLR0913 - a refresh's prices and what it re
     if not all(_covered(p.source, hashes, "refresh") for p in rows):
         raise PriceStoreError("each fetched price's source has its SHA-256 in the refresh")
     _distinct(rows)
-    if usd_through is not None and isinstance(at, datetime) and at.utcoffset() is not None:
-        if usd_through > at.astimezone(UTC).date():
-            raise PriceStoreError("the reference rate can't have priced a day after the refresh")
     try:
         return _write_refresh(conn, rows, hashes, usd_through, usd_stale, flags, at, before_commit)
     except _RolledBack:
@@ -220,7 +222,7 @@ def _write_refresh(  # noqa: PLR0913, PLR0917 - store_refresh's checked argument
             hashes=dict(hashes),
             flags=(recorded := dict(flags) | found),
         )
-        _readable("refresh", recorded, batch, at)
+        _readable("refresh", recorded, batch, at, dict(hashes))
         conn.executemany(  # a stored day keeps its price unless `_replaces` says so (T-304, ADR 0039)
             "INSERT INTO price (day, currency, price, method, source, batch_id) VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (day, currency) DO UPDATE SET price = excluded.price, method = excluded.method,"
@@ -242,6 +244,9 @@ def store_import(conn: sqlite3.Connection, prices: Iterable[Price], *, file_hash
         raise PriceStoreError("an import stores the user's own prices")
     if not isinstance(file_hash, str) or not _HASH.fullmatch(file_hash):
         raise PriceStoreError("an import records its file's SHA-256")
+    bound = _bound(at)
+    if bound is not None and any(p.day >= bound for p in rows):
+        raise PriceStoreError(_EARLIER)
     _distinct(rows)
     with _refusals(), transaction(conn):
         replaced = _existing(conn, [(p.day, p.currency) for p in rows])
@@ -254,7 +259,7 @@ def store_import(conn: sqlite3.Connection, prices: Iterable[Price], *, file_hash
             hashes={"upload": file_hash},
             flags=(recorded := {"replaced": replaced}),
         )
-        _readable("import", recorded, batch, at)
+        _readable("import", recorded, batch, at, {"upload": file_hash})
         conn.executemany(
             "INSERT INTO price (day, currency, price, method, source, batch_id) VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (day, currency) DO UPDATE SET price = excluded.price, method = excluded.method,"
@@ -274,10 +279,13 @@ def clear_import(conn: sqlite3.Connection, days: Iterable[date], currency: str, 
     wanted = sorted(set(given))
     if currency not in CURRENCIES:
         raise PriceStoreError("a price's currency is USD, EUR or GBP")
+    bound = _bound(at)
     with _refusals(), transaction(conn):
         removed = [r for r in _existing(conn, [(d, currency) for d in wanted]) if r["method"] == "import"]
         if not removed:
             raise PriceStoreError("none of those days has an imported price")
+        if bound is not None and removed[-1]["day"] >= bound.isoformat():  # in order of day (`_existing`)
+            raise PriceStoreError(_EARLIER)
         batch = _batch(
             conn,
             kind="clear",
@@ -287,7 +295,7 @@ def clear_import(conn: sqlite3.Connection, days: Iterable[date], currency: str, 
             hashes={},
             flags=(recorded := {"currency": currency, "removed": removed}),
         )
-        _readable("clear", recorded, batch, at)
+        _readable("clear", recorded, batch, at, {})
         conn.executemany(
             "DELETE FROM price WHERE day = ? AND currency = ? AND method = 'import'",
             [(d.isoformat(), currency) for d in wanted],
@@ -425,6 +433,11 @@ def _batch(  # noqa: PLR0913 - one batch row's columns
     return cur.lastrowid
 
 
+def _bound(at: object) -> date | None:
+    """The UTC date of a batch's moment, if it is a timezone-aware one (`_batch` refuses any other)."""
+    return at.astimezone(UTC).date() if isinstance(at, datetime) and at.utcoffset() is not None else None
+
+
 def _checked(p: object) -> Price:
     if not isinstance(p, Price):
         raise PriceStoreError("prices are Price values")
@@ -509,34 +522,45 @@ def _revisions(conn: sqlite3.Connection, rows: Sequence[Price]) -> dict[str, lis
 _SNAPSHOT_KEYS: Final = frozenset({"day", "currency", "price", "method", "source", "batch"})
 
 
-def _check_flags(kind: str, flags: dict[str, Any], *, batch_id: int, before: date) -> None:
+def _check_flags(
+    kind: str, flags: dict[str, Any], *, batch_id: int, before: date, hashes: Mapping[str, str]
+) -> None:
     """A batch's flags hold the record its kind always writes (T-408): a refresh its own four lists and
     the caller's five review kinds (`_review_flags`), an import the prices it replaced, a clear its
-    currency and the prices it removed. Every day is before the batch's own UTC date, and every price
-    recorded names an earlier batch."""
-    if kind == "refresh":
-        if set(flags) != {*REVIEW_LISTS, *REVIEW_PER_CURRENCY, *_REFRESH_FLAGS}:
-            raise PriceStoreError(_DAMAGED)  # a kind missing or extra: never "nothing to review"
-        if not _review_flags(flags, before=before):
-            raise PriceStoreError(_DAMAGED)
-        lists = {k: flags.get(k) for k in _REFRESH_FLAGS}
-    elif kind == "import":
-        lists = {"replaced": flags.get("replaced")}
-    else:
-        if flags.get("currency") not in CURRENCIES or not flags.get("removed"):
-            raise PriceStoreError(_DAMAGED)
-        lists = {"removed": flags.get("removed")}
+    currency and the imported prices in it that it removed. Every day is before the batch's own UTC date,
+    every price recorded names an earlier batch, and what a refresh fetched names a source it hashed."""
+    lists = _lists(kind, flags, before=before)
     seen: set[tuple[object, object]] = set()
     for name, records in lists.items():
         if not isinstance(records, list):
             raise PriceStoreError(_DAMAGED)
         for r in records:
-            if not _snapshot(r, kind=name, batch_id=batch_id, before=before):
+            if not _snapshot(r, kind=name, batch_id=batch_id, before=before, hashes=hashes):
                 raise PriceStoreError(_DAMAGED)
+            if name == "removed" and (r["method"] != "import" or r["currency"] != flags["currency"]):
+                raise PriceStoreError(_DAMAGED)  # a clear removes imported prices in its one currency
             key = (r["day"], r["currency"])
             if key in seen:  # a priced day is recorded once, under one kind
                 raise PriceStoreError(_DAMAGED)
             seen.add(key)
+
+
+def _lists(kind: str, flags: dict[str, Any], *, before: date) -> dict[str, object]:
+    """The lists of recorded prices a batch's flags hold, by its kind, once the flags hold exactly
+    its kind's keys."""
+    if kind == "refresh":
+        if set(flags) != {*REVIEW_LISTS, *REVIEW_PER_CURRENCY, *_REFRESH_FLAGS}:
+            raise PriceStoreError(_DAMAGED)  # a kind missing or extra: never "nothing to review"
+        if not _review_flags(flags, before=before):
+            raise PriceStoreError(_DAMAGED)
+        return {k: flags.get(k) for k in _REFRESH_FLAGS}
+    if kind == "import":
+        if set(flags) != {"replaced"}:
+            raise PriceStoreError(_DAMAGED)
+        return {"replaced": flags.get("replaced")}
+    if set(flags) != {"currency", "removed"} or flags["currency"] not in CURRENCIES or not flags["removed"]:
+        raise PriceStoreError(_DAMAGED)
+    return {"removed": flags.get("removed")}
 
 
 # each review kind's record, as `services.price_cache.flags_of` writes it from `prices`' Mismatch, Gap
@@ -619,10 +643,13 @@ def _source(value: object) -> bool:
     return isinstance(value, str) and 1 <= len(value) <= MAX_SOURCE
 
 
-def _snapshot(r: object, *, kind: str, batch_id: int, before: date) -> bool:  # noqa: PLR0911 - one rule per kind
+def _snapshot(  # noqa: PLR0911 - one rule per kind
+    r: object, *, kind: str, batch_id: int, before: date, hashes: Mapping[str, str]
+) -> bool:
     """A recorded price as the module writes it, by the list it is in: exactly its fields (a refresh's
-    own records also hold what the source now serves), each in its form, an earlier batch, and the
-    rule its kind follows (`_revisions`)."""
+    own records also hold what the source now serves, from a source the batch hashed), each in its
+    form, each price by a method its currency may have from its method's source family (`_checked`),
+    an earlier batch, and the rule its kind follows (`_revisions`)."""
     fetched = kind in _REFRESH_FLAGS
     keys = _SNAPSHOT_KEYS | _FETCHED_KEYS if fetched else _SNAPSHOT_KEYS
     if not isinstance(r, dict) or set(r) != keys:
@@ -633,6 +660,7 @@ def _snapshot(r: object, *, kind: str, batch_id: int, before: date) -> bool:  # 
         and _is_price(r["price"])
         and r["method"] in METHODS
         and _source(r["source"])
+        and _priced_by(r["currency"], r["method"], r["source"])
         and isinstance(r["batch"], int)
         and not isinstance(r["batch"], bool)
         and 1 <= r["batch"] < batch_id
@@ -643,8 +671,10 @@ def _snapshot(r: object, *, kind: str, batch_id: int, before: date) -> bool:  # 
     method = r["fetched_method"]
     if not (_is_price(r["fetched"]) and method in _FAMILY and _source(r["fetched_source"])):
         return False  # a refresh fetches no import
-    if r["fetched_source"].split("*")[0].split(":")[0] != _FAMILY[method]:
+    if not _priced_by(r["currency"], method, r["fetched_source"]):
         return False
+    if not _covered(r["fetched_source"], hashes, "refresh"):
+        return False  # what the source now serves came from a source this refresh hashed
     old, new = (r["price"], r["method"], r["source"]), (r["fetched"], method, r["fetched_source"])
     if kind == "kept_import":
         return bool(r["method"] == "import" and r["price"] != r["fetched"])
@@ -655,6 +685,14 @@ def _snapshot(r: object, *, kind: str, batch_id: int, before: date) -> bool:  # 
     if kind == "display_updated":
         return bool(r["currency"] != "USD")
     return bool(r["currency"] == "USD")  # revised
+
+
+def _priced_by(currency: str, method: str, source: str) -> bool:
+    """A price's method and source as `_checked` holds them: a USD price is never a conversion, and a
+    fetched price's source is its method's family (ADR 0039)."""
+    if currency == "USD" and method == "fx":
+        return False
+    return method not in _FAMILY or source.split("*", 1)[0].split(":", 1)[0] == _FAMILY[method]
 
 
 def _replaces(currency: str, stored_method: str, fetched_method: str) -> bool:
@@ -669,13 +707,20 @@ def _replaces(currency: str, stored_method: str, fetched_method: str) -> bool:
 
 def _fetched_before(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
     """The last fetched value each import replaced, by (day, currency), from the import batches' own
-    records: what a day held before the user's price, which a clear later removed."""
+    records: what a day held before the user's price, which a clear later removed. Every import batch
+    is checked whole, so a damaged one refuses every refresh with the backup remedy (fail closed,
+    T-408), even one whose days the refresh doesn't touch."""
     out: dict[tuple[str, str], dict[str, Any]] = {}
-    for (flags,) in conn.execute("SELECT flags FROM price_batch WHERE kind = 'import' ORDER BY id"):
-        with _damaged():
-            for r in json.loads(flags).get("replaced", []):
-                if r["method"] != "import":
-                    out[(r["day"], r["currency"])] = r
+    rows = conn.execute(
+        "SELECT id, at, kind, usd_through, usd_stale, hashes, flags FROM price_batch"
+        " WHERE kind = 'import' ORDER BY id"
+    )
+    for row in rows:
+        with _damaged():  # the whole batch is checked, so damage there is refused as damage
+            stored = _stored_batch(row)
+        for r in stored.flags["replaced"]:
+            if r["method"] != "import":
+                out[(r["day"], r["currency"])] = r
     return out
 
 
@@ -687,11 +732,11 @@ def _covered(source: str, hashes: Mapping[str, str], kind: str) -> bool:
     return all(part in hashes for part in source.split("*"))
 
 
-def _readable(kind: str, flags: Mapping[str, Any], batch: int, at: datetime) -> None:
+def _readable(kind: str, flags: Mapping[str, Any], batch: int, at: datetime, hashes: dict[str, str]) -> None:
     """Refuse, before the commit, a record that the read (`_check_flags`) would call damage: the write
     and the read hold the same rules, so a store the module wrote always reads back."""
     try:
-        _check_flags(kind, dict(flags), batch_id=batch, before=at.astimezone(UTC).date())
+        _check_flags(kind, dict(flags), batch_id=batch, before=at.astimezone(UTC).date(), hashes=hashes)
     except PriceStoreError:
         raise PriceStoreError("the change would leave a price record the store can't read back") from None
 
@@ -751,6 +796,8 @@ def _price(r: Sequence[Any], checked: dict[int, Batch]) -> Price:
         kind == "import"
     ) or kind == "clear":  # a price and the batch it says wrote it
         raise PriceStoreError(_DAMAGED)
+    if _stored_day(day) >= stored_batch.at.astimezone(UTC).date():  # a batch prices only complete days
+        raise PriceStoreError(_DAMAGED)
     p = Price(_stored_day(day), currency, Decimal(text), method, source, batch_id)
     _checked(p)
     if format(p.price, "f") != text:
@@ -769,7 +816,7 @@ def _stored_batch(r: Sequence[Any]) -> Batch:
     ):
         raise PriceStoreError(_DAMAGED)
     through = None if usd_through is None else _stored_day(usd_through)
-    if through is not None and through > moment.astimezone(UTC).date():  # priced before the refresh ran
+    if through is not None and through >= moment.astimezone(UTC).date():  # a complete day, before the batch's
         raise PriceStoreError(_DAMAGED)
     if kind == "refresh" and through is None and not usd_stale:
         raise PriceStoreError(_DAMAGED)
@@ -784,7 +831,7 @@ def _stored_batch(r: Sequence[Any]) -> Batch:
         raise PriceStoreError(_DAMAGED)
     if isinstance(batch_id, bool) or not isinstance(batch_id, int) or batch_id < 1:
         raise PriceStoreError(_DAMAGED)
-    _check_flags(kind, flag_map, batch_id=batch_id, before=moment.astimezone(UTC).date())
+    _check_flags(kind, flag_map, batch_id=batch_id, before=moment.astimezone(UTC).date(), hashes=hash_map)
     if not all(
         isinstance(k, str)
         and 1 <= len(k) <= MAX_SOURCE
