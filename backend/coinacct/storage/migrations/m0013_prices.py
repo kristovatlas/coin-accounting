@@ -57,8 +57,21 @@ WHEN (NEW.method = 'import') != ((SELECT kind FROM price_batch WHERE id = NEW.ba
 BEGIN SELECT RAISE(ABORT, 'a price comes from the kind of batch its method says'); END;
 -- a price changes only with the batch that changes it, so each price names the batch that wrote it
 CREATE TRIGGER price_changes_with_its_batch BEFORE UPDATE ON price
-WHEN NEW.batch_id = OLD.batch_id
+WHEN NEW.batch_id <= OLD.batch_id
 BEGIN SELECT RAISE(ABORT, 'a price changes only with a new batch'); END;
+-- only the user's own prices are ever removed (a clear); a fetched one stays, or a refresh would
+-- refill it unnoticed
+CREATE TRIGGER price_fetched_is_never_removed BEFORE DELETE ON price
+WHEN OLD.method != 'import'
+BEGIN SELECT RAISE(ABORT, 'a fetched price is never removed'); END;
+-- the user's own price is removed only by the clear batch just recorded, which names it
+CREATE TRIGGER price_import_is_removed_only_by_a_clear BEFORE DELETE ON price
+WHEN OLD.method = 'import' AND NOT EXISTS (
+    SELECT 1 FROM price_batch b, json_each(b.flags, '$.removed') r
+    WHERE b.id = (SELECT max(id) FROM price_batch) AND b.kind = 'clear'
+        AND json_extract(r.value, '$.day') = OLD.day AND json_extract(r.value, '$.currency') = OLD.currency
+)
+BEGIN SELECT RAISE(ABORT, 'an imported price is removed only by a recorded clear'); END;
 -- the batches are the prices' audit record: later batches' flags name them, so none is edited or removed
 CREATE TRIGGER price_batch_is_append_only_update BEFORE UPDATE ON price_batch
 BEGIN SELECT RAISE(ABORT, 'a price batch is never edited'); END;

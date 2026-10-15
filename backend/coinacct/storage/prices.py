@@ -11,18 +11,22 @@
   flags from the batch that wrote it (`Price.batch`, `batch`). A refresh with no prices is refused:
   a source that came back empty fails loudly.
 - **The cache is authoritative once fetched** (T-304). A refresh adds the days it doesn't have and
-  never changes a stored day: a source that later serves a different value for a stored day (a
+  changes a stored one only to replace Bitstamp's fill with the reference rate once Coin Metrics has
+  the day (ADR 0039, `upgraded`), or a display price (`display_updated`). Otherwise it never changes
+  a stored day: a source that later serves a different value for a stored day (a
   revision, or a tampered feed, T-303) is recorded in the batch's flags (`revised`, old and new),
-  for review, and the stored price stands.
+  for review, and the stored price stands. So is a day refilled after the user cleared an import,
+  against the fetched value that import replaced; and a fetched value that differs from the user's
+  imported price is recorded as `kept_import`. Both keys are the module's own: a caller can't set them.
 - **The user's own prices stand.** A refresh never touches one the user imported (method `import`):
   an import is the fallback for a source that went wrong (T-304). An import replaces whatever the
   day had. A display price for a day whose USD price was imported stays the fetched one (display
   only, never a tax figure).
   `clear_import` removes the user's imported prices for some days, recorded as a batch, so the next
   refresh fills them again.
-- **Fetching never depends on imports** (T-301): `fetched_through` is the last day of fetched USD
-  prices, the only thing a refresh's range may start from; imported prices may cover the user's own
-  trading days.
+- **Fetching never depends on imports** (T-301): a refresh downloads every source's whole history
+  today; `fetched_through`, the refreshes' own record of the last day priced, is the only start a
+  future incremental refresh may use, since imported prices may cover the user's own trading days.
 - **Values.** A price is a `Decimal` above zero in whole cents, at most 15 integer digits, as
   `prices.DailyPrice` rounds it; a day is a UTC date from Bitcoin's first block on; the currency is
   USD (tax figures) or EUR or GBP (display only).
@@ -53,9 +57,12 @@ MAX_SOURCE: Final = 200
 _PRICE: Final = re.compile(r"(?:0|[1-9][0-9]{0,14})\.[0-9]{2}", re.ASCII)
 _DAY: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 _HASH: Final = re.compile(r"[0-9a-f]{64}", re.ASCII)
-_DAMAGED: Final = (
-    "a stored price is damaged (T-408): refresh the prices, or restore the user DB from a backup"
-)
+# a refresh can't mend a stored day or batch (both are kept as stored), so the remedy is the backup
+_DAMAGED: Final = "a stored price is damaged (T-408): restore the user DB from a backup"
+# the source family each fetched method comes from (ADR 0039): Coin Metrics' reference rate, Bitstamp's
+# typical price, an ECB conversion (`prices.coinmetrics`, `prices.bitstamp`, `prices.fx`)
+_FAMILY: Final = {"reference": "coinmetrics", "typical": "bitstamp", "fx": "ecb"}
+_REFRESH_FLAGS: Final = ("revised", "kept_import", "upgraded", "display_updated")  # the module's own
 
 # a price with the batch that wrote it, checked together on read; a LEFT JOIN, so a price whose batch
 # is gone is refused rather than hidden
@@ -130,6 +137,10 @@ def store_refresh(  # noqa: PLR0913 - a refresh's prices and what it recorded
     reference = [p.day for p in rows if p.currency == "USD" and p.method == "reference"]
     if usd_through != (max(reference) if reference else None):
         raise PriceStoreError("the reference rate's last day is the last reference price the refresh stores")
+    if not isinstance(flags, Mapping) or set(_REFRESH_FLAGS) & set(flags):
+        raise PriceStoreError("a refresh's revisions are the module's own record")
+    if any("*" in k for k in hashes):
+        raise PriceStoreError("a source's name has no '*'")
     if not all(_covered(p.source, hashes, "refresh") for p in rows):
         raise PriceStoreError("each fetched price's source has its SHA-256 in the refresh")
     _distinct(rows)
@@ -137,14 +148,7 @@ def store_refresh(  # noqa: PLR0913 - a refresh's prices and what it recorded
         if usd_through > at.astimezone(UTC).date():
             raise PriceStoreError("the reference rate can't have priced a day after the refresh")
     with _refusals(), transaction(conn):
-        stored = {(r["day"], r["currency"]): r for r in _existing(conn, [(p.day, p.currency) for p in rows])}
-        revised = [
-            old | {"fetched": format(p.price, "f"), "fetched_method": p.method, "fetched_source": p.source}
-            for p in rows
-            if (old := stored.get((p.day.isoformat(), p.currency))) is not None
-            and old["method"] != "import"
-            and (old["price"], old["method"], old["source"]) != (format(p.price, "f"), p.method, p.source)
-        ]
+        found = _revisions(conn, rows)
         batch = _batch(
             conn,
             kind="refresh",
@@ -152,11 +156,14 @@ def store_refresh(  # noqa: PLR0913 - a refresh's prices and what it recorded
             usd_through=usd_through,
             usd_stale=usd_stale,
             hashes=dict(hashes),
-            flags=dict(flags) | ({"revised": revised} if revised else {}),
+            flags=dict(flags) | found,
         )
-        conn.executemany(  # a stored day keeps its price: the cache is authoritative once fetched (T-304)
+        conn.executemany(  # a stored day keeps its price unless `_replaces` says so (T-304, ADR 0039)
             "INSERT INTO price (day, currency, price, method, source, batch_id) VALUES (?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT (day, currency) DO NOTHING",
+            " ON CONFLICT (day, currency) DO UPDATE SET price = excluded.price, method = excluded.method,"
+            " source = excluded.source, batch_id = excluded.batch_id"
+            " WHERE price.method != 'import' AND (price.currency != 'USD'"
+            " OR (price.method = 'typical' AND excluded.method = 'reference'))",
             [_row(p, batch) for p in rows],
         )
         return batch
@@ -342,6 +349,8 @@ def _checked(p: object) -> Price:
         raise PriceStoreError("a price's method is one the app knows")
     if p.currency == "USD" and p.method == "fx":
         raise PriceStoreError("a USD price comes from a source, never a conversion (ADR 0039)")
+    if p.method in _FAMILY and p.source.split("*")[0].split(":")[0] != _FAMILY[p.method]:
+        raise PriceStoreError("a fetched price's source is the one its method names (ADR 0039)")
     if not isinstance(p.source, str) or not 1 <= len(p.source) <= MAX_SOURCE:
         raise PriceStoreError("a price names its source")
     if not isinstance(p.price, Decimal) or not p.price.is_finite() or p.price <= 0:
@@ -377,6 +386,92 @@ def _existing(conn: sqlite3.Connection, keys: Sequence[tuple[date, str]]) -> lis
             }
             | {"source": stored.source, "batch": stored.batch}
         )
+    return out
+
+
+def _revisions(conn: sqlite3.Connection, rows: Sequence[Price]) -> dict[str, list[dict[str, Any]]]:
+    """What a refresh found that differs from the cache, each old value with the new:
+    - `upgraded`: a stored USD typical price (Bitstamp's fill, ADR 0039) the reference rate now has,
+      which the refresh replaces;
+    - `display_updated`: a stored EUR or GBP price (display only) the refresh replaces;
+    - `revised`: a stored USD price the source now serves otherwise, or a cleared day refilled unlike
+      what was fetched before, which is kept as stored and shown for review (T-303, T-304);
+    - `kept_import`: a day the user imported that the source disagrees with, kept as the user's."""
+    stored = {(r["day"], r["currency"]): r for r in _existing(conn, [(p.day, p.currency) for p in rows])}
+    earlier = _fetched_before(conn)  # fetched values imports replaced: a cleared day's last fetch
+    found: dict[str, list[dict[str, Any]]] = {k: [] for k in _REFRESH_FLAGS}
+    for p in rows:
+        key, new = (p.day.isoformat(), p.currency), (format(p.price, "f"), p.method, p.source)
+        fetched = {"fetched": new[0], "fetched_method": p.method, "fetched_source": p.source}
+        old = stored.get(key) or earlier.get(key)
+        if old is None or (old["price"], old["method"], old["source"]) == new:
+            continue
+        if key not in stored:
+            found["revised"].append(old | fetched)  # refilled after a clear, unlike what was fetched before
+        elif old["method"] == "import":
+            if old["price"] != new[0]:
+                found["kept_import"].append(old | fetched)
+        elif _replaces(old["currency"], old["method"], p.method):
+            found["upgraded" if p.currency == "USD" else "display_updated"].append(old | fetched)
+        else:
+            found["revised"].append(old | fetched)
+    return found
+
+
+_SNAPSHOT_KEYS: Final = frozenset({"day", "currency", "price", "method", "source", "batch"})
+
+
+def _check_flags(kind: str, flags: dict[str, Any]) -> None:
+    """A batch's flags hold the record its kind always writes (T-408): a refresh its four lists, an
+    import the prices it replaced, a clear its currency and the prices it removed."""
+    if kind == "refresh":
+        records = [flags.get(k) for k in _REFRESH_FLAGS]
+    elif kind == "import":
+        records = [flags.get("replaced")]
+    else:
+        if flags.get("currency") not in CURRENCIES or not flags.get("removed"):
+            raise PriceStoreError(_DAMAGED)
+        records = [flags.get("removed")]
+    for record in records:
+        if not isinstance(record, list) or not all(_snapshot(r) for r in record):
+            raise PriceStoreError(_DAMAGED)
+
+
+def _snapshot(r: object) -> bool:
+    if not isinstance(r, dict) or not _SNAPSHOT_KEYS <= set(r):
+        return False
+    return (
+        isinstance(r["day"], str)
+        and _DAY.fullmatch(r["day"]) is not None
+        and r["currency"] in CURRENCIES
+        and isinstance(r["price"], str)
+        and _PRICE.fullmatch(r["price"]) is not None
+        and r["method"] in METHODS
+        and isinstance(r["source"], str)
+        and isinstance(r["batch"], int)
+        and not isinstance(r["batch"], bool)
+    )
+
+
+def _replaces(currency: str, stored_method: str, fetched_method: str) -> bool:
+    """Whether a refresh replaces a stored fetched price: a display price always; a USD price only
+    from Bitstamp's fill to the reference rate (ADR 0039); never the user's own."""
+    if stored_method == "import":
+        return False
+    if currency != "USD":
+        return True
+    return stored_method == "typical" and fetched_method == "reference"
+
+
+def _fetched_before(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+    """The last fetched value each import replaced, by (day, currency), from the import batches' own
+    records: what a day held before the user's price, which a clear later removed."""
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for (flags,) in conn.execute("SELECT flags FROM price_batch WHERE kind = 'import' ORDER BY id"):
+        with _damaged():
+            for r in json.loads(flags).get("replaced", []):
+                if r["method"] != "import":
+                    out[(r["day"], r["currency"])] = r
     return out
 
 
@@ -471,10 +566,15 @@ def _stored_batch(r: Sequence[Any]) -> Batch:
         raise PriceStoreError(_DAMAGED)
     if kind == "import" and set(hash_map) != {"upload"}:
         raise PriceStoreError(_DAMAGED)
+    _check_flags(kind, flag_map)
     if isinstance(batch_id, bool) or not isinstance(batch_id, int) or batch_id < 1:
         raise PriceStoreError(_DAMAGED)
     if not all(
-        isinstance(k, str) and 1 <= len(k) <= MAX_SOURCE and isinstance(v, str) and _HASH.fullmatch(v)
+        isinstance(k, str)
+        and 1 <= len(k) <= MAX_SOURCE
+        and "*" not in k
+        and isinstance(v, str)
+        and _HASH.fullmatch(v)
         for k, v in hash_map.items()
     ):
         raise PriceStoreError(_DAMAGED)

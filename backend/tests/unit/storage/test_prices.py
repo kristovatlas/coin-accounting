@@ -47,13 +47,17 @@ def bypass(conn: sqlite3.Connection) -> None:
         "price_changes_with_its_batch",
         "price_batch_is_append_only_update",
         "price_batch_is_append_only_delete",
+        "price_fetched_is_never_removed",
     ):
         conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
 
 
 def refresh(conn: sqlite3.Connection, *rows: pr.Price, **kw: Any) -> int:
     reference = [r.day for r in rows if r.currency == "USD" and r.method == "reference"]
-    args: dict[str, Any] = {"hashes": {"coinmetrics": HASH, "ecb": HASH}, "usd_stale": not reference}
+    args: dict[str, Any] = {
+        "hashes": {"coinmetrics": HASH, "ecb": HASH, "bitstamp": HASH},
+        "usd_stale": not reference,
+    }
     args |= {"usd_through": max(reference) if reference else None, "flags": {"mismatches": []}, "at": AT} | kw
     return pr.store_refresh(conn, rows, **args)
 
@@ -70,7 +74,13 @@ def test_a_refresh_is_stored_with_its_batch_and_read_back(conn: sqlite3.Connecti
     assert pr.price_on(conn, date(2025, 1, 3), "USD") is None
     last = pr.last_refresh(conn)
     assert last == pr.Batch(
-        batch, AT, "refresh", date(2025, 1, 2), False, {"coinmetrics": HASH, "ecb": HASH}, {"mismatches": []}
+        batch,
+        AT,
+        "refresh",
+        date(2025, 1, 2),
+        False,
+        {"coinmetrics": HASH, "ecb": HASH, "bitstamp": HASH},
+        {"mismatches": [], "revised": [], "kept_import": [], "upgraded": [], "display_updated": []},
     )
 
 
@@ -103,7 +113,7 @@ def test_a_refresh_that_agrees_records_no_revision(conn: sqlite3.Connection) -> 
     refresh(conn, p("2025-01-01", "93000.12"))
     refresh(conn, p("2025-01-01", "93000.12"), p("2025-01-02", "94000.00"))
     last = pr.last_refresh(conn)
-    assert last is not None and "revised" not in last.flags
+    assert last is not None and all(last.flags[k] == [] for k in ("revised", "kept_import", "upgraded"))
 
 
 def test_an_import_replaces_whatever_the_day_had(conn: sqlite3.Connection) -> None:
@@ -326,7 +336,7 @@ def test_a_price_read_back_must_match_the_kind_of_batch_that_wrote_it_t408(conn:
 def test_a_refresh_with_no_reference_day_is_recorded_stale(conn: sqlite3.Connection) -> None:
     refresh(
         conn,
-        p("2025-01-01", "93000.12", method="typical", source="coinmetrics"),
+        p("2025-01-01", "93000.12", method="typical", source="bitstamp"),
         usd_through=None,
         usd_stale=True,
     )
@@ -555,3 +565,110 @@ def test_a_damaged_price_is_refused_not_replaced_or_cleared_t408(conn: sqlite3.C
         pr.store_import(conn, [p("2025-01-01", "2.00", method="import", source="csv")], file_hash=HASH, at=AT)
     with pytest.raises(pr.PriceStoreError, match="damaged"):
         pr.clear_import(conn, [date(2025, 1, 1)], "USD", at=AT)
+
+
+def test_a_source_that_disagrees_with_an_import_is_recorded(conn: sqlite3.Connection) -> None:
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    refresh(conn, p("2025-01-01", "93000.12"))
+    last = pr.last_refresh(conn)
+    assert last is not None and [(r["price"], r["fetched"]) for r in last.flags["kept_import"]] == [
+        ("1.00", "93000.12")
+    ]
+    assert pr.prices(conn, "USD")[0].price == D("1.00")  # the user's own price stands
+
+
+def test_a_day_refilled_after_a_clear_is_compared_with_its_last_fetch_t303(conn: sqlite3.Connection) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    pr.clear_import(conn, [date(2025, 1, 1)], "USD", at=AT)
+    refresh(conn, p("2025-01-01", "99999.99"))  # the source now serves another value
+    last = pr.last_refresh(conn)
+    assert last is not None and [(r["price"], r["fetched"]) for r in last.flags["revised"]] == [
+        ("93000.12", "99999.99")
+    ]
+
+
+@pytest.mark.parametrize("flags", [{"revised": []}, {"kept_import": []}])
+def test_a_caller_cant_write_the_modules_own_record(conn: sqlite3.Connection, flags: dict[str, Any]) -> None:
+    with pytest.raises(pr.PriceStoreError):
+        refresh(conn, p("2025-01-01", "93000.12"), flags=flags)
+
+
+def test_a_source_name_has_no_star(conn: sqlite3.Connection) -> None:
+    with pytest.raises(pr.PriceStoreError):
+        refresh(conn, p("2025-01-01", "93000.12"), hashes={"coinmetrics": HASH, "ecb*x": HASH})
+
+
+def test_a_fetched_price_is_never_removed_and_never_moves_back(conn: sqlite3.Connection) -> None:
+    first = refresh(conn, p("2025-01-01", "93000.12"))
+    refresh(conn, p("2025-01-02", "94000.00"))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM price WHERE method != 'import'")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE price SET batch_id = ?, price = '1.00' WHERE day = '2025-01-02'", (first,))
+
+
+def test_bitstamps_fill_gives_way_to_the_reference_rate_adr0039(conn: sqlite3.Connection) -> None:
+    """Coin Metrics publishes a day late: a refresh fills it with Bitstamp's typical price, and the next
+    refresh, which has the reference rate for it, replaces the fill and records that it did."""
+    refresh(
+        conn, p("2025-01-01", "93000.12"), p("2025-01-02", "94100.00", method="typical", source="bitstamp")
+    )
+    refresh(conn, p("2025-01-01", "93000.12"), p("2025-01-02", "94000.00"))
+    assert pr.price_on(conn, date(2025, 1, 2), "USD") == p("2025-01-02", "94000.00")
+    last = pr.last_refresh(conn)
+    assert last is not None and [(r["price"], r["method"], r["fetched"]) for r in last.flags["upgraded"]] == [
+        ("94100.00", "typical", "94000.00")
+    ]
+    assert last.flags["revised"] == []
+    refresh(conn, p("2025-01-02", "94200.00", method="typical", source="bitstamp"))  # never back to the fill
+    assert pr.price_on(conn, date(2025, 1, 2), "USD") == p("2025-01-02", "94000.00")
+
+
+def test_a_display_price_is_updated_and_recorded(conn: sqlite3.Connection) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"), p("2025-01-01", "90000.10", "EUR", "fx", "ecb*coinmetrics"))
+    refresh(conn, p("2025-01-01", "93000.12"), p("2025-01-01", "90000.55", "EUR", "fx", "ecb*coinmetrics"))
+    assert [x.price for x in pr.prices(conn, "EUR")] == [D("90000.55")]
+    last = pr.last_refresh(conn)
+    assert last is not None and [r["fetched"] for r in last.flags["display_updated"]] == ["90000.55"]
+
+
+@pytest.mark.parametrize(
+    ("method", "source"),
+    [("reference", "bitstamp"), ("typical", "coinmetrics"), ("reference", "ecb*coinmetrics")],
+)
+def test_a_fetched_price_comes_from_the_source_its_method_names_adr0039(
+    conn: sqlite3.Connection, method: str, source: str
+) -> None:
+    with pytest.raises(pr.PriceStoreError):
+        refresh(conn, p("2025-01-01", "93000.12", method=method, source=source))
+
+
+@pytest.mark.parametrize(
+    "flags",
+    ["{}", '{"replaced": [{"day": "2025-01-01"}]}'],
+)
+def test_an_import_batch_keeps_its_record_on_read_t408(conn: sqlite3.Connection, flags: str) -> None:
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    bypass(conn)
+    conn.execute("UPDATE price_batch SET flags = ? WHERE kind = 'import'", (flags,))
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.prices(conn, "USD")
+
+
+def test_an_imported_price_is_removed_only_by_a_recorded_clear(conn: sqlite3.Connection) -> None:
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM price")
+    pr.clear_import(conn, [date(2025, 1, 1)], "USD", at=AT)
+    assert pr.prices(conn, "USD") == []
+
+
+def test_a_refresh_over_a_damaged_day_names_the_backup_remedy_t408(conn: sqlite3.Connection) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    bypass(conn)
+    conn.execute("UPDATE price SET source = ''")
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="restore the user DB from a backup"):
+        refresh(conn, p("2025-01-01", "93000.12"))
