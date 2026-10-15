@@ -211,14 +211,14 @@ def test_a_cancel_while_storing_rolls_the_batch_back(
     conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cancelled = threading.Event()
-    real = store.store_refresh
+    real = store._revisions
 
-    def store_then_cancel(*args: Any, **kw: Any) -> int:
-        batch = real(*args, **kw)
-        cancelled.set()  # the user cancels just after the rows are written, before the commit
-        return batch
+    def cancel_mid_write(*args: Any) -> Any:
+        found = real(*args)
+        cancelled.set()  # the user cancels while the batch is being written, before the commit
+        return found
 
-    monkeypatch.setattr(store, "store_refresh", store_then_cancel)
+    monkeypatch.setattr(store, "_revisions", cancel_mid_write)
     assert cache(conn, result()).refresh(None, cancelled) is None
     assert conn.execute(
         "SELECT (SELECT count(*) FROM price), (SELECT count(*) FROM price_batch)"

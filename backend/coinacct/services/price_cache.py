@@ -35,7 +35,7 @@ from coinacct.prices.fetch import Proxy
 from coinacct.services import prices as price_service
 from coinacct.services.imports import ImportRefused, db_errors
 from coinacct.storage import prices as store
-from coinacct.storage.db import Connection, transaction
+from coinacct.storage.db import Connection
 
 
 def _plain(value: object) -> object:
@@ -75,10 +75,6 @@ def _moment(now: Callable[[], datetime]) -> datetime:
     return moment
 
 
-class _Cancelled(Exception):
-    """A cancel that arrived while the refresh was being stored: the transaction is rolled back."""
-
-
 class PriceCache:
     """The price cache over the app's writer connection."""
 
@@ -99,22 +95,17 @@ class PriceCache:
         if result is None or cancelled.is_set():
             return None
         rows = _stored(result.usd) + [p for series in result.display.values() for p in _stored(series)]
-        try:
-            with _refusals(), transaction(self._conn):  # the store's own transaction nests in this one
-                batch = store.store_refresh(
-                    self._conn,
-                    rows,
-                    hashes=result.hashes,
-                    usd_through=result.usd_through,
-                    usd_stale=result.usd_stale,
-                    flags=flags_of(result),
-                    at=moment,
-                )
-                if cancelled.is_set():  # a cancel while storing rolls the whole batch back
-                    raise _Cancelled
-        except _Cancelled:
-            return None
-        return batch
+        with _refusals():
+            return store.store_refresh(
+                self._conn,
+                rows,
+                hashes=result.hashes,
+                usd_through=result.usd_through,
+                usd_stale=result.usd_stale,
+                flags=flags_of(result),
+                at=moment,
+                before_commit=cancelled.is_set,  # a cancel while storing rolls the whole batch back
+            )
 
     def import_csv(self, data: bytes) -> int:
         """Store the user's price CSV whole, with its SHA-256; the batch's id."""
