@@ -967,7 +967,7 @@ def test_a_cleared_display_day_refilled_otherwise_reads_back_t303(conn: sqlite3.
     assert [x.price for x in pr.prices(conn, "EUR")] == [D("90000.55")]
 
 
-def test_a_clear_whose_record_wouldnt_read_back_is_refused_t408(conn: sqlite3.Connection) -> None:
+def test_a_clear_set_back_on_the_clock_is_refused_t408(conn: sqlite3.Connection) -> None:
     """A clear dated on or before an imported day (a clock moved back) would record a day the read
     refuses: the write is refused instead, naming the clock, and nothing changes."""
     pr.store_import(conn, [p("2025-01-05", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
@@ -1069,3 +1069,190 @@ def test_a_write_of_its_own_day_or_later_names_the_clock_t408(conn: sqlite3.Conn
     # a named day without an imported price is left as it is, even the batch's own
     assert pr.clear_import(conn, [date(2026, 10, 13), date(2026, 10, 14)], "USD", at=east) == 3
     assert pr.price_on(conn, date(2026, 10, 13), "USD") is None
+
+
+@pytest.mark.parametrize(
+    ("batch", "damage"),
+    [
+        # a fetched price recorded as the user's own
+        (2, "json_set(flags, '$.replaced[0].method', 'import')"),
+        (
+            2,
+            "json_set(flags, '$.replaced[0].source', 'coinmetrics:forged')",
+        ),  # a source its batch didn't hash
+        (4, "json_set(flags, '$.replaced[0].batch', 3)"),  # a clear writes no price
+        (4, "json_set(flags, '$.replaced[0].batch', 2)"),  # a fetched price an import didn't write
+    ],
+)
+def test_a_record_holds_to_the_batch_it_names_t303(conn: sqlite3.Connection, batch: int, damage: str) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"), p("2025-01-02", "93000.12"))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    pr.clear_import(conn, [date(2025, 1, 1)], "USD", at=AT)
+    pr.store_import(conn, [p("2025-01-02", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    assert pr.batch(conn, batch) is not None  # undamaged, it reads back
+    bypass(conn)
+    conn.execute(f"UPDATE price_batch SET flags = {damage} WHERE id = ?", (batch,))  # noqa: S608 - a constant
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.batch(conn, batch)
+
+
+def test_a_revision_holds_to_the_batch_it_names_t303(conn: sqlite3.Connection) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    refresh(conn, p("2025-01-01", "93000.99"))  # a revision of batch 1's price
+    bypass(conn)
+    conn.execute(
+        "UPDATE price_batch SET flags = json_set(flags, '$.revised[0].source', 'coinmetrics:x') WHERE id = 2"
+    )
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.last_refresh(conn)
+
+
+def test_a_record_whose_batch_is_gone_is_refused_t408(conn: sqlite3.Connection) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    bypass(conn)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("DELETE FROM price_batch WHERE id = 1")  # the refresh the import's record names
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.batch(conn, 2)
+
+
+@pytest.mark.parametrize("write", ["refresh", "import", "clear"])
+def test_a_write_whose_record_wouldnt_read_back_is_refused_t408(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, write: str
+) -> None:
+    """The write checks its record with the read's own rules before the commit: a record the read
+    would refuse refuses the write, and nothing is stored."""
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-02", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+
+    real = pr._check_flags
+
+    def refuse(kind: str, flags: dict[str, Any], *, batch_id: int, **kw: Any) -> None:
+        if batch_id == 3:  # the new batch's own record; the earlier batches it reads stay checked
+            raise pr.PriceStoreError("refused")
+        real(kind, flags, batch_id=batch_id, **kw)
+
+    monkeypatch.setattr(pr, "_check_flags", refuse)
+    with pytest.raises(pr.PriceStoreError, match="can't read back"):
+        if write == "refresh":
+            refresh(conn, p("2025-01-03", "93000.12"))
+        elif write == "import":
+            pr.store_import(
+                conn, [p("2025-01-01", "2.00", method="import", source="csv")], file_hash=HASH, at=AT
+            )
+        else:
+            pr.clear_import(conn, [date(2025, 1, 2)], "USD", at=AT)
+    monkeypatch.undo()
+    assert conn.execute("SELECT count(*) FROM price_batch").fetchone() == (2,)
+    assert [(x.day.isoformat(), str(x.price)) for x in pr.prices(conn, "USD")] == [
+        ("2025-01-01", "93000.12"),
+        ("2025-01-02", "1.00"),
+    ]
+
+
+def test_a_damaged_import_batch_refuses_any_refresh_t408(conn: sqlite3.Connection) -> None:
+    """Every import batch is checked whole on a refresh, even one whose days it doesn't touch."""
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    bypass(conn)
+    conn.execute("UPDATE price_batch SET flags = json_set(flags, '$.replaced[0].price', '0.00') WHERE id = 2")
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        refresh(conn, p("2025-03-01", "93000.12"))
+
+
+FORGED = (
+    "UPDATE price_batch SET flags = json_set(flags, '$.{list}[0].source', 'coinmetrics:forged') WHERE id = 2"
+)
+
+
+def test_a_record_naming_a_damaged_batch_is_refused_t408(conn: sqlite3.Connection) -> None:
+    """The batch a record names is checked whole: a hash that isn't a SHA-256 is damage there too."""
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    bypass(conn)
+    conn.execute("UPDATE price_batch SET hashes = json_set(hashes, '$.coinmetrics', 'x') WHERE id = 1")
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.batch(conn, 2)
+
+
+def test_a_record_of_a_day_its_batch_couldnt_price_is_refused_t408(conn: sqlite3.Connection) -> None:
+    """A record's day is before the UTC date of the batch it names, as a stored price's is."""
+    refresh(conn, p("2025-01-01", "93000.12"), at=datetime(2025, 6, 1, tzinfo=UTC))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    bypass(conn)
+    conn.execute(
+        "UPDATE price_batch SET flags = json_set(flags, '$.replaced[0].day', '2025-07-01') WHERE id = 2"
+    )
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.batch(conn, 2)
+
+
+def test_a_served_price_whose_batch_records_fail_is_refused_t408(conn: sqlite3.Connection) -> None:
+    """Prices are served only from a batch whose records hold: `prices` and `price_on` check it too."""
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    bypass(conn)
+    conn.execute(FORGED.format(list="replaced"))
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.prices(conn, "USD")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.price_on(conn, date(2025, 1, 1), "USD")
+
+
+def test_the_fetch_start_comes_from_a_batch_whose_records_hold_t301(conn: sqlite3.Connection) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    refresh(conn, p("2025-01-01", "93000.99"))  # a revision; this batch gives the fetch start
+    bypass(conn)
+    conn.execute(FORGED.format(list="revised"))
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.fetched_through(conn)
+
+
+def test_a_refresh_reads_import_batches_whose_records_hold_t408(conn: sqlite3.Connection) -> None:
+    """The import batches a refresh reads to refill a cleared day are checked with their records."""
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    pr.clear_import(conn, [date(2025, 1, 1)], "USD", at=AT)
+    bypass(conn)
+    conn.execute(FORGED.format(list="replaced"))
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        refresh(conn, p("2025-01-01", "93000.99"))
+    assert conn.execute("SELECT count(*) FROM price_batch").fetchone() == (3,)
+
+
+@pytest.mark.parametrize("write", ["refresh", "import", "clear"])
+def test_a_write_whose_records_wouldnt_hold_is_refused_t408(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, write: str
+) -> None:
+    """The write checks its record against the batches it names before the commit, as the read does."""
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-02", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    real = pr._provenance
+
+    def refuse(c: sqlite3.Connection, kind: str, flags: Any) -> None:
+        if c.execute("SELECT max(id) FROM price_batch").fetchone() == (3,):  # the new batch's own record
+            raise pr.PriceStoreError("refused")
+        real(c, kind, flags)
+
+    monkeypatch.setattr(pr, "_provenance", refuse)
+    with pytest.raises(pr.PriceStoreError, match="can't read back"):
+        if write == "refresh":
+            refresh(conn, p("2025-01-03", "93000.12"))
+        elif write == "import":
+            pr.store_import(
+                conn, [p("2025-01-01", "2.00", method="import", source="csv")], file_hash=HASH, at=AT
+            )
+        else:
+            pr.clear_import(conn, [date(2025, 1, 2)], "USD", at=AT)
+    monkeypatch.undo()
+    assert conn.execute("SELECT count(*) FROM price_batch").fetchone() == (2,)
