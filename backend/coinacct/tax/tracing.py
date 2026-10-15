@@ -49,7 +49,7 @@ from datetime import UTC, datetime
 from typing import Final, Literal
 
 from coinacct.domain.chain import MAX_SATS
-from coinacct.tax.engine import EngineError
+from coinacct.tax.errors import EngineError
 
 type LeavingKind = Literal["sell", "spend", "gift_out", "deposit", "transfer"]
 type BlockReason = Literal[
@@ -366,28 +366,33 @@ def _check_input(i: object, tx: WalletTx) -> None:
 
 
 def _check_outputs(tx: WalletTx) -> None:
-    for o in tx.outputs:
+    check_outputs(tx.txid, tx.account, tx.outputs, sum(i.value for i in tx.inputs))
+
+
+def check_outputs(txid: str, account: str, outputs: tuple[object, ...], inputs_value: int) -> None:
+    """Check a wallet transaction's outputs (`EngineError` if they are inconsistent), as `trace` does:
+    for a caller that may not trace it (the engine, when it blocks first)."""
+    for o in outputs:
         if not isinstance(o, Output) or not _optional_name(o.account) or not _optional_name(o.event):
-            raise EngineError(
-                f"tx {tx.txid}: an output must be an Output, its account and event names or None"
-            )
+            raise EngineError(f"tx {txid}: an output must be an Output, its account and event names or None")
         if o.kind not in (None, "self_custody", "custodial") or (o.kind is None) != (o.account is None):
-            raise EngineError(f"tx {tx.txid}: an output of the user's has its account's kind, and only then")
-        if o.account == tx.account and o.kind != "self_custody":
-            raise EngineError(f"tx {tx.txid}: a change output is the wallet's own, so self-custody")
+            raise EngineError(f"tx {txid}: an output of the user's has its account's kind, and only then")
+        if o.account == account and o.kind != "self_custody":
+            raise EngineError(f"tx {txid}: a change output is the wallet's own, so self-custody")
         if type(o.value) is int and o.value == 0 and o.event is not None:
-            raise EngineError(f"tx {tx.txid}: a zero-value output pays no event")
+            raise EngineError(f"tx {txid}: a zero-value output pays no event")
         if isinstance(o.vout, bool) or not isinstance(o.vout, int) or o.vout < 0:
-            raise EngineError(f"tx {tx.txid}: a vout must be a whole number of 0 or more")
+            raise EngineError(f"tx {txid}: a vout must be a whole number of 0 or more")
         if not isinstance(o.script, bytes):
-            raise EngineError(f"tx {tx.txid}: an output's script must be bytes")
+            raise EngineError(f"tx {txid}: an output's script must be bytes")
         if not (type(o.value) is int and o.value == 0):
-            _sats(o.value, tx.txid)
-    vouts = [o.vout for o in tx.outputs]
+            _sats(o.value, txid)
+    checked = [o for o in outputs if isinstance(o, Output)]
+    vouts = [o.vout for o in checked]
     if len(set(vouts)) != len(vouts):
-        raise EngineError(f"tx {tx.txid}: two outputs share a vout")
-    if sum(o.value for o in tx.outputs) > sum(i.value for i in tx.inputs):
-        raise EngineError(f"tx {tx.txid}: the outputs are worth more than the inputs")
+        raise EngineError(f"tx {txid}: two outputs share a vout")
+    if sum(o.value for o in checked) > inputs_value:
+        raise EngineError(f"tx {txid}: the outputs are worth more than the inputs")
 
 
 def _name(value: object) -> bool:
