@@ -55,4 +55,13 @@ CREATE TRIGGER price_keeps_its_kind_of_batch BEFORE UPDATE OF method, batch_id O
 WHEN (NEW.method = 'import') != ((SELECT kind FROM price_batch WHERE id = NEW.batch_id) = 'import')
     OR (SELECT kind FROM price_batch WHERE id = NEW.batch_id) = 'clear'
 BEGIN SELECT RAISE(ABORT, 'a price comes from the kind of batch its method says'); END;
+-- a price changes only with the batch that changes it, so each price names the batch that wrote it
+CREATE TRIGGER price_changes_with_its_batch BEFORE UPDATE ON price
+WHEN NEW.batch_id = OLD.batch_id
+BEGIN SELECT RAISE(ABORT, 'a price changes only with a new batch'); END;
+-- the batches are the prices' audit record: later batches' flags name them, so none is edited or removed
+CREATE TRIGGER price_batch_is_append_only_update BEFORE UPDATE ON price_batch
+BEGIN SELECT RAISE(ABORT, 'a price batch is never edited'); END;
+CREATE TRIGGER price_batch_is_append_only_delete BEFORE DELETE ON price_batch
+BEGIN SELECT RAISE(ABORT, 'a price batch is never removed'); END;
 """

@@ -127,6 +127,9 @@ def store_refresh(  # noqa: PLR0913 - a refresh's prices and what it recorded
         raise PriceStoreError("a refresh says whether the reference rate is stale")
     if usd_through is None and not usd_stale:
         raise PriceStoreError("a reference rate that priced no day is stale")
+    reference = [p.day for p in rows if p.currency == "USD" and p.method == "reference"]
+    if usd_through != (max(reference) if reference else None):
+        raise PriceStoreError("the reference rate's last day is the last reference price the refresh stores")
     if not all(_covered(p.source, hashes, "refresh") for p in rows):
         raise PriceStoreError("each fetched price's source has its SHA-256 in the refresh")
     _distinct(rows)
@@ -352,26 +355,28 @@ def _checked(p: object) -> Price:
 
 
 def _existing(conn: sqlite3.Connection, keys: Sequence[tuple[date, str]]) -> list[dict[str, Any]]:
-    """The stored prices at `keys` (day, currency), as plain data for a batch's record of what it
-    replaced or removed."""
+    """The stored prices at `keys` (day, currency), each checked with its batch as a read is (T-408),
+    as plain data for a batch's record of what it replaced or removed: a damaged price is refused, not
+    overwritten or removed."""
     out: list[dict[str, Any]] = []
+    checked: dict[int, Batch] = {}
     for day, currency in keys:
         row = conn.execute(
-            "SELECT price, method, source, batch_id FROM price WHERE day = ? AND currency = ?",
-            (day.isoformat(), currency),
+            _SELECT_PRICES + " WHERE p.day = ? AND p.currency = ?", (day.isoformat(), currency)
         ).fetchone()
-        if row is not None:
-            price, method, source, batch_id = row
-            out.append(
-                {
-                    "day": day.isoformat(),
-                    "currency": currency,
-                    "price": price,
-                    "method": method,
-                    "source": source,
-                }
-                | {"batch": batch_id}
-            )
+        if row is None:
+            continue
+        with _damaged():
+            stored = _price(row, checked)
+        out.append(
+            {
+                "day": day.isoformat(),
+                "currency": currency,
+                "price": format(stored.price, "f"),
+                "method": stored.method,
+            }
+            | {"source": stored.source, "batch": stored.batch}
+        )
     return out
 
 
