@@ -222,7 +222,7 @@ def _write_refresh(  # noqa: PLR0913, PLR0917 - store_refresh's checked argument
             hashes=dict(hashes),
             flags=(recorded := dict(flags) | found),
         )
-        _readable("refresh", recorded, batch, at, dict(hashes))
+        _readable(conn, "refresh", recorded, batch=batch, at=at, hashes=dict(hashes))
         conn.executemany(  # a stored day keeps its price unless `_replaces` says so (T-304, ADR 0039)
             "INSERT INTO price (day, currency, price, method, source, batch_id) VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (day, currency) DO UPDATE SET price = excluded.price, method = excluded.method,"
@@ -259,7 +259,7 @@ def store_import(conn: sqlite3.Connection, prices: Iterable[Price], *, file_hash
             hashes={"upload": file_hash},
             flags=(recorded := {"replaced": replaced}),
         )
-        _readable("import", recorded, batch, at, {"upload": file_hash})
+        _readable(conn, "import", recorded, batch=batch, at=at, hashes={"upload": file_hash})
         conn.executemany(
             "INSERT INTO price (day, currency, price, method, source, batch_id) VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (day, currency) DO UPDATE SET price = excluded.price, method = excluded.method,"
@@ -295,7 +295,7 @@ def clear_import(conn: sqlite3.Connection, days: Iterable[date], currency: str, 
             hashes={},
             flags=(recorded := {"currency": currency, "removed": removed}),
         )
-        _readable("clear", recorded, batch, at, {})
+        _readable(conn, "clear", recorded, batch=batch, at=at, hashes={})
         conn.executemany(
             "DELETE FROM price WHERE day = ? AND currency = ? AND method = 'import'",
             [(d.isoformat(), currency) for d in wanted],
@@ -315,7 +315,7 @@ def fetched_through(conn: sqlite3.Connection) -> date | None:
     if row is None:
         return None
     with _damaged():
-        return _stored_batch(row).usd_through
+        return _read_batch(conn, row).usd_through
 
 
 @_read
@@ -345,7 +345,7 @@ def batch(conn: sqlite3.Connection, batch_id: int) -> Batch | None:
     if row is None:
         return None
     with _damaged():
-        return _provenance(conn, _stored_batch(row))
+        return _read_batch(conn, row)
 
 
 def _stored_day(text: object) -> date:
@@ -369,7 +369,7 @@ def price_on(conn: sqlite3.Connection, day: date, currency: str) -> Price | None
     if row is None:
         return None
     with _damaged():
-        return _price(row, {})
+        return _price(conn, row, {})
 
 
 @_read
@@ -383,7 +383,7 @@ def prices(conn: sqlite3.Connection, currency: str) -> list[Price]:
     )
     checked: dict[int, Batch] = {}  # each batch checked once per read, however many prices it wrote
     with _damaged():
-        return [_price(r, checked) for r in rows]
+        return [_price(conn, r, checked) for r in rows]
 
 
 @_read
@@ -396,7 +396,7 @@ def last_refresh(conn: sqlite3.Connection) -> Batch | None:
     if row is None:
         return None
     with _damaged():
-        return _provenance(conn, _stored_batch(row))
+        return _read_batch(conn, row)
 
 
 def _batch(  # noqa: PLR0913 - one batch row's columns
@@ -476,7 +476,7 @@ def _existing(conn: sqlite3.Connection, keys: Sequence[tuple[date, str]]) -> lis
         if row is None:
             continue
         with _damaged():
-            stored = _price(row, checked)
+            stored = _price(conn, row, checked)
         out.append(
             {
                 "day": day.isoformat(),
@@ -717,7 +717,7 @@ def _fetched_before(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str,
     )
     for row in rows:
         with _damaged():  # the whole batch is checked, so damage there is refused as damage
-            stored = _provenance(conn, _stored_batch(row))
+            stored = _read_batch(conn, row)
         for r in stored.flags["replaced"]:
             if r["method"] != "import":
                 out[(r["day"], r["currency"])] = r
@@ -727,29 +727,39 @@ def _fetched_before(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str,
 _RECORDS: Final = {"refresh": _REFRESH_FLAGS, "import": ("replaced",), "clear": ("removed",)}
 
 
-def _provenance(conn: sqlite3.Connection, stored: Batch) -> Batch:
-    """A checked batch whose recorded prices each hold to the batch they name, as a stored price does
-    (`_price`): a refresh or an import, never a clear; an imported price exactly when it is an import;
-    and a source its hashes cover (T-303, T-408). Each named batch is read once."""
-    named: dict[int, tuple[object, object]] = {}
-    for name in _RECORDS[stored.kind]:
-        for r in stored.flags[name]:
+_SELECT_BATCH: Final = "SELECT id, at, kind, usd_through, usd_stale, hashes, flags FROM price_batch"
+
+
+def _read_batch(conn: sqlite3.Connection, row: Sequence[Any]) -> Batch:
+    """A stored batch, checked whole (`_stored_batch`), whose records each hold to the batch they name
+    (`_provenance`): every read of a batch goes through here."""
+    stored = _stored_batch(row)
+    _provenance(conn, stored.kind, stored.flags)
+    return stored
+
+
+def _provenance(conn: sqlite3.Connection, kind: str, flags: Mapping[str, Any]) -> None:
+    """Each price a batch's flags record holds to the batch it names, as a stored price does (`_price`):
+    that batch exists and is checked whole; it is a refresh or an import, never a clear; the price is an
+    imported one exactly when it is an import; its source is one its hashes cover; and its day is before
+    that batch's own UTC date (T-303, T-408). Each named batch is read once; its own records are checked
+    when it is read."""
+    named: dict[int, Batch] = {}
+    for name in _RECORDS[kind]:
+        for r in flags[name]:
             if r["batch"] not in named:
-                row = conn.execute(
-                    "SELECT kind, hashes FROM price_batch WHERE id = ?", (r["batch"],)
-                ).fetchone()
+                row = conn.execute(_SELECT_BATCH + " WHERE id = ?", (r["batch"],)).fetchone()
                 if row is None:  # the batch it names is gone
                     raise PriceStoreError(_DAMAGED)
-                named[r["batch"]] = (row[0], json.loads(row[1]))
-            kind, hashes = named[r["batch"]]
+                named[r["batch"]] = _stored_batch(row)
+            by = named[r["batch"]]
             if (
-                kind not in ("refresh", "import")
-                or not isinstance(hashes, dict)
-                or (r["method"] == "import") != (kind == "import")
-                or not _covered(r["source"], hashes, kind)
+                by.kind == "clear"
+                or (r["method"] == "import") != (by.kind == "import")
+                or not _covered(r["source"], by.hashes, by.kind)
+                or date.fromisoformat(r["day"]) >= by.at.astimezone(UTC).date()
             ):
                 raise PriceStoreError(_DAMAGED)
-    return stored
 
 
 def _covered(source: str, hashes: Mapping[str, str], kind: str) -> bool:
@@ -760,11 +770,21 @@ def _covered(source: str, hashes: Mapping[str, str], kind: str) -> bool:
     return all(part in hashes for part in source.split("*"))
 
 
-def _readable(kind: str, flags: Mapping[str, Any], batch: int, at: datetime, hashes: dict[str, str]) -> None:
-    """Refuse, before the commit, a record that the read (`_check_flags`) would call damage: the write
-    and the read hold the same rules, so a store the module wrote always reads back."""
+def _readable(  # noqa: PLR0913 - the batch's record and what it is checked against
+    conn: sqlite3.Connection,
+    kind: str,
+    flags: Mapping[str, Any],
+    *,
+    batch: int,
+    at: datetime,
+    hashes: dict[str, str],
+) -> None:
+    """Refuse, before the commit, a record that the read (`_check_flags`, `_provenance`) would call
+    damage: the write and the read hold the same rules, so a store the module wrote always reads back."""
     try:
         _check_flags(kind, dict(flags), batch_id=batch, before=at.astimezone(UTC).date(), hashes=hashes)
+        with _damaged():  # an earlier batch the record names, damaged, refuses the write too
+            _provenance(conn, kind, flags)
     except PriceStoreError:
         raise PriceStoreError("the change would leave a price record the store can't read back") from None
 
@@ -806,12 +826,12 @@ def _damaged() -> Iterator[None]:
         raise PriceStoreError(_DAMAGED) from None
 
 
-def _price(r: Sequence[Any], checked: dict[int, Batch]) -> Price:
+def _price(conn: sqlite3.Connection, r: Sequence[Any], checked: dict[int, Batch]) -> Price:
     day, currency, text, method, source, batch_id, *batch_row = r
     if batch_row[0] is None:  # the batch it names is gone
         raise PriceStoreError(_DAMAGED)
     if batch_id not in checked:
-        checked[batch_id] = _stored_batch(batch_row)  # the whole batch is checked, not only its kind
+        checked[batch_id] = _read_batch(conn, batch_row)  # the whole batch, and its records
     stored_batch = checked[batch_id]
     kind = stored_batch.kind
     if not isinstance(source, str) or not _covered(source, stored_batch.hashes, kind):
