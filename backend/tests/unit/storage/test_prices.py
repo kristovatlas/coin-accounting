@@ -180,6 +180,14 @@ def test_a_refresh_with_any_bad_price_stores_nothing_t304(conn: sqlite3.Connecti
         {"flags": review(extra=[])},  # a kind no refresh writes
         {"flags": review(gaps={"USD": []})},  # a currency missing
         {"flags": review(mismatches=[5])},  # an entry that isn't a record
+        {"flags": review(mismatches=[{}])},  # a record without its fields
+        {
+            "flags": review(
+                mismatches=[{"day": "2025-01-01", "reference": "1.00", "typical": "1.00", "x": "1"}]
+            )
+        },
+        {"flags": review(reference_gaps=[{"first": "2025-01-02", "last": "2025-01-01"}])},  # out of order
+        {"flags": review(reference_outliers=[{"day": "2025-01-01", "previous": "1", "price": "2.00"}])},
         {"usd_through": date(2008, 1, 1)},
         {"usd_through": datetime(2025, 1, 2, tzinfo=UTC)},  # a moment, not a day
         {"hashes": {}},  # a refresh records its sources' hashes

@@ -28,6 +28,10 @@ H = "ab" * 32
 REF = "coinmetrics:PriceUSD"
 
 
+MISMATCH = {"day": "2025-01-01", "reference": "93000.12", "typical": "80000.00"}
+GAP = {"first": "2025-01-02", "last": "2025-01-09"}
+
+
 def flags(**kw: Any) -> dict[str, Any]:
     """A refresh's review flags as `flags_of` writes them, every kind present."""
     empty: dict[str, list[Any]] = {"USD": [], "EUR": [], "GBP": []}
@@ -65,9 +69,7 @@ class World:
             hashes={REF: H, "ecb:eurofxref-hist": H},
             usd_through=date(2025, 1, 1),
             usd_stale=False,
-            flags=flags(
-                mismatches=[{"day": "2025-01-01"}], gaps={"USD": [{"first": "x"}], "EUR": [], "GBP": []}
-            ),
+            flags=flags(mismatches=[MISMATCH], gaps={"USD": [GAP], "EUR": [], "GBP": []}),
             at=datetime(2025, 1, 10, 12, tzinfo=UTC),
         )
         assert batch is not None
@@ -170,6 +172,9 @@ def test_a_busy_db_is_a_503(tmp_path: Path) -> None:
         "json_remove(flags, '$.gaps.GBP')",  # a currency gone
         "json_set(flags, '$.foo', 5)",  # a kind no refresh writes
         "json_set(flags, '$.foo', json('[1, 2]'))",
+        "json_set(flags, '$.mismatches', json('[{}]'))",  # a record without its fields
+        "json_set(flags, '$.mismatches[0].day', 'tuesday')",  # a field not in the module's form
+        "json_set(flags, '$.gaps.USD[0].last', '2025-01-01')",  # a gap that ends before it starts
     ],
 )
 def test_a_damaged_flag_is_refused_not_counted_as_nothing_t303(world: World, damage: str) -> None:
@@ -197,7 +202,7 @@ def test_a_stale_refresh_keeps_the_last_day_an_earlier_one_priced(world: World) 
         hashes={"bitstamp:ohlc:btcusd": H},
         usd_through=None,
         usd_stale=True,
-        flags=flags(gaps={"USD": [{"a": 1}], "EUR": [{"b": 2}, {"c": 3}], "GBP": []}),
+        flags=flags(gaps={"USD": [GAP], "EUR": [GAP, GAP], "GBP": []}),
         at=datetime(2025, 1, 11, 12, tzinfo=UTC),
     )
     out = world.get("/api/prices/status").json()
@@ -221,11 +226,20 @@ class _Failing:
         pass
 
 
+BACKUP = "a stored price is damaged (T-408): restore the user DB from a backup"
+UNAVAILABLE = "the user DB can't be used right now; see the log"
+
+
 @pytest.mark.parametrize(
-    ("code", "status"),
-    [("SQLITE_CORRUPT", 422), ("SQLITE_NOTADB", 422), ("SQLITE_BUSY", 503), ("SQLITE_IOERR", 422)],
+    ("code", "status", "message"),
+    [
+        ("SQLITE_CORRUPT", 422, BACKUP),
+        ("SQLITE_NOTADB", 422, BACKUP),
+        ("SQLITE_BUSY", 503, "the user DB is busy; try again in a moment"),
+        ("SQLITE_IOERR", 422, UNAVAILABLE),
+    ],
 )
-def test_a_failing_read_is_a_fixed_refusal(code: str, status: int) -> None:
+def test_a_failing_read_is_a_fixed_refusal(code: str, status: int, message: str) -> None:
     app = create_app(
         port=PORT,
         sessions=Sessions(TOKEN),
@@ -236,8 +250,7 @@ def test_a_failing_read_is_a_fixed_refusal(code: str, status: int) -> None:
     session = call(app, "POST", "/api/session", json_body={"bootstrap": TOKEN}).json()["session"]
     for path in ("/api/prices", "/api/prices/status"):
         reply = call(app, "GET", path, headers={"Authorization": f"Bearer {session}"})
-        assert reply.status == status
-        assert "malformed" not in reply.json()["error"]
+        assert (reply.status, reply.json()["error"]) == (status, message)
 
 
 def test_an_older_damaged_refresh_is_refused_too_t408(world: World) -> None:

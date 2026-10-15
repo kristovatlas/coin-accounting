@@ -139,16 +139,15 @@ class PriceReader:
 
     def status(self) -> tuple[store.Batch | None, date | None]:
         """The last refresh's batch and the reference rate's last day any refresh priced, from one
-        snapshot. A review
-        flag of a shape the refresh never writes is refused as damage: it must not read as "nothing
-        to review" (T-303, T-408)."""
+        snapshot. Storage checks each refresh batch's whole record as it reads it, so a damaged review
+        flag is refused, never read as nothing to review (T-303, T-408)."""
         with _refusals():
             reader = self._open_reader()
             try:
                 last, through = store.refresh_status(reader)
             finally:
                 reader.close()
-        return last, through  # storage checks every refresh batch's whole record on read (T-303, T-408)
+        return last, through
 
 
 @contextmanager

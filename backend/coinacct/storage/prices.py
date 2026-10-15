@@ -63,12 +63,10 @@ _DAY: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 _HASH: Final = re.compile(r"[0-9a-f]{64}", re.ASCII)
 # a refresh can't mend a stored day or batch (both are kept as stored), so the remedy is the backup
 _DAMAGED: Final = "a stored price is damaged (T-408): restore the user DB from a backup"
-DAMAGED: Final = _DAMAGED  # the remedy, for a service that refuses damage it finds itself
 # the source family each fetched method comes from (ADR 0039): Coin Metrics' reference rate, Bitstamp's
 # typical price, an ECB conversion (`prices.coinmetrics`, `prices.bitstamp`, `prices.fx`)
 _FAMILY: Final = {"reference": "coinmetrics", "typical": "bitstamp", "fx": "ecb"}
 _REFRESH_FLAGS: Final = ("revised", "kept_import", "upgraded", "display_updated")  # the module's own
-REFRESH_FLAGS: Final = _REFRESH_FLAGS  # for a service that checks a refresh's whole record
 # the review flags a refresh's caller records (`services.price_cache.flags_of`): three lists of
 # records, and two maps holding a list of records per currency (T-303)
 REVIEW_LISTS: Final = ("mismatches", "reference_gaps", "reference_outliers")
@@ -502,7 +500,8 @@ _SNAPSHOT_KEYS: Final = frozenset({"day", "currency", "price", "method", "source
 
 
 def _check_flags(kind: str, flags: dict[str, Any]) -> None:
-    """A batch's flags hold the record its kind always writes (T-408): a refresh its four lists, an
+    """A batch's flags hold the record its kind always writes (T-408): a refresh its own four lists and
+    the caller's five review kinds (`_review_flags`), an
     import the prices it replaced, a clear its currency and the prices it removed."""
     if kind == "refresh":
         if set(flags) != {*REVIEW_LISTS, *REVIEW_PER_CURRENCY, *_REFRESH_FLAGS} or not _review_flags(flags):
@@ -519,19 +518,44 @@ def _check_flags(kind: str, flags: dict[str, Any]) -> None:
             raise PriceStoreError(_DAMAGED)
 
 
-def _review_flags(flags: Mapping[str, Any]) -> bool:
-    """The caller's review flags as a refresh records them: every kind, each in its shape, with every
-    currency, every entry a record."""
+# each review kind's record, as `services.price_cache.flags_of` writes it from `prices`' Mismatch, Gap
+# and Outlier: its fields, each a day or a price as text
+_REVIEW_RECORDS: Final = {
+    "mismatches": {"day": "day", "reference": "price", "typical": "price"},
+    "reference_gaps": {"first": "day", "last": "day"},
+    "reference_outliers": {"day": "day", "previous": "price", "price": "price"},
+    "gaps": {"first": "day", "last": "day"},
+    "outliers": {"day": "day", "previous": "price", "price": "price"},
+}
 
-    def records(value: object) -> bool:
-        return isinstance(value, list) and all(isinstance(r, dict) for r in value)
+
+def _review_flags(flags: Mapping[str, Any]) -> bool:
+    """The caller's review flags as a refresh records them: every kind, each in its shape (a list, or
+    a list per currency for `gaps` and `outliers`), every record with exactly its kind's fields, each a
+    day or a price in the form the module writes, a gap's days in order."""
+
+    def record(kind: str, r: object) -> bool:
+        fields = _REVIEW_RECORDS[kind]
+        if not isinstance(r, dict) or set(r) != set(fields):
+            return False
+        for name, form in fields.items():
+            value = r[name]
+            pattern = _DAY if form == "day" else _PRICE
+            if not isinstance(value, str) or pattern.fullmatch(value) is None:
+                return False
+        return "first" not in r or r["first"] <= r["last"]
+
+    def records(kind: str, value: object) -> bool:
+        return isinstance(value, list) and all(record(kind, r) for r in value)
 
     if set(flags) - set(_REFRESH_FLAGS) != {*REVIEW_LISTS, *REVIEW_PER_CURRENCY}:
         return False
-    if not all(records(flags[k]) for k in REVIEW_LISTS):
+    if not all(records(k, flags[k]) for k in REVIEW_LISTS):
         return False
     return all(
-        isinstance(m := flags[k], dict) and set(m) == set(CURRENCIES) and all(records(v) for v in m.values())
+        isinstance(m := flags[k], dict)
+        and set(m) == set(CURRENCIES)
+        and all(records(k, v) for v in m.values())
         for k in REVIEW_PER_CURRENCY
     )
 
@@ -685,10 +709,8 @@ def _stored_batch(r: Sequence[Any]) -> Batch:
 
 __all__ = [
     "CURRENCIES",
-    "DAMAGED",
     "FIRST_DAY",
     "METHODS",
-    "REFRESH_FLAGS",
     "REVIEW_LISTS",
     "REVIEW_PER_CURRENCY",
     "Batch",

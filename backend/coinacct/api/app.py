@@ -799,7 +799,7 @@ def _price_routes(app: FastAPI, reader: price_cache.PriceReader, authenticated: 
 
 def _flag_count(value: object) -> int:
     """How many review flags of one kind a refresh recorded: a list's length, or a per-currency map's
-    total. The service has checked every kind's shape (`PriceReader.status`)."""
+    total. Storage has checked every kind's shape as it read the batch (`storage.prices._check_flags`)."""
     if isinstance(value, list):
         return len(value)
     if isinstance(value, dict) and all(isinstance(v, list) for v in value.values()):
