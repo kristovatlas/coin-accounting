@@ -188,6 +188,15 @@ def test_a_refresh_with_any_bad_price_stores_nothing_t304(conn: sqlite3.Connecti
         },
         {"flags": review(reference_gaps=[{"first": "2025-01-02", "last": "2025-01-01"}])},  # out of order
         {"flags": review(reference_outliers=[{"day": "2025-01-01", "previous": "1", "price": "2.00"}])},
+        {
+            "flags": review(
+                reference_gaps=[
+                    {"first": "2025-01-01", "last": "2025-01-05"},
+                    {"first": "2025-01-04", "last": "2025-01-06"},
+                ]
+            )
+        },  # overlapping gaps
+        {"flags": review(mismatches=[{"day": "2025-02-29", "reference": "1.00", "typical": "1.00"}])},
         {"usd_through": date(2008, 1, 1)},
         {"usd_through": datetime(2025, 1, 2, tzinfo=UTC)},  # a moment, not a day
         {"hashes": {}},  # a refresh records its sources' hashes
@@ -791,3 +800,21 @@ def test_the_refresh_status_is_one_snapshot(
     finally:
         reader.close()
     assert last is not None and (last.usd_through, through) == (date(2025, 1, 1), date(2025, 1, 1))
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "json_remove(flags, '$.revised[0].fetched')",  # a revision without what the source now serves
+        "json_set(flags, '$.revised[0].extra', 1)",  # a field the module never writes
+        "json_set(flags, '$.revised[0].fetched', '0.00')",
+    ],
+)
+def test_a_damaged_revision_record_is_refused_on_read_t408(conn: sqlite3.Connection, damage: str) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    refresh(conn, p("2025-01-01", "93000.99"))  # the source serves another value: a revision
+    bypass(conn)
+    conn.execute(f"UPDATE price_batch SET flags = {damage} WHERE id = 2")  # noqa: S608 - a constant
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.last_refresh(conn)

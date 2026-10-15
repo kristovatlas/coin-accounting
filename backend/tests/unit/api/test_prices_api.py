@@ -30,6 +30,8 @@ REF = "coinmetrics:PriceUSD"
 
 MISMATCH = {"day": "2025-01-01", "reference": "93000.12", "typical": "80000.00"}
 GAP = {"first": "2025-01-02", "last": "2025-01-09"}
+LATER_GAP = {"first": "2025-01-11", "last": "2025-01-12"}
+OUTLIER = {"day": "2025-01-01", "previous": "40000.00", "price": "93000.12"}
 
 
 def flags(**kw: Any) -> dict[str, Any]:
@@ -69,7 +71,12 @@ class World:
             hashes={REF: H, "ecb:eurofxref-hist": H},
             usd_through=date(2025, 1, 1),
             usd_stale=False,
-            flags=flags(mismatches=[MISMATCH], gaps={"USD": [GAP], "EUR": [], "GBP": []}),
+            flags=flags(
+                mismatches=[MISMATCH],
+                reference_outliers=[OUTLIER],
+                gaps={"USD": [GAP], "EUR": [], "GBP": []},
+                outliers={"USD": [], "EUR": [OUTLIER], "GBP": [OUTLIER]},
+            ),
             at=datetime(2025, 1, 10, 12, tzinfo=UTC),
         )
         assert batch is not None
@@ -124,11 +131,17 @@ def test_the_status_gives_the_last_refresh_and_counts_its_flags(world: World) ->
         False,
     )
     assert refresh["hashes"] == {REF: H, "ecb:eurofxref-hist": H}
-    assert (
-        refresh["flags"]["mismatches"] == 1
-        and refresh["flags"]["gaps"] == 1
-        and refresh["flags"]["revised"] == 0
-    )
+    assert refresh["flags"] == {
+        "display_updated": 0,
+        "gaps": 1,
+        "kept_import": 0,
+        "mismatches": 1,
+        "outliers": 2,
+        "reference_gaps": 0,
+        "reference_outliers": 1,
+        "revised": 0,
+        "upgraded": 0,
+    }
 
 
 def test_a_damaged_price_is_a_422_with_the_backup_remedy_t408(world: World) -> None:
@@ -175,6 +188,10 @@ def test_a_busy_db_is_a_503(tmp_path: Path) -> None:
         "json_set(flags, '$.mismatches', json('[{}]'))",  # a record without its fields
         "json_set(flags, '$.mismatches[0].day', 'tuesday')",  # a field not in the module's form
         "json_set(flags, '$.gaps.USD[0].last', '2025-01-01')",  # a gap that ends before it starts
+        "json_set(flags, '$.mismatches[0].day', '2025-02-30')",  # the form of a day, not a day
+        "json_set(flags, '$.mismatches[0].day', '2008-12-31')",  # before Bitcoin's first block
+        "json_set(flags, '$.mismatches[0].typical', '0.00')",  # no price
+        "json_set(flags, '$.mismatches[1]', json_extract(flags, '$.mismatches[0]'))",  # twice
     ],
 )
 def test_a_damaged_flag_is_refused_not_counted_as_nothing_t303(world: World, damage: str) -> None:
@@ -202,7 +219,7 @@ def test_a_stale_refresh_keeps_the_last_day_an_earlier_one_priced(world: World) 
         hashes={"bitstamp:ohlc:btcusd": H},
         usd_through=None,
         usd_stale=True,
-        flags=flags(gaps={"USD": [GAP], "EUR": [GAP, GAP], "GBP": []}),
+        flags=flags(gaps={"USD": [GAP], "EUR": [GAP, LATER_GAP], "GBP": []}),
         at=datetime(2025, 1, 11, 12, tzinfo=UTC),
     )
     out = world.get("/api/prices/status").json()
@@ -212,15 +229,19 @@ def test_a_stale_refresh_keeps_the_last_day_an_earlier_one_priced(world: World) 
 
 
 class _Failing:
-    """A reader whose queries fail with SQLite's error `code`."""
+    """A reader whose queries fail with SQLite's error `code` from the `after`-th on (0: the first)."""
 
-    def __init__(self, code: str) -> None:
-        self.code = code
+    def __init__(self, code: str, after: int = 0) -> None:
+        self.code, self.after, self.calls, self.in_transaction = code, after, 0, False
 
-    def execute(self, *args: object) -> object:
-        e = sqlite3.DatabaseError("database disk image is malformed")
-        e.sqlite_errorname = self.code
-        raise e
+    def execute(self, sql: str, *args: object) -> object:
+        self.calls += 1
+        if self.calls > self.after:
+            e = sqlite3.DatabaseError("database disk image is malformed")
+            e.sqlite_errorname = self.code
+            raise e
+        self.in_transaction = sql == "BEGIN"
+        return None
 
     def close(self) -> None:
         pass
@@ -236,6 +257,7 @@ UNAVAILABLE = "the user DB can't be used right now; see the log"
         ("SQLITE_CORRUPT", 422, BACKUP),
         ("SQLITE_NOTADB", 422, BACKUP),
         ("SQLITE_BUSY", 503, "the user DB is busy; try again in a moment"),
+        ("SQLITE_LOCKED", 503, "the user DB is busy; try again in a moment"),
         ("SQLITE_IOERR", 422, UNAVAILABLE),
     ],
 )
@@ -272,3 +294,23 @@ def test_an_older_damaged_refresh_is_refused_too_t408(world: World) -> None:
     for path in ("/api/prices", "/api/prices?currency=EUR"):
         reply = world.get(path)
         assert reply.status == 422 and "backup" in reply.json()["error"]
+
+
+@pytest.mark.parametrize(
+    ("code", "status", "message"),
+    [("SQLITE_CORRUPT", 422, BACKUP), ("SQLITE_BUSY", 503, "the user DB is busy; try again in a moment")],
+)
+def test_a_read_failing_inside_the_status_snapshot_keeps_its_refusal(
+    code: str, status: int, message: str
+) -> None:
+    """BEGIN succeeds; the next read fails; the snapshot's rollback doesn't mask the first error."""
+    app = create_app(
+        port=PORT,
+        sessions=Sessions(TOKEN),
+        status=lambda: NodeStatus(online=False, chain=None, reasons=()),
+        on_quit=lambda: None,
+        prices=PriceReader(lambda: _Failing(code, after=1)),  # type: ignore[arg-type, return-value]
+    )
+    session = call(app, "POST", "/api/session", json_body={"bootstrap": TOKEN}).json()["session"]
+    reply = call(app, "GET", "/api/prices/status", headers={"Authorization": f"Bearer {session}"})
+    assert (reply.status, reply.json()["error"]) == (status, message)

@@ -39,6 +39,7 @@ The module reads no clock: the caller passes the batch's time.
 from __future__ import annotations
 
 import functools
+import itertools
 import json
 import logging
 import re
@@ -513,8 +514,9 @@ def _check_flags(kind: str, flags: dict[str, Any]) -> None:
         if flags.get("currency") not in CURRENCIES or not flags.get("removed"):
             raise PriceStoreError(_DAMAGED)
         records = [flags.get("removed")]
+    fetched = kind == "refresh"  # a refresh's own records also hold what the source now serves
     for record in records:
-        if not isinstance(record, list) or not all(_snapshot(r) for r in record):
+        if not isinstance(record, list) or not all(_snapshot(r, fetched=fetched) for r in record):
             raise PriceStoreError(_DAMAGED)
 
 
@@ -532,21 +534,29 @@ _REVIEW_RECORDS: Final = {
 def _review_flags(flags: Mapping[str, Any]) -> bool:
     """The caller's review flags as a refresh records them: every kind, each in its shape (a list, or
     a list per currency for `gaps` and `outliers`), every record with exactly its kind's fields, each a
-    day or a price in the form the module writes, a gap's days in order."""
+    real day from Bitcoin's first block on or a price of at least a cent in the form the module writes,
+    each list's records in order of their day, and gaps disjoint, as `prices.check` makes them."""
 
     def record(kind: str, r: object) -> bool:
         fields = _REVIEW_RECORDS[kind]
         if not isinstance(r, dict) or set(r) != set(fields):
             return False
         for name, form in fields.items():
-            value = r[name]
-            pattern = _DAY if form == "day" else _PRICE
-            if not isinstance(value, str) or pattern.fullmatch(value) is None:
+            if not (_is_day(r[name]) if form == "day" else _is_price(r[name])):
                 return False
         return "first" not in r or r["first"] <= r["last"]
 
     def records(kind: str, value: object) -> bool:
-        return isinstance(value, list) and all(record(kind, r) for r in value)
+        if not isinstance(value, list) or not all(record(kind, r) for r in value):
+            return False
+        starts = [r.get("day", r.get("first")) for r in value]
+        if any(a >= b for a, b in itertools.pairwise(starts)):
+            return False  # out of order, or a day twice
+        return (
+            all(a["last"] < b["first"] for a, b in itertools.pairwise(value))
+            if "first" in _REVIEW_RECORDS[kind]
+            else True
+        )
 
     if set(flags) - set(_REFRESH_FLAGS) != {*REVIEW_LISTS, *REVIEW_PER_CURRENCY}:
         return False
@@ -560,15 +570,40 @@ def _review_flags(flags: Mapping[str, Any]) -> bool:
     )
 
 
-def _snapshot(r: object) -> bool:
-    if not isinstance(r, dict) or not _SNAPSHOT_KEYS <= set(r):
+_FETCHED_KEYS: Final = frozenset({"fetched", "fetched_method", "fetched_source"})
+
+
+def _is_day(value: object) -> bool:
+    """A real UTC day, written as the module writes it, from Bitcoin's first block on."""
+    if not isinstance(value, str) or _DAY.fullmatch(value) is None:
+        return False
+    try:
+        return date.fromisoformat(value) >= FIRST_DAY
+    except ValueError:  # 2025-02-30 has the form of a day but isn't one
+        return False
+
+
+def _is_price(value: object) -> bool:
+    """A price of at least a cent, written as the module writes it (`_PRICE`)."""
+    return (
+        isinstance(value, str) and _PRICE.fullmatch(value) is not None and Decimal(value) >= Decimal("0.01")
+    )
+
+
+def _snapshot(r: object, *, fetched: bool = False) -> bool:
+    """A recorded price as the module writes it: exactly its fields (a refresh's own records also hold
+    what the source now serves), each in its form."""
+    keys = _SNAPSHOT_KEYS | _FETCHED_KEYS if fetched else _SNAPSHOT_KEYS
+    if not isinstance(r, dict) or set(r) != keys:
+        return False
+    if fetched and not (
+        _is_price(r["fetched"]) and r["fetched_method"] in METHODS and isinstance(r["fetched_source"], str)
+    ):
         return False
     return (
-        isinstance(r["day"], str)
-        and _DAY.fullmatch(r["day"]) is not None
+        _is_day(r["day"])
         and r["currency"] in CURRENCIES
-        and isinstance(r["price"], str)
-        and _PRICE.fullmatch(r["price"]) is not None
+        and _is_price(r["price"])
         and r["method"] in METHODS
         and isinstance(r["source"], str)
         and isinstance(r["batch"], int)
