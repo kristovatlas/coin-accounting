@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -78,7 +79,7 @@ def test_the_price_routes_need_a_session_t104(world: World, path: str) -> None:
 
 def test_an_empty_cache_has_no_prices_and_no_refresh(world: World) -> None:
     assert world.get("/api/prices").json() == {"currency": "USD", "prices": []}
-    assert world.get("/api/prices/status").json() == {"last_refresh": None, "fetched_through": None}
+    assert world.get("/api/prices/status").json() == {"last_refresh": None, "reference_through": None}
 
 
 def test_the_cached_prices_are_listed_by_currency_with_their_batch(world: World) -> None:
@@ -103,7 +104,7 @@ def test_an_unsupported_currency_is_refused(world: World, currency: str) -> None
 def test_the_status_gives_the_last_refresh_and_counts_its_flags(world: World) -> None:
     batch = world.refresh()
     out: dict[str, Any] = world.get("/api/prices/status").json()
-    assert out["fetched_through"] == "2025-01-01"
+    assert out["reference_through"] == "2025-01-01"
     refresh = out["last_refresh"]
     assert (refresh["batch"], refresh["at"], refresh["usd_through"], refresh["usd_stale"]) == (
         batch,
@@ -144,3 +145,72 @@ def test_a_busy_db_is_a_503(tmp_path: Path) -> None:
     for path in ("/api/prices", "/api/prices/status"):
         reply = call(app, "GET", path, headers={"Authorization": f"Bearer {session}"})
         assert reply.status == 503 and "busy" in reply.json()["error"]
+
+
+@pytest.mark.parametrize("flags", ['{"mismatches": 5}', '{"gaps": {"USD": "x"}}', '{"gaps": {"JPY": []}}'])
+def test_a_damaged_flag_is_refused_not_counted_as_nothing_t303(world: World, flags: str) -> None:
+    world.refresh()
+    world.db.execute("DROP TRIGGER price_batch_is_append_only_update")  # damage that bypasses the module
+    world.db.execute("UPDATE price_batch SET flags = json_patch(flags, ?)", (flags,))
+    reply = world.get("/api/prices/status")
+    assert reply.status == 422
+    assert reply.json() == {"error": "a stored price is damaged (T-408): restore the user DB from a backup"}
+
+
+def test_a_damaged_batch_is_a_422_on_the_status_t408(world: World) -> None:
+    world.refresh()
+    world.db.execute("DROP TRIGGER price_batch_is_append_only_update")
+    world.db.execute("UPDATE price_batch SET flags = '{}'")  # the module's own record is gone
+    reply = world.get("/api/prices/status")
+    assert reply.status == 422 and "backup" in reply.json()["error"]
+
+
+def test_a_stale_refresh_keeps_the_last_day_an_earlier_one_priced(world: World) -> None:
+    world.refresh()
+    store.store_refresh(
+        world.db,
+        [store.Price(date(2025, 1, 2), "USD", Decimal("94000.00"), "typical", "bitstamp:ohlc:btcusd")],
+        hashes={"bitstamp:ohlc:btcusd": H},
+        usd_through=None,
+        usd_stale=True,
+        flags={"gaps": {"USD": [{"a": 1}], "EUR": [{"b": 2}, {"c": 3}]}},
+        at=datetime(2025, 1, 11, 12, tzinfo=UTC),
+    )
+    out = world.get("/api/prices/status").json()
+    assert (out["last_refresh"]["usd_through"], out["last_refresh"]["usd_stale"]) == (None, True)
+    assert out["reference_through"] == "2025-01-01"  # from the earlier refresh
+    assert out["last_refresh"]["flags"]["gaps"] == 3  # summed over the currencies
+
+
+class _Failing:
+    """A reader whose queries fail with SQLite's error `code`."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+
+    def execute(self, *args: object) -> object:
+        e = sqlite3.DatabaseError("database disk image is malformed")
+        e.sqlite_errorname = self.code
+        raise e
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [("SQLITE_CORRUPT", 422), ("SQLITE_NOTADB", 422), ("SQLITE_BUSY", 503), ("SQLITE_IOERR", 422)],
+)
+def test_a_failing_read_is_a_fixed_refusal(code: str, status: int) -> None:
+    app = create_app(
+        port=PORT,
+        sessions=Sessions(TOKEN),
+        status=lambda: NodeStatus(online=False, chain=None, reasons=()),
+        on_quit=lambda: None,
+        prices=PriceReader(lambda: _Failing(code)),  # type: ignore[arg-type, return-value]
+    )
+    session = call(app, "POST", "/api/session", json_body={"bootstrap": TOKEN}).json()["session"]
+    for path in ("/api/prices", "/api/prices/status"):
+        reply = call(app, "GET", path, headers={"Authorization": f"Bearer {session}"})
+        assert reply.status == status
+        assert "malformed" not in reply.json()["error"]

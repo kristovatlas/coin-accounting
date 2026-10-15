@@ -34,7 +34,8 @@ Routes:
   (no download): `GET /api/prices?currency=USD|EUR|GBP`, every cached price in that currency by day,
   each with its method, source and the batch that wrote it; `GET /api/prices/status`, the last
   refresh (when, the reference rate's last day and staleness, each source's SHA-256, how many review
-  flags of each kind) and the last day any refresh priced. A damaged price is a 422 with the backup
+  flags of each kind) and the reference rate's last day any refresh priced (`reference_through`;
+  later days may be Bitstamp's fill, ADR 0039). A damaged price is a 422 with the backup
   remedy, a busy DB 503.
 - History (bearer; PLAN §3), through `services.history.History`, from the chain cache only, as of the
   last finished sync (`as_of`; each address's `scanned_to` says how far its own history is scanned):
@@ -766,8 +767,13 @@ def _price_routes(app: FastAPI, reader: price_cache.PriceReader, authenticated: 
         return {
             "currency": currency,
             "prices": [
-                {"day": p.day.isoformat(), "price": _usd(p.price), "method": p.method, "source": p.source}
-                | {"batch": p.batch}
+                {
+                    "day": p.day.isoformat(),
+                    "price": format(p.price, "f"),  # never an exponent
+                    "method": p.method,
+                    "source": p.source,
+                    "batch": p.batch,
+                }
                 for p in reader.prices(currency)
             ],
         }
@@ -785,7 +791,10 @@ def _price_routes(app: FastAPI, reader: price_cache.PriceReader, authenticated: 
                 "hashes": dict(sorted(last.hashes.items())),
                 "flags": {k: _flag_count(v) for k, v in sorted(last.flags.items())},
             }
-        return {"last_refresh": refresh, "fetched_through": None if through is None else through.isoformat()}
+        return {
+            "last_refresh": refresh,
+            "reference_through": None if through is None else through.isoformat(),
+        }
 
 
 def _flag_count(value: object) -> int:

@@ -38,6 +38,7 @@ The module reads no clock: the caller passes the batch's time.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -62,6 +63,7 @@ _DAY: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 _HASH: Final = re.compile(r"[0-9a-f]{64}", re.ASCII)
 # a refresh can't mend a stored day or batch (both are kept as stored), so the remedy is the backup
 _DAMAGED: Final = "a stored price is damaged (T-408): restore the user DB from a backup"
+DAMAGED: Final = _DAMAGED  # the remedy, for a service that refuses damage it finds itself
 # the source family each fetched method comes from (ADR 0039): Coin Metrics' reference rate, Bitstamp's
 # typical price, an ECB conversion (`prices.coinmetrics`, `prices.bitstamp`, `prices.fx`)
 _FAMILY: Final = {"reference": "coinmetrics", "typical": "bitstamp", "fx": "ecb"}
@@ -103,6 +105,32 @@ class Batch:
     usd_stale: bool
     hashes: dict[str, str]
     flags: dict[str, Any]
+
+
+def _read[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+    """A reader whose SQLite errors are the module's fixed messages too (`_sqlite_refusal`)."""
+
+    @functools.wraps(fn)
+    def reading(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.Error as e:
+            raise _sqlite_refusal(e, "read from") from None
+
+    return reading
+
+
+def _sqlite_refusal(e: sqlite3.Error, how: str) -> DbError:
+    """A SQLite error as a fixed message, with only its error code in the log (its text can name the
+    constraint or the file): busy is `DbBusy`; a damaged file names the backup (T-408); anything else
+    (a full disk, an I/O error) says the DB can't be used now."""
+    code = str(getattr(e, "sqlite_errorname", None) or type(e).__name__)
+    log.warning("prices couldn't be %s the user DB: %s", how, code)
+    if code.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+        return DbBusy("the user DB is busy; try again in a moment")
+    if code.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB")):
+        return PriceStoreError(_DAMAGED)
+    return PriceStoreError("the user DB can't be used right now; see the log")
 
 
 def store_refresh(  # noqa: PLR0912, PLR0913 - a refresh's prices and what it recorded, each checked
@@ -256,6 +284,7 @@ def clear_import(conn: sqlite3.Connection, days: Iterable[date], currency: str, 
         return batch
 
 
+@_read
 def fetched_through(conn: sqlite3.Connection) -> date | None:
     """The last day any refresh's reference rate priced, from the refreshes' own records: where a
     refresh's range may start (T-301). An import, which overwrites price rows, never moves it. The
@@ -270,6 +299,17 @@ def fetched_through(conn: sqlite3.Connection) -> date | None:
         return _stored_batch(row).usd_through
 
 
+@_read
+def refresh_status(conn: sqlite3.Connection) -> tuple[Batch | None, date | None]:
+    """The last refresh's batch and `fetched_through`, read in one snapshot on a reader connection."""
+    conn.execute("BEGIN")
+    try:
+        return last_refresh(conn), fetched_through(conn)
+    finally:
+        conn.execute("COMMIT")
+
+
+@_read
 def batch(conn: sqlite3.Connection, batch_id: int) -> Batch | None:
     """The batch that wrote a price (`Price.batch`), with its hashes: a price's provenance (T-303)."""
     if isinstance(batch_id, bool) or not isinstance(batch_id, int):
@@ -293,6 +333,7 @@ def _stored_day(text: object) -> date:
     return d
 
 
+@_read
 def price_on(conn: sqlite3.Connection, day: date, currency: str) -> Price | None:
     """The stored price for `day` in `currency`, if there is one."""
     if type(day) is not date or currency not in CURRENCIES:
@@ -307,6 +348,7 @@ def price_on(conn: sqlite3.Connection, day: date, currency: str) -> Price | None
         return _price(row, {})
 
 
+@_read
 def prices(conn: sqlite3.Connection, currency: str) -> list[Price]:
     """Every stored price in `currency`, by day."""
     if currency not in CURRENCIES:
@@ -320,6 +362,7 @@ def prices(conn: sqlite3.Connection, currency: str) -> list[Price]:
         return [_price(r, checked) for r in rows]
 
 
+@_read
 def last_refresh(conn: sqlite3.Connection) -> Batch | None:
     """The latest refresh's batch: its hashes, the reference rate's state and its review flags."""
     row = conn.execute(
@@ -519,21 +562,13 @@ def _distinct(rows: Sequence[Price]) -> None:
 @contextmanager
 def _refusals() -> Iterator[None]:
     """The schema's refusals, and any other SQLite error while writing or committing, as the module's
-    fixed messages, with only SQLite's error code in the log (its text can name the constraint or the
-    file): busy is `DbBusy`; a damaged file names the backup (T-408); anything else (a full disk, an
-    I/O error) says the DB can't be used now."""
+    fixed messages (`_sqlite_refusal`)."""
     try:
         yield
     except sqlite3.IntegrityError:
         raise PriceStoreError("the prices break a rule of the price table") from None
     except sqlite3.Error as e:
-        code = str(getattr(e, "sqlite_errorname", None) or type(e).__name__)
-        log.warning("prices couldn't be written to the user DB: %s", code)
-        if code.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
-            raise DbBusy("the user DB is busy; try again in a moment") from None
-        if code.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB")):
-            raise PriceStoreError(_DAMAGED) from None
-        raise PriceStoreError("the user DB can't be used right now; see the log") from None
+        raise _sqlite_refusal(e, "written to") from None
 
 
 def _row(p: Price, batch: int) -> tuple[str, str, str, str, str, int]:
@@ -622,6 +657,7 @@ def _stored_batch(r: Sequence[Any]) -> Batch:
 
 __all__ = [
     "CURRENCIES",
+    "DAMAGED",
     "FIRST_DAY",
     "METHODS",
     "Batch",
@@ -633,6 +669,7 @@ __all__ = [
     "last_refresh",
     "price_on",
     "prices",
+    "refresh_status",
     "store_import",
     "store_refresh",
 ]

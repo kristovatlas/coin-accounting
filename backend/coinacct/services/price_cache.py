@@ -7,8 +7,8 @@ T-301, T-303, T-304).
   failure anywhere stores nothing (T-304); a cancel, even one that arrives while the batch is being
   stored, stores nothing and returns None (the batch commits only after a last check). A cancel that
   arrives after that commit loses to it: the job wiring must report such a job done, not cancelled.
-  It is meant to run as a job on the job worker (architecture §3); the job wiring and the route are
-  the next slice,
+  It is meant to run as a job on the job worker (architecture §3); the job wiring and the CSV upload
+  route are still to come (`PriceReader` serves the read routes),
   which must carry a refusal's fixed message to the user (the job worker keeps only an error's class
   today), so a stored-data refusal still names its remedy.
 - **An import** (`PriceCache.import_csv`) parses the user's file (`prices.csv_import`), refuses it
@@ -138,16 +138,28 @@ class PriceReader:
                 reader.close()
 
     def status(self) -> tuple[store.Batch | None, date | None]:
-        """The last refresh's batch and the last day any refresh priced, from one snapshot."""
+        """The last refresh's batch and the reference rate's last day any refresh priced, from one
+        snapshot. A review
+        flag of a shape the refresh never writes is refused as damage: it must not read as "nothing
+        to review" (T-303, T-408)."""
         with _refusals():
             reader = self._open_reader()
             try:
-                reader.execute("BEGIN")
-                last, through = store.last_refresh(reader), store.fetched_through(reader)
-                reader.execute("COMMIT")
-                return last, through
+                last, through = store.refresh_status(reader)
             finally:
                 reader.close()
+        if last is not None and not all(_is_flag_list(v) for v in last.flags.values()):
+            raise ImportRefused(store.DAMAGED)
+        return last, through
+
+
+def _is_flag_list(value: object) -> bool:
+    """A refresh's review flags of one kind: a list, or a list per currency."""
+    if isinstance(value, list):
+        return True
+    return isinstance(value, dict) and all(
+        k in store.CURRENCIES and isinstance(v, list) for k, v in value.items()
+    )
 
 
 @contextmanager
