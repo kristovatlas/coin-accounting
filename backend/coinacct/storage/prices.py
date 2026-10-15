@@ -218,8 +218,9 @@ def _write_refresh(  # noqa: PLR0913, PLR0917 - store_refresh's checked argument
             usd_through=usd_through,
             usd_stale=usd_stale,
             hashes=dict(hashes),
-            flags=dict(flags) | found,
+            flags=(recorded := dict(flags) | found),
         )
+        _readable("refresh", recorded, batch, at)
         conn.executemany(  # a stored day keeps its price unless `_replaces` says so (T-304, ADR 0039)
             "INSERT INTO price (day, currency, price, method, source, batch_id) VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (day, currency) DO UPDATE SET price = excluded.price, method = excluded.method,"
@@ -251,8 +252,9 @@ def store_import(conn: sqlite3.Connection, prices: Iterable[Price], *, file_hash
             usd_through=None,
             usd_stale=False,
             hashes={"upload": file_hash},
-            flags={"replaced": replaced},
+            flags=(recorded := {"replaced": replaced}),
         )
+        _readable("import", recorded, batch, at)
         conn.executemany(
             "INSERT INTO price (day, currency, price, method, source, batch_id) VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (day, currency) DO UPDATE SET price = excluded.price, method = excluded.method,"
@@ -283,8 +285,9 @@ def clear_import(conn: sqlite3.Connection, days: Iterable[date], currency: str, 
             usd_through=None,
             usd_stale=False,
             hashes={},
-            flags={"currency": currency, "removed": removed},
+            flags=(recorded := {"currency": currency, "removed": removed}),
         )
+        _readable("clear", recorded, batch, at)
         conn.executemany(
             "DELETE FROM price WHERE day = ? AND currency = ? AND method = 'import'",
             [(d.isoformat(), currency) for d in wanted],
@@ -491,7 +494,8 @@ def _revisions(conn: sqlite3.Connection, rows: Sequence[Price]) -> dict[str, lis
         if old is None or (old["price"], old["method"], old["source"]) == new:
             continue
         if key not in stored:
-            found["revised"].append(old | fetched)  # refilled after a clear, unlike what was fetched before
+            # refilled after a clear, unlike what was fetched before: a display price is a display update
+            found["revised" if p.currency == "USD" else "display_updated"].append(old | fetched)
         elif old["method"] == "import":
             if old["price"] != new[0]:
                 found["kept_import"].append(old | fetched)
@@ -681,6 +685,15 @@ def _covered(source: str, hashes: Mapping[str, str], kind: str) -> bool:
     if kind == "import":
         return set(hashes) == {"upload"}
     return all(part in hashes for part in source.split("*"))
+
+
+def _readable(kind: str, flags: Mapping[str, Any], batch: int, at: datetime) -> None:
+    """Refuse, before the commit, a record that the read (`_check_flags`) would call damage: the write
+    and the read hold the same rules, so a store the module wrote always reads back."""
+    try:
+        _check_flags(kind, dict(flags), batch_id=batch, before=at.astimezone(UTC).date())
+    except PriceStoreError:
+        raise PriceStoreError("the change would leave a price record the store can't read back") from None
 
 
 def _distinct(rows: Sequence[Price]) -> None:

@@ -235,9 +235,11 @@ class _Failing:
 
     def __init__(self, code: str, after: int = 0) -> None:
         self.code, self.after, self.calls, self.in_transaction = code, after, 0, False
+        self.statements: list[str] = []
 
     def execute(self, sql: str, *args: object) -> object:
         self.calls += 1
+        self.statements.append(sql)
         if self.calls == self.after + 1 or (sql == "ROLLBACK" and self.calls > self.after + 1):
             e = sqlite3.DatabaseError("database disk image is malformed")
             e.sqlite_errorname = self.code if sql != "ROLLBACK" else "SQLITE_IOERR"
@@ -311,13 +313,15 @@ def test_a_read_failing_inside_the_status_snapshot_keeps_its_refusal(
 ) -> None:
     """BEGIN succeeds; the next read fails; the snapshot's ROLLBACK then fails with an I/O error, which
     doesn't replace the first refusal."""
+    reader = _Failing(code, after=1)
     app = create_app(
         port=PORT,
         sessions=Sessions(TOKEN),
         status=lambda: NodeStatus(online=False, chain=None, reasons=()),
         on_quit=lambda: None,
-        prices=PriceReader(lambda: _Failing(code, after=1)),  # type: ignore[arg-type, return-value]
+        prices=PriceReader(lambda: reader),  # type: ignore[arg-type, return-value]
     )
     session = call(app, "POST", "/api/session", json_body={"bootstrap": TOKEN}).json()["session"]
     reply = call(app, "GET", "/api/prices/status", headers={"Authorization": f"Bearer {session}"})
     assert (reply.status, reply.json()["error"]) == (status, message)
+    assert reader.statements[0] == "BEGIN" and reader.statements[-1] == "ROLLBACK"  # the rollback was tried

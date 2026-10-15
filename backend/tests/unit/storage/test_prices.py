@@ -876,6 +876,10 @@ def test_a_damaged_revision_record_is_refused_on_read_t408(conn: sqlite3.Connect
             review(mismatches=[{"day": "2026-10-14", "reference": "1.00", "typical": "1.00"}]),
             False,
         ),  # the refresh's own day
+        (
+            review(mismatches=[{"day": "2026-10-13", "reference": "1.00", "typical": "1.00"}]),
+            True,
+        ),  # the day before
     ],
 )
 def test_review_records_at_their_bounds(conn: sqlite3.Connection, flags: dict[str, Any], ok: bool) -> None:
@@ -932,3 +936,57 @@ def test_an_import_or_clear_record_has_exactly_its_fields_t408(conn: sqlite3.Con
     conn.execute("PRAGMA ignore_check_constraints = OFF")
     with pytest.raises(pr.PriceStoreError, match="damaged"):
         pr.batch(conn, batch)
+
+
+def test_a_cleared_display_day_refilled_otherwise_reads_back_t303(conn: sqlite3.Connection) -> None:
+    """A EUR day fetched, imported over, cleared, then refilled with another value is a display update
+    that the store reads back, not damage."""
+    eur = "ecb*coinmetrics"
+    refresh(conn, p("2025-01-01", "93000.12"), p("2025-01-01", "90000.10", "EUR", "fx", eur))
+    imported = [p("2025-01-01", "1.00", "EUR", "import", "csv")]
+    pr.store_import(conn, imported, file_hash=HASH, at=AT)
+    pr.clear_import(conn, [date(2025, 1, 1)], "EUR", at=AT)
+    refresh(conn, p("2025-01-01", "93000.12"), p("2025-01-01", "90000.55", "EUR", "fx", eur))
+    last = pr.last_refresh(conn)
+    assert last is not None and last.flags["revised"] == []
+    assert [(r["currency"], r["fetched"]) for r in last.flags["display_updated"]] == [("EUR", "90000.55")]
+    assert [x.price for x in pr.prices(conn, "EUR")] == [D("90000.55")]
+
+
+def test_a_clear_whose_record_wouldnt_read_back_is_refused_t408(conn: sqlite3.Connection) -> None:
+    """A clear dated on or before an imported day (a clock moved back) would record a day the read
+    refuses: the write is refused instead, and nothing changes."""
+    pr.store_import(conn, [p("2025-01-05", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    with pytest.raises(pr.PriceStoreError, match="read back"):
+        pr.clear_import(conn, [date(2025, 1, 5)], "USD", at=datetime(2025, 1, 5, 12, tzinfo=UTC))
+    assert len(pr.prices(conn, "USD")) == 1
+    assert conn.execute("SELECT count(*) FROM price_batch").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("currency", ["EUR", "GBP"])
+def test_every_display_record_a_refresh_writes_reads_back(conn: sqlite3.Connection, currency: str) -> None:
+    """A display day kept as the user's import, and another refilled after a clear, both read back."""
+    fx = "ecb*coinmetrics"
+    refresh(
+        conn,
+        p("2025-01-01", "93000.12"),
+        p("2025-01-01", "1.00", currency, "fx", fx),
+        p("2025-01-02", "2.00", currency, "fx", fx),
+    )
+    imported = [
+        p("2025-01-01", "5.00", currency, "import", "csv"),
+        p("2025-01-02", "6.00", currency, "import", "csv"),
+    ]
+    pr.store_import(conn, imported, file_hash=HASH, at=AT)
+    pr.clear_import(conn, [date(2025, 1, 2)], currency, at=AT)
+    refresh(
+        conn,
+        p("2025-01-01", "93000.12"),
+        p("2025-01-01", "1.50", currency, "fx", fx),
+        p("2025-01-02", "2.50", currency, "fx", fx),
+    )
+    last = pr.last_refresh(conn)
+    assert last is not None
+    assert [(r["day"], r["currency"]) for r in last.flags["kept_import"]] == [("2025-01-01", currency)]
+    assert [(r["day"], r["currency"]) for r in last.flags["display_updated"]] == [("2025-01-02", currency)]
+    assert [x.price for x in pr.prices(conn, currency)] == [D("5.00"), D("2.50")]
