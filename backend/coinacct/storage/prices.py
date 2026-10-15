@@ -345,7 +345,7 @@ def batch(conn: sqlite3.Connection, batch_id: int) -> Batch | None:
     if row is None:
         return None
     with _damaged():
-        return _stored_batch(row)
+        return _provenance(conn, _stored_batch(row))
 
 
 def _stored_day(text: object) -> date:
@@ -396,7 +396,7 @@ def last_refresh(conn: sqlite3.Connection) -> Batch | None:
     if row is None:
         return None
     with _damaged():
-        return _stored_batch(row)
+        return _provenance(conn, _stored_batch(row))
 
 
 def _batch(  # noqa: PLR0913 - one batch row's columns
@@ -717,11 +717,39 @@ def _fetched_before(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str,
     )
     for row in rows:
         with _damaged():  # the whole batch is checked, so damage there is refused as damage
-            stored = _stored_batch(row)
+            stored = _provenance(conn, _stored_batch(row))
         for r in stored.flags["replaced"]:
             if r["method"] != "import":
                 out[(r["day"], r["currency"])] = r
     return out
+
+
+_RECORDS: Final = {"refresh": _REFRESH_FLAGS, "import": ("replaced",), "clear": ("removed",)}
+
+
+def _provenance(conn: sqlite3.Connection, stored: Batch) -> Batch:
+    """A checked batch whose recorded prices each hold to the batch they name, as a stored price does
+    (`_price`): a refresh or an import, never a clear; an imported price exactly when it is an import;
+    and a source its hashes cover (T-303, T-408). Each named batch is read once."""
+    named: dict[int, tuple[object, object]] = {}
+    for name in _RECORDS[stored.kind]:
+        for r in stored.flags[name]:
+            if r["batch"] not in named:
+                row = conn.execute(
+                    "SELECT kind, hashes FROM price_batch WHERE id = ?", (r["batch"],)
+                ).fetchone()
+                if row is None:  # the batch it names is gone
+                    raise PriceStoreError(_DAMAGED)
+                named[r["batch"]] = (row[0], json.loads(row[1]))
+            kind, hashes = named[r["batch"]]
+            if (
+                kind not in ("refresh", "import")
+                or not isinstance(hashes, dict)
+                or (r["method"] == "import") != (kind == "import")
+                or not _covered(r["source"], hashes, kind)
+            ):
+                raise PriceStoreError(_DAMAGED)
+    return stored
 
 
 def _covered(source: str, hashes: Mapping[str, str], kind: str) -> bool:
