@@ -304,9 +304,11 @@ def refresh_status(conn: sqlite3.Connection) -> tuple[Batch | None, date | None]
     """The last refresh's batch and `fetched_through`, read in one snapshot on a reader connection."""
     conn.execute("BEGIN")
     try:
-        return last_refresh(conn), fetched_through(conn)
+        out = last_refresh(conn), fetched_through(conn)
     finally:
-        conn.execute("COMMIT")
+        if conn.in_transaction:  # SQLite may have ended it itself after an error: keep that error
+            conn.execute("ROLLBACK")  # a read only: nothing to commit
+    return out
 
 
 @_read

@@ -16,7 +16,7 @@ from coinacct.storage import events as ev
 from coinacct.storage import prices as pr
 from coinacct.storage.chain_state import record_chain
 from coinacct.storage.datadir import open_data_dir
-from coinacct.storage.db import DbBusy, open_db
+from coinacct.storage.db import DbBusy, open_db, open_reader
 from coinacct.storage.db import transaction as db_transaction
 from coinacct.storage.migrations import STEPS
 
@@ -744,3 +744,24 @@ def test_a_busy_commit_is_busy(conn: sqlite3.Connection, monkeypatch: pytest.Mon
     monkeypatch.setattr(pr, "transaction", busy_commit)
     with pytest.raises(DbBusy):
         refresh(conn, p("2025-01-01", "93000.12"))
+
+
+def test_the_refresh_status_is_one_snapshot(
+    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refresh that commits between the status's two reads isn't half seen."""
+    refresh(conn, p("2025-01-01", "93000.12"))
+    reader = open_reader(open_data_dir(str(tmp_path / "data")))
+    real = pr.last_refresh
+
+    def then_a_refresh_commits(c: sqlite3.Connection) -> pr.Batch | None:
+        last = real(c)
+        refresh(conn, p("2025-01-02", "94000.00"), at=datetime(2026, 10, 15, 12, tzinfo=UTC))  # on the writer
+        return last
+
+    monkeypatch.setattr(pr, "last_refresh", then_a_refresh_commits)
+    try:
+        last, through = pr.refresh_status(reader)
+    finally:
+        reader.close()
+    assert last is not None and (last.usd_through, through) == (date(2025, 1, 1), date(2025, 1, 1))

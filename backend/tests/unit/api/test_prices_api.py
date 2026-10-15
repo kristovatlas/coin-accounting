@@ -28,6 +28,13 @@ H = "ab" * 32
 REF = "coinmetrics:PriceUSD"
 
 
+def flags(**kw: Any) -> dict[str, Any]:
+    """A refresh's review flags as `flags_of` writes them, every kind present."""
+    empty: dict[str, list[Any]] = {"USD": [], "EUR": [], "GBP": []}
+    base: dict[str, Any] = {"mismatches": [], "reference_gaps": [], "reference_outliers": []}
+    return base | {"gaps": empty, "outliers": empty} | kw
+
+
 class World:
     def __init__(self, tmp_path: Path) -> None:
         d = tmp_path / "data"
@@ -58,7 +65,9 @@ class World:
             hashes={REF: H, "ecb:eurofxref-hist": H},
             usd_through=date(2025, 1, 1),
             usd_stale=False,
-            flags={"mismatches": [{"day": "2025-01-01"}], "gaps": {"USD": [{"first": "x"}], "EUR": []}},
+            flags=flags(
+                mismatches=[{"day": "2025-01-01"}], gaps={"USD": [{"first": "x"}], "EUR": [], "GBP": []}
+            ),
             at=datetime(2025, 1, 10, 12, tzinfo=UTC),
         )
         assert batch is not None
@@ -147,11 +156,24 @@ def test_a_busy_db_is_a_503(tmp_path: Path) -> None:
         assert reply.status == 503 and "busy" in reply.json()["error"]
 
 
-@pytest.mark.parametrize("flags", ['{"mismatches": 5}', '{"gaps": {"USD": "x"}}', '{"gaps": {"JPY": []}}'])
-def test_a_damaged_flag_is_refused_not_counted_as_nothing_t303(world: World, flags: str) -> None:
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "json_patch(flags, '{\"mismatches\": 5}')",
+        'json_patch(flags, \'{"gaps": {"USD": "x"}}\')',
+        'json_patch(flags, \'{"gaps": {"JPY": []}}\')',
+        "json_remove(flags, '$.mismatches')",  # a kind gone: not "no mismatches"
+        "json_set(flags, '$.gaps', json('[]'))",  # a per-currency kind as a plain list
+        "json_set(flags, '$.gaps', json('{}'))",  # no currency at all
+        "json_set(flags, '$.mismatches', json('{}'))",
+        "json_set(flags, '$.mismatches', json('[5]'))",  # a record that isn't one
+        "json_remove(flags, '$.gaps.GBP')",  # a currency gone
+    ],
+)
+def test_a_damaged_flag_is_refused_not_counted_as_nothing_t303(world: World, damage: str) -> None:
     world.refresh()
     world.db.execute("DROP TRIGGER price_batch_is_append_only_update")  # damage that bypasses the module
-    world.db.execute("UPDATE price_batch SET flags = json_patch(flags, ?)", (flags,))
+    world.db.execute(f"UPDATE price_batch SET flags = {damage}")  # noqa: S608 - a constant
     reply = world.get("/api/prices/status")
     assert reply.status == 422
     assert reply.json() == {"error": "a stored price is damaged (T-408): restore the user DB from a backup"}
@@ -173,7 +195,7 @@ def test_a_stale_refresh_keeps_the_last_day_an_earlier_one_priced(world: World) 
         hashes={"bitstamp:ohlc:btcusd": H},
         usd_through=None,
         usd_stale=True,
-        flags={"gaps": {"USD": [{"a": 1}], "EUR": [{"b": 2}, {"c": 3}]}},
+        flags=flags(gaps={"USD": [{"a": 1}], "EUR": [{"b": 2}, {"c": 3}], "GBP": []}),
         at=datetime(2025, 1, 11, 12, tzinfo=UTC),
     )
     out = world.get("/api/prices/status").json()

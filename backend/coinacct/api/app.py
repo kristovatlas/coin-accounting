@@ -799,12 +799,12 @@ def _price_routes(app: FastAPI, reader: price_cache.PriceReader, authenticated: 
 
 def _flag_count(value: object) -> int:
     """How many review flags of one kind a refresh recorded: a list's length, or a per-currency map's
-    total."""
+    total. The service has checked every kind's shape (`PriceReader.status`)."""
     if isinstance(value, list):
         return len(value)
-    if isinstance(value, dict):
-        return sum(len(v) for v in value.values() if isinstance(v, list))
-    return 0
+    if isinstance(value, dict) and all(isinstance(v, list) for v in value.values()):
+        return sum(len(v) for v in value.values())
+    raise TypeError("a review flag of a shape the service didn't check")  # never shown as 0
 
 
 # POST bodies, as for the graph: scripts and txids stay out of URLs (T-105).
