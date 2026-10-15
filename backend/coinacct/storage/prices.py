@@ -39,6 +39,7 @@ The module reads no clock: the caller passes the batch's time.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -49,6 +50,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Literal
 
 from coinacct.storage.db import DbError, transaction
+
+log = logging.getLogger(__name__)
 
 CURRENCIES: Final = ("USD", "EUR", "GBP")
 METHODS: Final = ("reference", "typical", "fx", "import")
@@ -490,11 +493,16 @@ def _distinct(rows: Sequence[Price]) -> None:
 
 @contextmanager
 def _refusals() -> Iterator[None]:
-    """The schema's refusals as a `PriceStoreError` with a fixed message: SQLite's names the constraint."""
+    """The schema's refusals, and any other SQLite error while writing (disk full, I/O, a damaged
+    file), as a `PriceStoreError` with a fixed message: SQLite's own text names the constraint or the
+    file, so it goes to the log by type only."""
     try:
         yield
     except sqlite3.IntegrityError:
         raise PriceStoreError("the prices break a rule of the price table") from None
+    except sqlite3.DatabaseError as e:
+        log.warning("prices couldn't be written to the user DB: %s", type(e).__name__)
+        raise PriceStoreError("the user DB can't be used right now; see the log") from None
 
 
 def _row(p: Price, batch: int) -> tuple[str, str, str, str, str, int]:

@@ -145,25 +145,15 @@ def test_a_bad_csv_is_refused_whole_without_echoing_it_t304(conn: sqlite3.Connec
     assert conn.execute("SELECT count(*) FROM price_batch").fetchone() == (0,)
 
 
-class _BrokenDisk:
-    """A connection whose every statement fails as a full or failing disk does."""
+def test_a_failing_disk_is_a_fixed_refusal(conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing_disk(*args: object) -> object:
+        raise sqlite3.OperationalError("disk I/O error")  # as SQLite raises mid-write on a failing disk
 
-    in_transaction = False
-
-    def execute(self, *args: object) -> object:
-        raise sqlite3.OperationalError("disk I/O error")
-
-    def executemany(self, *args: object) -> object:
-        raise sqlite3.OperationalError("disk I/O error")
-
-
-def test_a_failing_disk_is_a_fixed_refusal(conn: sqlite3.Connection) -> None:
-    broken = PriceCache(_BrokenDisk(), now=lambda: NOW, refresh=lambda *a: result())  # type: ignore[arg-type]
+    monkeypatch.setattr(store, "_row", failing_disk)
     with pytest.raises(ImportRefused) as refused:
-        broken.refresh(None, threading.Event())
+        cache(conn, result()).refresh(None, threading.Event())
     assert str(refused.value) == "the user DB can't be used right now; see the log"
-    with pytest.raises(ImportRefused):
-        broken.import_csv(CSV)
+    assert conn.execute("SELECT count(*) FROM price_batch").fetchone() == (0,)
 
 
 EAST = datetime(2025, 1, 10, 20, tzinfo=timezone(timedelta(hours=-5)))  # 2025-01-11 01:00 UTC

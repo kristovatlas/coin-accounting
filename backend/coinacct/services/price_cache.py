@@ -22,8 +22,6 @@ repeat a value, and a stored-data refusal names its remedy (T-408).
 
 from __future__ import annotations
 
-import logging
-import sqlite3
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -75,9 +73,6 @@ def _moment(now: Callable[[], datetime]) -> datetime:
     if not isinstance(moment, datetime) or moment.utcoffset() is None:
         raise ImportRefused("the price cache needs a timezone-aware time")
     return moment
-
-
-log = logging.getLogger(__name__)
 
 
 class _Cancelled(Exception):
@@ -143,9 +138,6 @@ def _refusals() -> Iterator[None]:
             yield
         except store.PriceStoreError as e:  # its fixed message never repeats a value (T-408)
             raise ImportRefused(str(e)) from None
-        except sqlite3.DatabaseError as e:  # disk full, I/O, a damaged file: SQLite's text stays out
-            log.warning("the price cache couldn't use the user DB: %s", type(e).__name__)
-            raise ImportRefused("the user DB can't be used right now; see the log") from None
 
 
 __all__ = ["PriceCache", "flags_of"]
