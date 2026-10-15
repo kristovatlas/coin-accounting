@@ -36,7 +36,8 @@ Routes:
   refresh (when, the reference rate's last day and staleness, each source's SHA-256, how many review
   flags of each kind) and the reference rate's last day any refresh priced (`reference_through`;
   later days may be Bitstamp's fill, ADR 0039). A damaged price is a 422 with the backup
-  remedy, a busy DB 503.
+  remedy, a busy DB 503, any other
+  DB failure (a full disk, an I/O error) a 422 with "see the log".
 - History (bearer; PLAN §3), through `services.history.History`, from the chain cache only, as of the
   last finished sync (`as_of`; each address's `scanned_to` says how far its own history is scanned):
   - `GET /api/addresses[?tax_account_id=N]`: every address, with its owner, balance, UTXO count and

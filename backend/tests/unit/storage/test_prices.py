@@ -53,6 +53,10 @@ def bypass(conn: sqlite3.Connection) -> None:
         conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
 
 
+def gap(first: str, last: str) -> dict[str, str]:
+    return {"first": first, "last": last}
+
+
 def review(**kw: Any) -> dict[str, Any]:
     """A refresh's review flags with every kind present, as the price cache records them."""
     empty: dict[str, list[Any]] = {"USD": [], "EUR": [], "GBP": []}
@@ -188,6 +192,15 @@ def test_a_refresh_with_any_bad_price_stores_nothing_t304(conn: sqlite3.Connecti
         },
         {"flags": review(reference_gaps=[{"first": "2025-01-02", "last": "2025-01-01"}])},  # out of order
         {"flags": review(reference_outliers=[{"day": "2025-01-01", "previous": "1", "price": "2.00"}])},
+        {
+            "flags": review(
+                reference_gaps=[
+                    {"first": "2025-01-01", "last": "2025-01-05"},
+                    {"first": "2025-01-04", "last": "2025-01-06"},
+                ]
+            )
+        },  # overlapping gaps
+        {"flags": review(mismatches=[{"day": "2025-02-29", "reference": "1.00", "typical": "1.00"}])},
         {"usd_through": date(2008, 1, 1)},
         {"usd_through": datetime(2025, 1, 2, tzinfo=UTC)},  # a moment, not a day
         {"hashes": {}},  # a refresh records its sources' hashes
@@ -791,3 +804,189 @@ def test_the_refresh_status_is_one_snapshot(
     finally:
         reader.close()
     assert last is not None and (last.usd_through, through) == (date(2025, 1, 1), date(2025, 1, 1))
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "json_remove(flags, '$.revised[0].fetched')",  # a revision without what the source now serves
+        "json_set(flags, '$.revised[0].extra', 1)",  # a field the module never writes
+        "json_set(flags, '$.revised[0].fetched', '0.00')",
+    ],
+)
+def test_a_damaged_revision_record_is_refused_on_read_t408(conn: sqlite3.Connection, damage: str) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    refresh(conn, p("2025-01-01", "93000.99"))  # the source serves another value: a revision
+    bypass(conn)
+    conn.execute(f"UPDATE price_batch SET flags = {damage} WHERE id = 2")  # noqa: S608 - a constant
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.last_refresh(conn)
+
+
+@pytest.mark.parametrize(
+    ("flags", "ok"),
+    [
+        (
+            review(mismatches=[{"day": "2009-01-03", "reference": "0.01", "typical": "0.01"}]),
+            True,
+        ),  # the edges
+        (review(mismatches=[{"day": "2009-01-02", "reference": "1.00", "typical": "1.00"}]), False),
+        (
+            review(
+                reference_gaps=[
+                    {"first": "2025-01-01", "last": "2025-01-02"},
+                    {"first": "2025-01-04", "last": "2025-01-05"},
+                ]
+            ),
+            True,
+        ),
+        (
+            review(
+                reference_gaps=[
+                    {"first": "2025-01-01", "last": "2025-01-02"},
+                    {"first": "2025-01-03", "last": "2025-01-05"},
+                ]
+            ),
+            False,
+        ),  # touching
+        (
+            review(
+                reference_gaps=[
+                    {"first": "2025-01-01", "last": "2025-01-03"},
+                    {"first": "2025-01-03", "last": "2025-01-05"},
+                ]
+            ),
+            False,
+        ),  # a shared day
+        (
+            review(
+                mismatches=[
+                    {"day": "2025-01-02", "reference": "1.00", "typical": "1.00"},
+                    {"day": "2025-01-01", "reference": "1.00", "typical": "1.00"},
+                ]
+            ),
+            False,
+        ),  # out of order
+        (
+            review(mismatches=[{"day": "2025-01-01", "reference": "1.00", "typical": "1.00"}] * 2),
+            False,
+        ),  # a day twice
+        (
+            review(mismatches=[{"day": "2026-10-14", "reference": "1.00", "typical": "1.00"}]),
+            False,
+        ),  # the refresh's own day
+        (
+            review(mismatches=[{"day": "2026-10-13", "reference": "1.00", "typical": "1.00"}]),
+            True,
+        ),  # the day before
+    ],
+)
+def test_review_records_at_their_bounds(conn: sqlite3.Connection, flags: dict[str, Any], ok: bool) -> None:
+    if ok:
+        refresh(conn, p("2025-01-01", "93000.12"), flags=flags)
+    else:
+        with pytest.raises(pr.PriceStoreError):
+            refresh(conn, p("2025-01-01", "93000.12"), flags=flags)
+
+
+# the refresh's revision moved to another kind's list
+MOVE = (
+    "json_set(flags, '$.{to}', json_array(json(json_extract(flags, '$.revised[0]'))), "
+    "'$.revised', json('[]'))"
+)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "json_set(flags, '$.revised[0].fetched_method', 'import')",  # a refresh fetches no import
+        "json_set(flags, '$.revised[0].fetched_method', 'bogus')",
+        "json_set(flags, '$.revised[0].fetched_source', '')",
+        "json_set(flags, '$.revised[0].fetched_source', 'bitstamp:ohlc:btcusd')",  # not its method's source
+        "json_set(flags, '$.revised[0].currency', 'EUR')",  # a USD revision
+        "json_set(flags, '$.revised[0].fetched', json_extract(flags, '$.revised[0].price'))",  # no change
+        "json_set(flags, '$.revised[0].batch', 9)",  # a later batch than its own
+        MOVE.format(to="upgraded"),  # a USD price change that wasn't typical to reference
+        MOVE.format(to="kept_import"),  # an import kept, though the stored price wasn't one
+        "json_set(flags, '$.upgraded', json_array(json(json_extract(flags, '$.revised[0]'))))",  # a day twice
+    ],
+)
+def test_a_revision_record_follows_its_kinds_rule_on_read_t408(conn: sqlite3.Connection, damage: str) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    refresh(conn, p("2025-01-01", "93000.99"))  # the source serves another value: a revision
+    bypass(conn)
+    conn.execute(f"UPDATE price_batch SET flags = {damage} WHERE id = 2")  # noqa: S608 - a constant
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.last_refresh(conn)
+
+
+@pytest.mark.parametrize("record", ["replaced", "removed"])
+def test_an_import_or_clear_record_has_exactly_its_fields_t408(conn: sqlite3.Connection, record: str) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    batch = 2
+    if record == "removed":
+        pr.clear_import(conn, [date(2025, 1, 1)], "USD", at=AT)
+        batch = 3
+    bypass(conn)
+    damage = f"json_set(flags, '$.{record}[0].extra', 1)"
+    conn.execute(f"UPDATE price_batch SET flags = {damage} WHERE id = ?", (batch,))  # noqa: S608 - a constant
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.batch(conn, batch)
+
+
+def test_a_cleared_display_day_refilled_otherwise_reads_back_t303(conn: sqlite3.Connection) -> None:
+    """A EUR day fetched, imported over, cleared, then refilled with another value is a display update
+    that the store reads back, not damage."""
+    eur = "ecb*coinmetrics"
+    refresh(conn, p("2025-01-01", "93000.12"), p("2025-01-01", "90000.10", "EUR", "fx", eur))
+    imported = [p("2025-01-01", "1.00", "EUR", "import", "csv")]
+    pr.store_import(conn, imported, file_hash=HASH, at=AT)
+    pr.clear_import(conn, [date(2025, 1, 1)], "EUR", at=AT)
+    refresh(conn, p("2025-01-01", "93000.12"), p("2025-01-01", "90000.55", "EUR", "fx", eur))
+    last = pr.last_refresh(conn)
+    assert last is not None and last.flags["revised"] == []
+    assert [(r["currency"], r["fetched"]) for r in last.flags["display_updated"]] == [("EUR", "90000.55")]
+    assert [x.price for x in pr.prices(conn, "EUR")] == [D("90000.55")]
+
+
+def test_a_clear_whose_record_wouldnt_read_back_is_refused_t408(conn: sqlite3.Connection) -> None:
+    """A clear dated on or before an imported day (a clock moved back) would record a day the read
+    refuses: the write is refused instead, and nothing changes."""
+    pr.store_import(conn, [p("2025-01-05", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    with pytest.raises(pr.PriceStoreError, match="read back"):
+        pr.clear_import(conn, [date(2025, 1, 5)], "USD", at=datetime(2025, 1, 5, 12, tzinfo=UTC))
+    assert len(pr.prices(conn, "USD")) == 1
+    assert conn.execute("SELECT count(*) FROM price_batch").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("currency", ["EUR", "GBP"])
+def test_every_display_record_a_refresh_writes_reads_back(conn: sqlite3.Connection, currency: str) -> None:
+    """A display day kept as the user's import, and another refilled after a clear, both read back."""
+    fx = "ecb*coinmetrics"
+    refresh(
+        conn,
+        p("2025-01-01", "93000.12"),
+        p("2025-01-01", "1.00", currency, "fx", fx),
+        p("2025-01-02", "2.00", currency, "fx", fx),
+    )
+    imported = [
+        p("2025-01-01", "5.00", currency, "import", "csv"),
+        p("2025-01-02", "6.00", currency, "import", "csv"),
+    ]
+    pr.store_import(conn, imported, file_hash=HASH, at=AT)
+    pr.clear_import(conn, [date(2025, 1, 2)], currency, at=AT)
+    refresh(
+        conn,
+        p("2025-01-01", "93000.12"),
+        p("2025-01-01", "1.50", currency, "fx", fx),
+        p("2025-01-02", "2.50", currency, "fx", fx),
+    )
+    last = pr.last_refresh(conn)
+    assert last is not None
+    assert [(r["day"], r["currency"]) for r in last.flags["kept_import"]] == [("2025-01-01", currency)]
+    assert [(r["day"], r["currency"]) for r in last.flags["display_updated"]] == [("2025-01-02", currency)]
+    assert [x.price for x in pr.prices(conn, currency)] == [D("5.00"), D("2.50")]
