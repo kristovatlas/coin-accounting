@@ -121,6 +121,35 @@ class PriceCache:
             return store.store_import(self._conn, rows, file_hash=content_hash(data), at=moment)
 
 
+class PriceReader:
+    """The cached prices and the last refresh, read from a reader connection (architecture §3), for
+    the API's price routes."""
+
+    def __init__(self, open_reader: Callable[[], Connection]) -> None:
+        self._open_reader = open_reader
+
+    def prices(self, currency: str) -> list[store.Price]:
+        """Every cached price in `currency`, by day; each names the batch that wrote it."""
+        with _refusals():
+            reader = self._open_reader()
+            try:
+                return store.prices(reader, currency)
+            finally:
+                reader.close()
+
+    def status(self) -> tuple[store.Batch | None, date | None]:
+        """The last refresh's batch and the last day any refresh priced, from one snapshot."""
+        with _refusals():
+            reader = self._open_reader()
+            try:
+                reader.execute("BEGIN")
+                last, through = store.last_refresh(reader), store.fetched_through(reader)
+                reader.execute("COMMIT")
+                return last, through
+            finally:
+                reader.close()
+
+
 @contextmanager
 def _refusals() -> Iterator[None]:
     """Storage's refusals, with their fixed messages, and a busy DB, as the services' (`db_errors`)."""
@@ -131,4 +160,4 @@ def _refusals() -> Iterator[None]:
             raise ImportRefused(str(e)) from None
 
 
-__all__ = ["PriceCache", "flags_of"]
+__all__ = ["PriceCache", "PriceReader", "flags_of"]
