@@ -53,6 +53,10 @@ def bypass(conn: sqlite3.Connection) -> None:
         conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
 
 
+def gap(first: str, last: str) -> dict[str, str]:
+    return {"first": first, "last": last}
+
+
 def review(**kw: Any) -> dict[str, Any]:
     """A refresh's review flags with every kind present, as the price cache records them."""
     empty: dict[str, list[Any]] = {"USD": [], "EUR": [], "GBP": []}
@@ -818,3 +822,113 @@ def test_a_damaged_revision_record_is_refused_on_read_t408(conn: sqlite3.Connect
     conn.execute("PRAGMA ignore_check_constraints = OFF")
     with pytest.raises(pr.PriceStoreError, match="damaged"):
         pr.last_refresh(conn)
+
+
+@pytest.mark.parametrize(
+    ("flags", "ok"),
+    [
+        (
+            review(mismatches=[{"day": "2009-01-03", "reference": "0.01", "typical": "0.01"}]),
+            True,
+        ),  # the edges
+        (review(mismatches=[{"day": "2009-01-02", "reference": "1.00", "typical": "1.00"}]), False),
+        (
+            review(
+                reference_gaps=[
+                    {"first": "2025-01-01", "last": "2025-01-02"},
+                    {"first": "2025-01-04", "last": "2025-01-05"},
+                ]
+            ),
+            True,
+        ),
+        (
+            review(
+                reference_gaps=[
+                    {"first": "2025-01-01", "last": "2025-01-02"},
+                    {"first": "2025-01-03", "last": "2025-01-05"},
+                ]
+            ),
+            False,
+        ),  # touching
+        (
+            review(
+                reference_gaps=[
+                    {"first": "2025-01-01", "last": "2025-01-03"},
+                    {"first": "2025-01-03", "last": "2025-01-05"},
+                ]
+            ),
+            False,
+        ),  # a shared day
+        (
+            review(
+                mismatches=[
+                    {"day": "2025-01-02", "reference": "1.00", "typical": "1.00"},
+                    {"day": "2025-01-01", "reference": "1.00", "typical": "1.00"},
+                ]
+            ),
+            False,
+        ),  # out of order
+        (
+            review(mismatches=[{"day": "2025-01-01", "reference": "1.00", "typical": "1.00"}] * 2),
+            False,
+        ),  # a day twice
+        (
+            review(mismatches=[{"day": "2026-10-14", "reference": "1.00", "typical": "1.00"}]),
+            False,
+        ),  # the refresh's own day
+    ],
+)
+def test_review_records_at_their_bounds(conn: sqlite3.Connection, flags: dict[str, Any], ok: bool) -> None:
+    if ok:
+        refresh(conn, p("2025-01-01", "93000.12"), flags=flags)
+    else:
+        with pytest.raises(pr.PriceStoreError):
+            refresh(conn, p("2025-01-01", "93000.12"), flags=flags)
+
+
+# the refresh's revision moved to another kind's list
+MOVE = (
+    "json_set(flags, '$.{to}', json_array(json(json_extract(flags, '$.revised[0]'))), "
+    "'$.revised', json('[]'))"
+)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "json_set(flags, '$.revised[0].fetched_method', 'import')",  # a refresh fetches no import
+        "json_set(flags, '$.revised[0].fetched_method', 'bogus')",
+        "json_set(flags, '$.revised[0].fetched_source', '')",
+        "json_set(flags, '$.revised[0].fetched_source', 'bitstamp:ohlc:btcusd')",  # not its method's source
+        "json_set(flags, '$.revised[0].currency', 'EUR')",  # a USD revision
+        "json_set(flags, '$.revised[0].fetched', json_extract(flags, '$.revised[0].price'))",  # no change
+        "json_set(flags, '$.revised[0].batch', 9)",  # a later batch than its own
+        MOVE.format(to="upgraded"),  # a USD price change that wasn't typical to reference
+        MOVE.format(to="kept_import"),  # an import kept, though the stored price wasn't one
+        "json_set(flags, '$.upgraded', json_array(json(json_extract(flags, '$.revised[0]'))))",  # a day twice
+    ],
+)
+def test_a_revision_record_follows_its_kinds_rule_on_read_t408(conn: sqlite3.Connection, damage: str) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    refresh(conn, p("2025-01-01", "93000.99"))  # the source serves another value: a revision
+    bypass(conn)
+    conn.execute(f"UPDATE price_batch SET flags = {damage} WHERE id = 2")  # noqa: S608 - a constant
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.last_refresh(conn)
+
+
+@pytest.mark.parametrize("record", ["replaced", "removed"])
+def test_an_import_or_clear_record_has_exactly_its_fields_t408(conn: sqlite3.Connection, record: str) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    batch = 2
+    if record == "removed":
+        pr.clear_import(conn, [date(2025, 1, 1)], "USD", at=AT)
+        batch = 3
+    bypass(conn)
+    damage = f"json_set(flags, '$.{record}[0].extra', 1)"
+    conn.execute(f"UPDATE price_batch SET flags = {damage} WHERE id = ?", (batch,))  # noqa: S608 - a constant
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.batch(conn, batch)

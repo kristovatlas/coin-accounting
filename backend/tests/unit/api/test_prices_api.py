@@ -30,7 +30,8 @@ REF = "coinmetrics:PriceUSD"
 
 MISMATCH = {"day": "2025-01-01", "reference": "93000.12", "typical": "80000.00"}
 GAP = {"first": "2025-01-02", "last": "2025-01-09"}
-LATER_GAP = {"first": "2025-01-11", "last": "2025-01-12"}
+EARLY_GAP = {"first": "2025-01-02", "last": "2025-01-03"}
+LATER_GAP = {"first": "2025-01-05", "last": "2025-01-06"}
 OUTLIER = {"day": "2025-01-01", "previous": "40000.00", "price": "93000.12"}
 
 
@@ -191,7 +192,7 @@ def test_a_busy_db_is_a_503(tmp_path: Path) -> None:
         "json_set(flags, '$.mismatches[0].day', '2025-02-30')",  # the form of a day, not a day
         "json_set(flags, '$.mismatches[0].day', '2008-12-31')",  # before Bitcoin's first block
         "json_set(flags, '$.mismatches[0].typical', '0.00')",  # no price
-        "json_set(flags, '$.mismatches[1]', json_extract(flags, '$.mismatches[0]'))",  # twice
+        "json_set(flags, '$.mismatches[1]', json(json_extract(flags, '$.mismatches[0]')))",  # twice
     ],
 )
 def test_a_damaged_flag_is_refused_not_counted_as_nothing_t303(world: World, damage: str) -> None:
@@ -219,7 +220,7 @@ def test_a_stale_refresh_keeps_the_last_day_an_earlier_one_priced(world: World) 
         hashes={"bitstamp:ohlc:btcusd": H},
         usd_through=None,
         usd_stale=True,
-        flags=flags(gaps={"USD": [GAP], "EUR": [GAP, LATER_GAP], "GBP": []}),
+        flags=flags(gaps={"USD": [GAP], "EUR": [EARLY_GAP, LATER_GAP], "GBP": []}),
         at=datetime(2025, 1, 11, 12, tzinfo=UTC),
     )
     out = world.get("/api/prices/status").json()
@@ -229,18 +230,19 @@ def test_a_stale_refresh_keeps_the_last_day_an_earlier_one_priced(world: World) 
 
 
 class _Failing:
-    """A reader whose queries fail with SQLite's error `code` from the `after`-th on (0: the first)."""
+    """A reader whose `after+1`-th query fails with SQLite's error `code` (0: the first), and whose
+    ROLLBACK, after that, fails with another code: the first error is the one that must come back."""
 
     def __init__(self, code: str, after: int = 0) -> None:
         self.code, self.after, self.calls, self.in_transaction = code, after, 0, False
 
     def execute(self, sql: str, *args: object) -> object:
         self.calls += 1
-        if self.calls > self.after:
+        if self.calls == self.after + 1 or (sql == "ROLLBACK" and self.calls > self.after + 1):
             e = sqlite3.DatabaseError("database disk image is malformed")
-            e.sqlite_errorname = self.code
+            e.sqlite_errorname = self.code if sql != "ROLLBACK" else "SQLITE_IOERR"
             raise e
-        self.in_transaction = sql == "BEGIN"
+        self.in_transaction = sql == "BEGIN" or self.in_transaction
         return None
 
     def close(self) -> None:
@@ -298,12 +300,17 @@ def test_an_older_damaged_refresh_is_refused_too_t408(world: World) -> None:
 
 @pytest.mark.parametrize(
     ("code", "status", "message"),
-    [("SQLITE_CORRUPT", 422, BACKUP), ("SQLITE_BUSY", 503, "the user DB is busy; try again in a moment")],
+    [
+        ("SQLITE_CORRUPT", 422, BACKUP),
+        ("SQLITE_BUSY", 503, "the user DB is busy; try again in a moment"),
+        ("SQLITE_LOCKED", 503, "the user DB is busy; try again in a moment"),
+    ],
 )
 def test_a_read_failing_inside_the_status_snapshot_keeps_its_refusal(
     code: str, status: int, message: str
 ) -> None:
-    """BEGIN succeeds; the next read fails; the snapshot's rollback doesn't mask the first error."""
+    """BEGIN succeeds; the next read fails; the snapshot's ROLLBACK then fails with an I/O error, which
+    doesn't replace the first refusal."""
     app = create_app(
         port=PORT,
         sessions=Sessions(TOKEN),

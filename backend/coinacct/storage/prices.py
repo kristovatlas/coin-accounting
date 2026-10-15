@@ -38,6 +38,7 @@ The module reads no clock: the caller passes the batch's time.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import itertools
 import json
@@ -177,7 +178,8 @@ def store_refresh(  # noqa: PLR0912, PLR0913 - a refresh's prices and what it re
         raise PriceStoreError("the reference rate's last day is the last reference price the refresh stores")
     if not isinstance(flags, Mapping) or set(_REFRESH_FLAGS) & set(flags):
         raise PriceStoreError("a refresh's revisions are the module's own record")
-    if not _review_flags(flags):
+    bound = at.astimezone(UTC).date() if isinstance(at, datetime) and at.utcoffset() is not None else None
+    if not _review_flags(flags, before=bound):
         raise PriceStoreError("a refresh records every kind of review flag, each as a list of records")
     if any("*" in k for k in hashes):
         raise PriceStoreError("a source's name has no '*'")
@@ -311,9 +313,12 @@ def refresh_status(conn: sqlite3.Connection) -> tuple[Batch | None, date | None]
     conn.execute("BEGIN")
     try:
         out = last_refresh(conn), fetched_through(conn)
-    finally:
-        if conn.in_transaction:  # SQLite may have ended it itself after an error: keep that error
-            conn.execute("ROLLBACK")  # a read only: nothing to commit
+    except BaseException:
+        if conn.in_transaction:  # SQLite may have ended it itself after an error
+            with contextlib.suppress(sqlite3.Error):  # the first error is the one that counts
+                conn.execute("ROLLBACK")
+        raise
+    conn.execute("ROLLBACK")  # a read only: nothing to commit
     return out
 
 
@@ -500,24 +505,34 @@ def _revisions(conn: sqlite3.Connection, rows: Sequence[Price]) -> dict[str, lis
 _SNAPSHOT_KEYS: Final = frozenset({"day", "currency", "price", "method", "source", "batch"})
 
 
-def _check_flags(kind: str, flags: dict[str, Any]) -> None:
+def _check_flags(kind: str, flags: dict[str, Any], *, batch_id: int, before: date) -> None:
     """A batch's flags hold the record its kind always writes (T-408): a refresh its own four lists and
-    the caller's five review kinds (`_review_flags`), an
-    import the prices it replaced, a clear its currency and the prices it removed."""
+    the caller's five review kinds (`_review_flags`), an import the prices it replaced, a clear its
+    currency and the prices it removed. Every day is before the batch's own UTC date, and every price
+    recorded names an earlier batch."""
     if kind == "refresh":
-        if set(flags) != {*REVIEW_LISTS, *REVIEW_PER_CURRENCY, *_REFRESH_FLAGS} or not _review_flags(flags):
-            raise PriceStoreError(_DAMAGED)  # a kind missing, extra or reshaped: never "nothing to review"
-        records = [flags.get(k) for k in _REFRESH_FLAGS]
+        if set(flags) != {*REVIEW_LISTS, *REVIEW_PER_CURRENCY, *_REFRESH_FLAGS}:
+            raise PriceStoreError(_DAMAGED)  # a kind missing or extra: never "nothing to review"
+        if not _review_flags(flags, before=before):
+            raise PriceStoreError(_DAMAGED)
+        lists = {k: flags.get(k) for k in _REFRESH_FLAGS}
     elif kind == "import":
-        records = [flags.get("replaced")]
+        lists = {"replaced": flags.get("replaced")}
     else:
         if flags.get("currency") not in CURRENCIES or not flags.get("removed"):
             raise PriceStoreError(_DAMAGED)
-        records = [flags.get("removed")]
-    fetched = kind == "refresh"  # a refresh's own records also hold what the source now serves
-    for record in records:
-        if not isinstance(record, list) or not all(_snapshot(r, fetched=fetched) for r in record):
+        lists = {"removed": flags.get("removed")}
+    seen: set[tuple[object, object]] = set()
+    for name, records in lists.items():
+        if not isinstance(records, list):
             raise PriceStoreError(_DAMAGED)
+        for r in records:
+            if not _snapshot(r, kind=name, batch_id=batch_id, before=before):
+                raise PriceStoreError(_DAMAGED)
+            key = (r["day"], r["currency"])
+            if key in seen:  # a priced day is recorded once, under one kind
+                raise PriceStoreError(_DAMAGED)
+            seen.add(key)
 
 
 # each review kind's record, as `services.price_cache.flags_of` writes it from `prices`' Mismatch, Gap
@@ -531,18 +546,19 @@ _REVIEW_RECORDS: Final = {
 }
 
 
-def _review_flags(flags: Mapping[str, Any]) -> bool:
+def _review_flags(flags: Mapping[str, Any], *, before: date | None = None) -> bool:
     """The caller's review flags as a refresh records them: every kind, each in its shape (a list, or
     a list per currency for `gaps` and `outliers`), every record with exactly its kind's fields, each a
     real day from Bitcoin's first block on or a price of at least a cent in the form the module writes,
-    each list's records in order of their day, and gaps disjoint, as `prices.check` makes them."""
+    each list's records in order of their day, gaps apart (a priced day between two), as
+    `prices.check` makes them, and every day before `before` (the batch's UTC date), if given."""
 
     def record(kind: str, r: object) -> bool:
         fields = _REVIEW_RECORDS[kind]
         if not isinstance(r, dict) or set(r) != set(fields):
             return False
         for name, form in fields.items():
-            if not (_is_day(r[name]) if form == "day" else _is_price(r[name])):
+            if not (_is_day(r[name], before) if form == "day" else _is_price(r[name])):
                 return False
         return "first" not in r or r["first"] <= r["last"]
 
@@ -553,7 +569,10 @@ def _review_flags(flags: Mapping[str, Any]) -> bool:
         if any(a >= b for a, b in itertools.pairwise(starts)):
             return False  # out of order, or a day twice
         return (
-            all(a["last"] < b["first"] for a, b in itertools.pairwise(value))
+            all(
+                date.fromisoformat(a["last"]) + timedelta(days=1) < date.fromisoformat(b["first"])
+                for a, b in itertools.pairwise(value)
+            )
             if "first" in _REVIEW_RECORDS[kind]
             else True
         )
@@ -573,14 +592,16 @@ def _review_flags(flags: Mapping[str, Any]) -> bool:
 _FETCHED_KEYS: Final = frozenset({"fetched", "fetched_method", "fetched_source"})
 
 
-def _is_day(value: object) -> bool:
-    """A real UTC day, written as the module writes it, from Bitcoin's first block on."""
+def _is_day(value: object, before: date | None = None) -> bool:
+    """A real UTC day, written as the module writes it, from Bitcoin's first block on, and before
+    `before` if given."""
     if not isinstance(value, str) or _DAY.fullmatch(value) is None:
         return False
     try:
-        return date.fromisoformat(value) >= FIRST_DAY
+        day = date.fromisoformat(value)
     except ValueError:  # 2025-02-30 has the form of a day but isn't one
         return False
+    return day >= FIRST_DAY and (before is None or day < before)
 
 
 def _is_price(value: object) -> bool:
@@ -590,25 +611,46 @@ def _is_price(value: object) -> bool:
     )
 
 
-def _snapshot(r: object, *, fetched: bool = False) -> bool:
-    """A recorded price as the module writes it: exactly its fields (a refresh's own records also hold
-    what the source now serves), each in its form."""
+def _source(value: object) -> bool:
+    return isinstance(value, str) and 1 <= len(value) <= MAX_SOURCE
+
+
+def _snapshot(r: object, *, kind: str, batch_id: int, before: date) -> bool:  # noqa: PLR0911 - one rule per kind
+    """A recorded price as the module writes it, by the list it is in: exactly its fields (a refresh's
+    own records also hold what the source now serves), each in its form, an earlier batch, and the
+    rule its kind follows (`_revisions`)."""
+    fetched = kind in _REFRESH_FLAGS
     keys = _SNAPSHOT_KEYS | _FETCHED_KEYS if fetched else _SNAPSHOT_KEYS
     if not isinstance(r, dict) or set(r) != keys:
         return False
-    if fetched and not (
-        _is_price(r["fetched"]) and r["fetched_method"] in METHODS and isinstance(r["fetched_source"], str)
-    ):
-        return False
-    return (
-        _is_day(r["day"])
+    if not (
+        _is_day(r["day"], before)
         and r["currency"] in CURRENCIES
         and _is_price(r["price"])
         and r["method"] in METHODS
-        and isinstance(r["source"], str)
+        and _source(r["source"])
         and isinstance(r["batch"], int)
         and not isinstance(r["batch"], bool)
-    )
+        and 1 <= r["batch"] < batch_id
+    ):
+        return False
+    if not fetched:
+        return True
+    method = r["fetched_method"]
+    if not (_is_price(r["fetched"]) and method in _FAMILY and _source(r["fetched_source"])):
+        return False  # a refresh fetches no import
+    if r["fetched_source"].split("*")[0].split(":")[0] != _FAMILY[method]:
+        return False
+    old, new = (r["price"], r["method"], r["source"]), (r["fetched"], method, r["fetched_source"])
+    if kind == "kept_import":
+        return bool(r["method"] == "import" and r["price"] != r["fetched"])
+    if r["method"] == "import" or old == new:
+        return False
+    if kind == "upgraded":
+        return bool(r["currency"] == "USD" and r["method"] == "typical" and method == "reference")
+    if kind == "display_updated":
+        return bool(r["currency"] != "USD")
+    return bool(r["currency"] == "USD")  # revised
 
 
 def _replaces(currency: str, stored_method: str, fetched_method: str) -> bool:
@@ -727,9 +769,9 @@ def _stored_batch(r: Sequence[Any]) -> Batch:
         raise PriceStoreError(_DAMAGED)
     if kind == "import" and set(hash_map) != {"upload"}:
         raise PriceStoreError(_DAMAGED)
-    _check_flags(kind, flag_map)
     if isinstance(batch_id, bool) or not isinstance(batch_id, int) or batch_id < 1:
         raise PriceStoreError(_DAMAGED)
+    _check_flags(kind, flag_map, batch_id=batch_id, before=moment.astimezone(UTC).date())
     if not all(
         isinstance(k, str)
         and 1 <= len(k) <= MAX_SOURCE
