@@ -148,32 +148,7 @@ class PriceReader:
                 last, through = store.refresh_status(reader)
             finally:
                 reader.close()
-        if last is not None and not _flags_as_written(last.flags):
-            raise ImportRefused(store.DAMAGED)
-        return last, through
-
-
-# the review flags `flags_of` writes: three lists, and two maps of a list per currency
-_LISTS = ("mismatches", "reference_gaps", "reference_outliers")
-_PER_CURRENCY = ("gaps", "outliers")
-
-
-def _flags_as_written(flags: Mapping[str, Any]) -> bool:
-    """Whether a refresh's flags hold every kind `flags_of` writes, each in its shape, with every
-    currency and every record an object (storage checks its own four lists): a kind missing or
-    reshaped must not read as nothing to review (T-303)."""
-
-    def records(value: object) -> bool:
-        return isinstance(value, list) and all(isinstance(r, dict) for r in value)
-
-    if not all(records(flags.get(k)) for k in _LISTS):
-        return False
-    return all(
-        isinstance(m := flags.get(k), dict)
-        and set(m) == set(store.CURRENCIES)
-        and all(records(v) for v in m.values())
-        for k in _PER_CURRENCY
-    )
+        return last, through  # storage checks every refresh batch's whole record on read (T-303, T-408)
 
 
 @contextmanager

@@ -168,6 +168,8 @@ def test_a_busy_db_is_a_503(tmp_path: Path) -> None:
         "json_set(flags, '$.mismatches', json('{}'))",
         "json_set(flags, '$.mismatches', json('[5]'))",  # a record that isn't one
         "json_remove(flags, '$.gaps.GBP')",  # a currency gone
+        "json_set(flags, '$.foo', 5)",  # a kind no refresh writes
+        "json_set(flags, '$.foo', json('[1, 2]'))",
     ],
 )
 def test_a_damaged_flag_is_refused_not_counted_as_nothing_t303(world: World, damage: str) -> None:
@@ -236,3 +238,24 @@ def test_a_failing_read_is_a_fixed_refusal(code: str, status: int) -> None:
         reply = call(app, "GET", path, headers={"Authorization": f"Bearer {session}"})
         assert reply.status == status
         assert "malformed" not in reply.json()["error"]
+
+
+def test_an_older_damaged_refresh_is_refused_too_t408(world: World) -> None:
+    """A newer, sound refresh doesn't vouch for the older batch whose prices the routes still serve."""
+    first = world.refresh()
+    store.store_refresh(
+        world.db,
+        [store.Price(date(2025, 1, 2), "USD", Decimal("94000.00"), "reference", REF)],
+        hashes={REF: H},
+        usd_through=date(2025, 1, 2),
+        usd_stale=False,
+        flags=flags(),
+        at=datetime(2025, 1, 11, 12, tzinfo=UTC),
+    )
+    world.db.execute("DROP TRIGGER price_batch_is_append_only_update")  # damage that bypasses the module
+    world.db.execute(
+        "UPDATE price_batch SET flags = json_remove(flags, '$.mismatches') WHERE id = ?", (first,)
+    )
+    for path in ("/api/prices", "/api/prices?currency=EUR"):
+        reply = world.get(path)
+        assert reply.status == 422 and "backup" in reply.json()["error"]

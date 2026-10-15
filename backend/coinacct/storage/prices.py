@@ -68,6 +68,11 @@ DAMAGED: Final = _DAMAGED  # the remedy, for a service that refuses damage it fi
 # typical price, an ECB conversion (`prices.coinmetrics`, `prices.bitstamp`, `prices.fx`)
 _FAMILY: Final = {"reference": "coinmetrics", "typical": "bitstamp", "fx": "ecb"}
 _REFRESH_FLAGS: Final = ("revised", "kept_import", "upgraded", "display_updated")  # the module's own
+REFRESH_FLAGS: Final = _REFRESH_FLAGS  # for a service that checks a refresh's whole record
+# the review flags a refresh's caller records (`services.price_cache.flags_of`): three lists of
+# records, and two maps holding a list of records per currency (T-303)
+REVIEW_LISTS: Final = ("mismatches", "reference_gaps", "reference_outliers")
+REVIEW_PER_CURRENCY: Final = ("gaps", "outliers")
 
 # a price with the batch that wrote it, checked together on read; a LEFT JOIN, so a price whose batch
 # is gone is refused rather than hidden
@@ -173,6 +178,8 @@ def store_refresh(  # noqa: PLR0912, PLR0913 - a refresh's prices and what it re
         raise PriceStoreError("the reference rate's last day is the last reference price the refresh stores")
     if not isinstance(flags, Mapping) or set(_REFRESH_FLAGS) & set(flags):
         raise PriceStoreError("a refresh's revisions are the module's own record")
+    if not _review_flags(flags):
+        raise PriceStoreError("a refresh records every kind of review flag, each as a list of records")
     if any("*" in k for k in hashes):
         raise PriceStoreError("a source's name has no '*'")
     if not all(_covered(p.source, hashes, "refresh") for p in rows):
@@ -498,6 +505,8 @@ def _check_flags(kind: str, flags: dict[str, Any]) -> None:
     """A batch's flags hold the record its kind always writes (T-408): a refresh its four lists, an
     import the prices it replaced, a clear its currency and the prices it removed."""
     if kind == "refresh":
+        if set(flags) != {*REVIEW_LISTS, *REVIEW_PER_CURRENCY, *_REFRESH_FLAGS} or not _review_flags(flags):
+            raise PriceStoreError(_DAMAGED)  # a kind missing, extra or reshaped: never "nothing to review"
         records = [flags.get(k) for k in _REFRESH_FLAGS]
     elif kind == "import":
         records = [flags.get("replaced")]
@@ -508,6 +517,23 @@ def _check_flags(kind: str, flags: dict[str, Any]) -> None:
     for record in records:
         if not isinstance(record, list) or not all(_snapshot(r) for r in record):
             raise PriceStoreError(_DAMAGED)
+
+
+def _review_flags(flags: Mapping[str, Any]) -> bool:
+    """The caller's review flags as a refresh records them: every kind, each in its shape, with every
+    currency, every entry a record."""
+
+    def records(value: object) -> bool:
+        return isinstance(value, list) and all(isinstance(r, dict) for r in value)
+
+    if set(flags) - set(_REFRESH_FLAGS) != {*REVIEW_LISTS, *REVIEW_PER_CURRENCY}:
+        return False
+    if not all(records(flags[k]) for k in REVIEW_LISTS):
+        return False
+    return all(
+        isinstance(m := flags[k], dict) and set(m) == set(CURRENCIES) and all(records(v) for v in m.values())
+        for k in REVIEW_PER_CURRENCY
+    )
 
 
 def _snapshot(r: object) -> bool:
@@ -662,6 +688,9 @@ __all__ = [
     "DAMAGED",
     "FIRST_DAY",
     "METHODS",
+    "REFRESH_FLAGS",
+    "REVIEW_LISTS",
+    "REVIEW_PER_CURRENCY",
     "Batch",
     "Price",
     "PriceStoreError",
