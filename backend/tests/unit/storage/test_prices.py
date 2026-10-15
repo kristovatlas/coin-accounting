@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -897,6 +897,11 @@ MOVE = (
 )
 
 
+FX = "'ecb*coinmetrics'"  # a conversion's source
+FETCHED_FX = f"json_set(flags, '$.revised[0].fetched_method', 'fx', '$.revised[0].fetched_source', {FX})"
+STORED_FX = f"json_set(flags, '$.revised[0].method', 'fx', '$.revised[0].source', {FX})"
+
+
 @pytest.mark.parametrize(
     "damage",
     [
@@ -904,6 +909,13 @@ MOVE = (
         "json_set(flags, '$.revised[0].fetched_method', 'bogus')",
         "json_set(flags, '$.revised[0].fetched_source', '')",
         "json_set(flags, '$.revised[0].fetched_source', 'bitstamp:ohlc:btcusd')",  # not its method's source
+        # a source the batch didn't hash
+        "json_set(flags, '$.revised[0].fetched_source', 'coinmetrics:forged')",
+        # a USD price fetched as a conversion
+        FETCHED_FX,
+        # a USD price stored as a conversion
+        STORED_FX,
+        "json_set(flags, '$.revised[0].source', 'bitstamp')",  # the stored price's source isn't its method's
         "json_set(flags, '$.revised[0].currency', 'EUR')",  # a USD revision
         "json_set(flags, '$.revised[0].fetched', json_extract(flags, '$.revised[0].price'))",  # no change
         "json_set(flags, '$.revised[0].batch', 9)",  # a later batch than its own
@@ -955,9 +967,9 @@ def test_a_cleared_display_day_refilled_otherwise_reads_back_t303(conn: sqlite3.
 
 def test_a_clear_whose_record_wouldnt_read_back_is_refused_t408(conn: sqlite3.Connection) -> None:
     """A clear dated on or before an imported day (a clock moved back) would record a day the read
-    refuses: the write is refused instead, and nothing changes."""
+    refuses: the write is refused instead, naming the clock, and nothing changes."""
     pr.store_import(conn, [p("2025-01-05", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
-    with pytest.raises(pr.PriceStoreError, match="read back"):
+    with pytest.raises(pr.PriceStoreError, match="check the system clock"):
         pr.clear_import(conn, [date(2025, 1, 5)], "USD", at=datetime(2025, 1, 5, 12, tzinfo=UTC))
     assert len(pr.prices(conn, "USD")) == 1
     assert conn.execute("SELECT count(*) FROM price_batch").fetchone() == (1,)
@@ -990,3 +1002,63 @@ def test_every_display_record_a_refresh_writes_reads_back(conn: sqlite3.Connecti
     assert [(r["day"], r["currency"]) for r in last.flags["kept_import"]] == [("2025-01-01", currency)]
     assert [(r["day"], r["currency"]) for r in last.flags["display_updated"]] == [("2025-01-02", currency)]
     assert [x.price for x in pr.prices(conn, currency)] == [D("5.00"), D("2.50")]
+
+
+@pytest.mark.parametrize(
+    ("record", "damage"),
+    [
+        ("replaced", "json_set(flags, '$.extra', 1)"),  # an import records only what it replaced
+        ("removed", "json_set(flags, '$.extra', 1)"),
+        ("removed", "json_set(flags, '$.currency', 'EUR')"),  # a USD price removed by a EUR clear
+        ("removed", "json_set(flags, '$.removed[0].currency', 'EUR')"),
+        # a clear removes only imported prices
+        (
+            "removed",
+            "json_set(flags, '$.removed[0].method', 'reference', '$.removed[0].source', 'coinmetrics')",
+        ),
+    ],
+)
+def test_an_import_or_clear_record_follows_its_kinds_rule_t408(
+    conn: sqlite3.Connection, record: str, damage: str
+) -> None:
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    batch = 2
+    if record == "removed":
+        pr.clear_import(conn, [date(2025, 1, 1)], "USD", at=AT)
+        batch = 3
+    bypass(conn)
+    conn.execute(f"UPDATE price_batch SET flags = {damage} WHERE id = ?", (batch,))  # noqa: S608 - a constant
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        pr.batch(conn, batch)
+
+
+def test_a_damaged_import_record_a_refresh_reads_names_the_backup_t408(conn: sqlite3.Connection) -> None:
+    """A refresh refilling a cleared day reads the import batch that replaced its last fetch: damage
+    there is refused as damage, with the backup remedy, and nothing is stored."""
+    refresh(conn, p("2025-01-01", "93000.12"))
+    pr.store_import(conn, [p("2025-01-01", "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    pr.clear_import(conn, [date(2025, 1, 1)], "USD", at=AT)
+    bypass(conn)
+    conn.execute("UPDATE price_batch SET flags = json_set(flags, '$.replaced[0].price', '0.00') WHERE id = 2")
+    conn.execute("PRAGMA ignore_check_constraints = OFF")
+    with pytest.raises(pr.PriceStoreError, match="damaged"):
+        refresh(conn, p("2025-01-01", "93000.99"))
+    assert conn.execute("SELECT count(*) FROM price_batch").fetchone() == (3,)
+
+
+def test_a_write_of_its_own_day_or_later_names_the_clock_t408(conn: sqlite3.Connection) -> None:
+    """A batch records only complete days, before its own UTC date: a refresh, an import or a clear
+    of that day or later (a clock moved back) is refused up front, and nothing is stored."""
+    today = AT.date().isoformat()
+    with pytest.raises(pr.PriceStoreError, match="check the system clock"):
+        refresh(conn, p(today, "93000.12"))
+    with pytest.raises(pr.PriceStoreError, match="check the system clock"):
+        pr.store_import(conn, [p(today, "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    with pytest.raises(pr.PriceStoreError, match="check the system clock"):
+        pr.clear_import(conn, [AT.date()], "USD", at=AT)
+    assert conn.execute("SELECT count(*) FROM price_batch").fetchone() == (0,)
+    yesterday = (AT.date() - timedelta(days=1)).isoformat()
+    refresh(conn, p(yesterday, "93000.12"))  # the day before the batch's own is a complete day
+    pr.store_import(conn, [p(yesterday, "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
