@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -263,6 +263,8 @@ def test_the_schema_refuses_what_the_module_would(conn: sqlite3.Connection, sql:
         "UPDATE price_batch SET hashes = '{}'",  # a refresh without its hashes
         "UPDATE price SET day = '20250101'",
         "UPDATE price SET method = 'fx'",  # a USD price converted
+        "UPDATE price SET day = '2026-10-14'",  # the batch's own day: not a complete one
+        "UPDATE price_batch SET usd_through = '2026-10-14'",
     ],
 )
 def test_a_damaged_row_is_refused_when_read_t408(conn: sqlite3.Connection, damage: str) -> None:
@@ -1049,16 +1051,21 @@ def test_a_damaged_import_record_a_refresh_reads_names_the_backup_t408(conn: sql
 
 
 def test_a_write_of_its_own_day_or_later_names_the_clock_t408(conn: sqlite3.Connection) -> None:
-    """A batch records only complete days, before its own UTC date: a refresh, an import or a clear
-    of that day or later (a clock moved back) is refused up front, and nothing is stored."""
-    today = AT.date().isoformat()
-    with pytest.raises(pr.PriceStoreError, match="check the system clock"):
-        refresh(conn, p(today, "93000.12"))
-    with pytest.raises(pr.PriceStoreError, match="check the system clock"):
-        pr.store_import(conn, [p(today, "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
-    with pytest.raises(pr.PriceStoreError, match="check the system clock"):
-        pr.clear_import(conn, [AT.date()], "USD", at=AT)
+    """A batch records only complete days, before its own UTC date: a refresh or an import of that day
+    or later is refused up front, as is a clear removing such a day, and nothing is stored. The bound
+    is the moment's UTC date, whatever its offset."""
+    east = datetime(2026, 10, 15, 1, tzinfo=timezone(timedelta(hours=5)))  # 2026-10-14 in UTC
+    for at in (AT, east):
+        for day in ("2026-10-14", "2026-10-15"):
+            with pytest.raises(pr.PriceStoreError, match="check the system clock"):
+                refresh(conn, p(day, "93000.12"), at=at)
+            with pytest.raises(pr.PriceStoreError, match="check the system clock"):
+                pr.store_import(conn, [p(day, "1.00", method="import", source="csv")], file_hash=HASH, at=at)
     assert conn.execute("SELECT count(*) FROM price_batch").fetchone() == (0,)
-    yesterday = (AT.date() - timedelta(days=1)).isoformat()
-    refresh(conn, p(yesterday, "93000.12"))  # the day before the batch's own is a complete day
-    pr.store_import(conn, [p(yesterday, "1.00", method="import", source="csv")], file_hash=HASH, at=AT)
+    refresh(conn, p("2026-10-13", "93000.12"), at=east)  # the day before the batch's own is complete
+    pr.store_import(conn, [p("2026-10-13", "1.00", method="import", source="csv")], file_hash=HASH, at=east)
+    with pytest.raises(pr.PriceStoreError, match="check the system clock"):  # a clock set back
+        pr.clear_import(conn, [date(2026, 10, 13)], "USD", at=datetime(2026, 10, 13, 12, tzinfo=UTC))
+    # a named day without an imported price is left as it is, even the batch's own
+    assert pr.clear_import(conn, [date(2026, 10, 13), date(2026, 10, 14)], "USD", at=east) == 3
+    assert pr.price_on(conn, date(2026, 10, 13), "USD") is None

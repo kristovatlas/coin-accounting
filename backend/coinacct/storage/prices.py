@@ -68,7 +68,8 @@ _DAMAGED: Final = "a stored price is damaged (T-408): restore the user DB from a
 # the source family each fetched method comes from (ADR 0039): Coin Metrics' reference rate, Bitstamp's
 # typical price, an ECB conversion (`prices.coinmetrics`, `prices.bitstamp`, `prices.fx`)
 _FAMILY: Final = {"reference": "coinmetrics", "typical": "bitstamp", "fx": "ecb"}
-# a batch records only complete days, before its own UTC date: a later one means a clock moved back
+# a batch records only complete days, before its own UTC date: a write of a later one is refused (a
+# clock set back can cause it, though the bound doesn't detect every clock change)
 _EARLIER: Final = "a batch records only days before its own UTC date: check the system clock"
 _REFRESH_FLAGS: Final = ("revised", "kept_import", "upgraded", "display_updated")  # the module's own
 # the review flags a refresh's caller records (`services.price_cache.flags_of`): three lists of
@@ -190,9 +191,6 @@ def store_refresh(  # noqa: PLR0912, PLR0913 - a refresh's prices and what it re
     if not all(_covered(p.source, hashes, "refresh") for p in rows):
         raise PriceStoreError("each fetched price's source has its SHA-256 in the refresh")
     _distinct(rows)
-    if usd_through is not None and isinstance(at, datetime) and at.utcoffset() is not None:
-        if usd_through > at.astimezone(UTC).date():
-            raise PriceStoreError("the reference rate can't have priced a day after the refresh")
     try:
         return _write_refresh(conn, rows, hashes, usd_through, usd_stale, flags, at, before_commit)
     except _RolledBack:
@@ -282,12 +280,12 @@ def clear_import(conn: sqlite3.Connection, days: Iterable[date], currency: str, 
     if currency not in CURRENCIES:
         raise PriceStoreError("a price's currency is USD, EUR or GBP")
     bound = _bound(at)
-    if bound is not None and wanted[-1] >= bound:
-        raise PriceStoreError(_EARLIER)
     with _refusals(), transaction(conn):
         removed = [r for r in _existing(conn, [(d, currency) for d in wanted]) if r["method"] == "import"]
         if not removed:
             raise PriceStoreError("none of those days has an imported price")
+        if bound is not None and removed[-1]["day"] >= bound.isoformat():  # in order of day (`_existing`)
+            raise PriceStoreError(_EARLIER)
         batch = _batch(
             conn,
             kind="clear",
@@ -709,7 +707,9 @@ def _replaces(currency: str, stored_method: str, fetched_method: str) -> bool:
 
 def _fetched_before(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
     """The last fetched value each import replaced, by (day, currency), from the import batches' own
-    records: what a day held before the user's price, which a clear later removed."""
+    records: what a day held before the user's price, which a clear later removed. Every import batch
+    is checked whole, so a damaged one refuses every refresh with the backup remedy (fail closed,
+    T-408), even one whose days the refresh doesn't touch."""
     out: dict[tuple[str, str], dict[str, Any]] = {}
     rows = conn.execute(
         "SELECT id, at, kind, usd_through, usd_stale, hashes, flags FROM price_batch"
@@ -796,6 +796,8 @@ def _price(r: Sequence[Any], checked: dict[int, Batch]) -> Price:
         kind == "import"
     ) or kind == "clear":  # a price and the batch it says wrote it
         raise PriceStoreError(_DAMAGED)
+    if _stored_day(day) >= stored_batch.at.astimezone(UTC).date():  # a batch prices only complete days
+        raise PriceStoreError(_DAMAGED)
     p = Price(_stored_day(day), currency, Decimal(text), method, source, batch_id)
     _checked(p)
     if format(p.price, "f") != text:
@@ -814,7 +816,7 @@ def _stored_batch(r: Sequence[Any]) -> Batch:
     ):
         raise PriceStoreError(_DAMAGED)
     through = None if usd_through is None else _stored_day(usd_through)
-    if through is not None and through > moment.astimezone(UTC).date():  # priced before the refresh ran
+    if through is not None and through >= moment.astimezone(UTC).date():  # a complete day, before the batch's
         raise PriceStoreError(_DAMAGED)
     if kind == "refresh" and through is None and not usd_stale:
         raise PriceStoreError(_DAMAGED)
