@@ -39,16 +39,19 @@ The module reads no clock: the caller passes the batch's time.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Literal
 
-from coinacct.storage.db import DbError, transaction
+from coinacct.storage.db import DbBusy, DbError, transaction
+
+log = logging.getLogger(__name__)
 
 CURRENCIES: Final = ("USD", "EUR", "GBP")
 METHODS: Final = ("reference", "typical", "fx", "import")
@@ -102,7 +105,7 @@ class Batch:
     flags: dict[str, Any]
 
 
-def store_refresh(  # noqa: PLR0913 - a refresh's prices and what it recorded
+def store_refresh(  # noqa: PLR0912, PLR0913 - a refresh's prices and what it recorded, each checked
     conn: sqlite3.Connection,
     prices: Iterable[Price],
     *,
@@ -111,9 +114,12 @@ def store_refresh(  # noqa: PLR0913 - a refresh's prices and what it recorded
     usd_stale: bool,
     flags: Mapping[str, Any],
     at: datetime,
-) -> int:
+    before_commit: Callable[[], bool] = lambda: False,
+) -> int | None:
     """Store a refresh's prices and its batch, all or nothing; imported prices are kept. Returns the
-    batch's id."""
+    batch's id, or None when `before_commit`, asked last, before the commit, says to roll back (a
+    refresh cancelled while it was being stored). The commit runs inside the module's refusals, so a
+    disk that fails there is a fixed refusal too."""
     rows = [_checked(p) for p in prices]
     if not rows:
         raise PriceStoreError("a refresh stores the prices it fetched")
@@ -147,6 +153,26 @@ def store_refresh(  # noqa: PLR0913 - a refresh's prices and what it recorded
     if usd_through is not None and isinstance(at, datetime) and at.utcoffset() is not None:
         if usd_through > at.astimezone(UTC).date():
             raise PriceStoreError("the reference rate can't have priced a day after the refresh")
+    try:
+        return _write_refresh(conn, rows, hashes, usd_through, usd_stale, flags, at, before_commit)
+    except _RolledBack:
+        return None
+
+
+class _RolledBack(Exception):
+    """`before_commit` asked to roll the refresh back."""
+
+
+def _write_refresh(  # noqa: PLR0913, PLR0917 - store_refresh's checked arguments
+    conn: sqlite3.Connection,
+    rows: list[Price],
+    hashes: Mapping[str, str],
+    usd_through: date | None,
+    usd_stale: bool,
+    flags: Mapping[str, Any],
+    at: datetime,
+    before_commit: Callable[[], bool],
+) -> int:
     with _refusals(), transaction(conn):
         found = _revisions(conn, rows)
         batch = _batch(
@@ -166,6 +192,8 @@ def store_refresh(  # noqa: PLR0913 - a refresh's prices and what it recorded
             " OR (price.method = 'typical' AND excluded.method = 'reference'))",
             [_row(p, batch) for p in rows],
         )
+        if before_commit():
+            raise _RolledBack
         return batch
 
 
@@ -490,11 +518,22 @@ def _distinct(rows: Sequence[Price]) -> None:
 
 @contextmanager
 def _refusals() -> Iterator[None]:
-    """The schema's refusals as a `PriceStoreError` with a fixed message: SQLite's names the constraint."""
+    """The schema's refusals, and any other SQLite error while writing or committing, as the module's
+    fixed messages, with only SQLite's error code in the log (its text can name the constraint or the
+    file): busy is `DbBusy`; a damaged file names the backup (T-408); anything else (a full disk, an
+    I/O error) says the DB can't be used now."""
     try:
         yield
     except sqlite3.IntegrityError:
         raise PriceStoreError("the prices break a rule of the price table") from None
+    except sqlite3.Error as e:
+        code = str(getattr(e, "sqlite_errorname", None) or type(e).__name__)
+        log.warning("prices couldn't be written to the user DB: %s", code)
+        if code.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+            raise DbBusy("the user DB is busy; try again in a moment") from None
+        if code.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB")):
+            raise PriceStoreError(_DAMAGED) from None
+        raise PriceStoreError("the user DB can't be used right now; see the log") from None
 
 
 def _row(p: Price, batch: int) -> tuple[str, str, str, str, str, int]:

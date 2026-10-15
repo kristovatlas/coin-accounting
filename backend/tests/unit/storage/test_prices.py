@@ -16,7 +16,8 @@ from coinacct.storage import events as ev
 from coinacct.storage import prices as pr
 from coinacct.storage.chain_state import record_chain
 from coinacct.storage.datadir import open_data_dir
-from coinacct.storage.db import open_db
+from coinacct.storage.db import DbBusy, open_db
+from coinacct.storage.db import transaction as db_transaction
 from coinacct.storage.migrations import STEPS
 
 AT = datetime(2026, 10, 14, 12, tzinfo=UTC)
@@ -59,7 +60,9 @@ def refresh(conn: sqlite3.Connection, *rows: pr.Price, **kw: Any) -> int:
         "usd_stale": not reference,
     }
     args |= {"usd_through": max(reference) if reference else None, "flags": {"mismatches": []}, "at": AT} | kw
-    return pr.store_refresh(conn, rows, **args)
+    batch = pr.store_refresh(conn, rows, **args)
+    assert batch is not None
+    return batch
 
 
 def test_a_refresh_is_stored_with_its_batch_and_read_back(conn: sqlite3.Connection) -> None:
@@ -671,4 +674,73 @@ def test_a_refresh_over_a_damaged_day_names_the_backup_remedy_t408(conn: sqlite3
     conn.execute("UPDATE price SET source = ''")
     conn.execute("PRAGMA ignore_check_constraints = OFF")
     with pytest.raises(pr.PriceStoreError, match="restore the user DB from a backup"):
+        refresh(conn, p("2025-01-01", "93000.12"))
+
+
+def test_before_commit_rolls_the_refresh_back(conn: sqlite3.Connection) -> None:
+    hashes = {"coinmetrics": HASH}
+    rows = [p("2025-01-01", "93000.12")]
+    kw: dict[str, Any] = {"usd_through": date(2025, 1, 1), "usd_stale": False, "flags": {}, "at": AT}
+    assert pr.store_refresh(conn, rows, hashes=hashes, before_commit=lambda: True, **kw) is None
+    assert conn.execute(
+        "SELECT (SELECT count(*) FROM price), (SELECT count(*) FROM price_batch)"
+    ).fetchone() == (0, 0)
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("SQLITE_FULL", "the user DB can't be used right now; see the log"),
+        ("SQLITE_IOERR_FSYNC", "the user DB can't be used right now; see the log"),
+        ("SQLITE_CORRUPT", "a stored price is damaged (T-408): restore the user DB from a backup"),
+        ("SQLITE_NOTADB", "a stored price is damaged (T-408): restore the user DB from a backup"),
+    ],
+)
+def test_a_failed_commit_is_a_fixed_refusal_with_only_its_code_logged(
+    conn: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    code: str,
+    message: str,
+) -> None:
+    real = db_transaction
+
+    class failing_commit:
+        def __init__(self, c: sqlite3.Connection) -> None:
+            self.inner = real(c)
+
+        def __enter__(self) -> None:
+            self.inner.__enter__()
+
+        def __exit__(self, kind: Any, exc: Any, tb: Any) -> bool:
+            self.inner.__exit__(ValueError, ValueError(), None)  # roll back what was written
+            e = sqlite3.OperationalError("disk I/O error at /secret/path")  # as COMMIT fails
+            e.sqlite_errorname = code
+            raise e
+
+    monkeypatch.setattr(pr, "transaction", failing_commit)
+    with pytest.raises(pr.PriceStoreError) as refused:
+        refresh(conn, p("2025-01-01", "93000.12"))
+    assert str(refused.value) == message
+    assert code in caplog.text and "/secret/path" not in caplog.text
+
+
+def test_a_busy_commit_is_busy(conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = db_transaction
+
+    class busy_commit:
+        def __init__(self, c: sqlite3.Connection) -> None:
+            self.inner = real(c)
+
+        def __enter__(self) -> None:
+            self.inner.__enter__()
+
+        def __exit__(self, kind: Any, exc: Any, tb: Any) -> bool:
+            self.inner.__exit__(ValueError, ValueError(), None)
+            e = sqlite3.OperationalError("database is locked")
+            e.sqlite_errorname = "SQLITE_BUSY"
+            raise e
+
+    monkeypatch.setattr(pr, "transaction", busy_commit)
+    with pytest.raises(DbBusy):
         refresh(conn, p("2025-01-01", "93000.12"))
