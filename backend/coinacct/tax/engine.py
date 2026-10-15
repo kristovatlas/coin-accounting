@@ -9,8 +9,8 @@ both timezone-aware UTC (ENGINEERING §5.2). A disposal's tax date is within a d
 date (time zones run from UTC-12 to UTC+14), and disposals come in the order of their moments.
 
 - **Acquisitions** (`buy`, `p2p_buy`, `income`, `inherit`, `gift_in`) each create one lot: its sats, its
-  basis (cost plus fees, or the FMV the caller computed) and its date. The 2025 opening allocation and
-  UTXO tracing come in later slices.
+  basis (cost plus fees, or the FMV the caller computed) and its date. The 2025 opening allocation comes
+  in a later slice.
 - **A gift received** (`gift_in`; IRC §1015(a), Treas. Reg. §1.1015-1(a)) has a **dual basis**. Its gain
   basis is the donor's basis, held from the donor's date (tacked, IRC §1223(2)). If the FMV at the gift
   was lower, that FMV is its loss basis, held from the gift date. At a disposal, proceeds above the
@@ -68,13 +68,14 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   choice may also name only the sats that arrive: the fee then takes the standing method's next sats
   besides them (ADR 0043). Those fee lots are part of the identification: the late check judges the
   whole, which sats arrive included, and the replay follows the whole (or falls back, whole).
-- **Coin-traced wallets** (`run(..., wallets=...)`, ADR 0041): in a self-custody wallet the coins a
-  transaction spends identify the lots that leave (ADR 0008 §2). An arrival (an acquisition, or a
-  withdrawal's moved lots) **links** the outputs it arrived in (`coins`); its lots, oldest first, fill
-  them in the order given. Links over the sats that arrived block (`Untraced`, `bad_link`). A wallet's
-  spends come only as a `WalletTx`: its inputs and outputs from the chain, and its one leaving event (a
-  sale, spend or gift, a deposit, or a self-transfer to another coin-traced wallet), or none (a
-  consolidation). `tracing.trace` decides which lots each output gets (ADR 0041 §2):
+- **Coin-traced wallets** (`run(..., wallets={account: Wallet(tracking_start)})`, ADR 0041): in a
+  self-custody wallet the coins a transaction spends identify the lots that leave (ADR 0008 §2). An
+  arrival (an acquisition, or a withdrawal's moved lots) **links** the outputs it arrived in (`coins`);
+  its lots, oldest first, fill them in the order given. Links over the sats that arrived block
+  (`Untraced`, `bad_link`). A wallet's spends come only as a `WalletTx`: its inputs and outputs from the
+  chain, and its one leaving event (a sale, spend or gift, a deposit, or a self-transfer to another
+  coin-traced wallet), or none (a consolidation). `tracing.trace` decides which lots each output gets (ADR
+  0041 §2):
   - a sale's or spend's lots are its outputs' and the fee's (the fee's basis is in the disposal); a
     gift's are its outputs', and the fee's basis isn't recovered (ADR 0043)
   - a deposit or self-transfer moves its outputs' lots, as a transfer does; the fee's basis passes to
@@ -84,24 +85,39 @@ date (time zones run from UTC-12 to UTC+14), and disposals come in the order of 
   - the change stays on the wallet's new coins, under the same lots.
 
   A transaction the engine can't trace blocks (`Untraced`, ADR 0041 §3): one tracing blocks, a coin
-  whose links don't hold exactly its value (`uncovered`; the pool of ADR 0041 §4 comes in
-  a later slice), a coin from another account, a self-transfer to an account that isn't coin-traced.
-  Its leaving event is then figured by the account's FIFO order, provisionally, its fee's basis following
-  ADR 0043's rule for a whole-wallet FIFO wallet (a sale's row; a consolidation's same, else oldest
-  remaining lot). The wallet's later transactions block too (`after_untraced`), since its coins no
-  longer match its lots; its coin records are dropped. A self-transfer
-  from an account that isn't coin-traced blocks (`mixed_transfer`), figured by FIFO provisionally, and
-  a coin-traced wallet it arrives in is untraced from then on. Exchange accounts are unchanged.
+  whose links don't hold exactly its value (`uncovered`), a coin from another account, a self-transfer
+  to an account that isn't coin-traced. Its leaving event is then figured by the account's FIFO order,
+  provisionally (its fee's basis following ADR 0043's rule for a whole-wallet FIFO wallet: a sale's
+  row, a consolidation's same or oldest remaining lot), and the wallet's later transactions block too
+  (`after_untraced`), since its coins no longer match its lots; its coin records are dropped. A
+  self-transfer from an account that isn't coin-traced blocks (`mixed_transfer`), figured by
+  FIFO provisionally, and a coin-traced wallet it arrives in is untraced from then on. Exchange
+  accounts are unchanged.
 
   **The caller's part** (`services/`, ADR 0041 §6): the engine can't tell an exchange account from a
   self-custody one, so the caller passes **every** self-custody account in `wallets` (whole-wallet
   FIFO, ADR 0041 §5, isn't built: a self-custody account left out is figured by its FIFO order, as an
   exchange account, without a block, except a self-transfer from it, which blocks: `mixed_transfer`).
-  It also checks what needs the chain cache: that a link's output
-  is the account's, that its txid is the event's, the two-hour allowance (§1), and that every
-  transaction touching a wallet coin is confirmed (§5). The engine checks links over the sats that
+  It also checks what needs the chain cache or the clock: that a link's output is the account's, that its
+  txid is the event's, the two-hour allowance (§1, §4), that every transaction touching a wallet coin is
+  confirmed (§5), and that a wallet's tracking start isn't later than when the user entered it (§4).
+  The engine needs events in time order and a coin's links before its `Received`; block times aren't
+  monotonic, and an allowed link can come up to two hours after its coin's block time, so the caller
+  orders chain events by their place in the chain and gives each one a moment no earlier than the last
+  (#299 holds the open question of how). The engine checks links over the sats that
   arrived and over the output's value (`Coin.value`, with the links before it), and a coin's value
   when it is spent.
+  - **The pool** (ADR 0041 §4) is a wallet's lots on no coin: acquisitions and withdrawals into it that
+    link no output, such as a balance from before the wallet was tracked. A coin from outside the
+    user's wallets (`Received`, in chain order, after the events that link it) has its part no link
+    covers drawn from the pool, oldest first, if it arrived before the wallet's tracking start
+    (`Result.draws`); only lots already in the pool count, in the caller's order. A pool
+    short of it leaves a **placeholder** of unknown basis on the coin (`Result.placeholders`, blocking,
+    T-509). After the tracking start, or with none set, that part blocks (`unrecorded_receipt`,
+    `no_tracking_start`). A coin received after the transaction that spent it, or one another wallet's
+    links hold, raises; one received into an untraced wallet draws nothing. Lots still in the pool at
+    the end are listed (`Result.pool`, untraced wallets left out), for the warning that they are
+    probably a duplicate purchase or an unrecorded sale.
   - **A fee is never a taxable event** (ADR 0043): a network fee on a deposit, or an exchange's BTC
     withdrawal fee (`fee_sats` of the sats that leave), is no disposal and has no Form 8949 row. The
     sats that arrive take the transfer's lots first, in the account's FIFO order; the fee takes the
@@ -153,6 +169,7 @@ GENESIS: Final = date(2009, 1, 3)  # no bitcoin was acquired before the genesis 
 RESERVED: Final = ("@", "#")  # the separators in the lot ids the engine builds (lot@transfer, lot@tx#vout)
 SPLIT: Final = "#"  # in a per-output moved or split-off lot's id: lot@event#vout
 UNRECORDED: Final = "@@unrecorded"  # a created lot's suffix: no event or moved lot id can contain "@@"
+PLACEHOLDER: Final = "@@placeholder"  # a placeholder lot's suffix (ADR 0041 §4), after a received coin's id
 
 
 @dataclass(frozen=True)
@@ -253,7 +270,35 @@ class WalletTx:
         return sum(i.value for i in self.inputs)
 
 
-type Event = Acquisition | Disposal | Transfer | WalletTx
+@dataclass(frozen=True)
+class Received:
+    """A coin from outside the user's wallets arriving in a coin-traced wallet (ADR 0041 §4), in chain
+    order (block height, then position in the block, then the canonical order). The part of it no link
+    covers draws from the wallet's pool if it arrived before the wallet's tracking start, and blocks
+    otherwise. Links to it must come before it."""
+
+    id: str
+    account: str
+    on: date
+    at: datetime  # its block time, timezone-aware UTC
+    outpoint: str
+    value: int
+
+    @property
+    def sats(self) -> int:
+        return self.value
+
+
+@dataclass(frozen=True)
+class Wallet:
+    """A coin-traced self-custody account: the time from which every coin sent to it from outside is
+    recorded (ADR 0041 §4), set by the user; None if not set yet: the wallet then blocks (an `Untraced`
+    naming the account, ADR 0041 §3), and so does each received coin's part no link covers."""
+
+    tracking_start: datetime | None
+
+
+type Event = Acquisition | Disposal | Transfer | WalletTx | Received
 
 
 @dataclass(frozen=True)
@@ -356,7 +401,8 @@ class MissingLots:
 @dataclass(frozen=True)
 class UnknownBasis:
     """Blocking: a lot whose basis isn't known (ADR 0009, T-509): a gift received without its donor's
-    basis, or a lot created for a withdrawal from an account without lots. The user enters one; zero is
+    basis, a lot created for a withdrawal from an account without lots, or a received coin's placeholder
+    (ADR 0041 §4). The user enters one; zero is
     a conservative resolution (the legal default for a gift is in Treas. Reg. §1.1015-1(a)(3))."""
 
     lot: str
@@ -373,6 +419,9 @@ class Result:
     created: tuple[Lot, ...] = ()  # lots created for a withdrawal from an account without lots (ADR 0009)
     replay_stopped: str | None = None  # the event the late choices' replay couldn't follow (#238)
     coins: tuple[CoinLot, ...] = ()  # the lots on each coin the coin-traced wallets hold (ADR 0041)
+    draws: tuple[Drawn, ...] = ()  # each received coin's draws from its wallet's pool (ADR 0041 §4)
+    placeholders: tuple[Lot, ...] = ()  # unknown-basis lots for received coins the pool fell short of
+    pool: tuple[PoolLot, ...] = ()  # wallet lots on no coin at the end: probably a duplicate or a sale
 
 
 @dataclass(frozen=True)
@@ -383,8 +432,30 @@ class CoinLot:
 
 
 type UntracedReason = (
-    tracing.BlockReason | Literal["after_untraced", "uncovered", "mixed_transfer", "bad_link"]
+    tracing.BlockReason
+    | Literal[
+        "after_untraced", "uncovered", "mixed_transfer", "bad_link", "unrecorded_receipt", "no_tracking_start"
+    ]
 )
+
+
+@dataclass(frozen=True)
+class Drawn:
+    """`sats` of `lot` from the pool of the wallet a received coin arrived in, onto that coin."""
+
+    received: str
+    outpoint: str
+    lot: str
+    sats: int
+
+
+@dataclass(frozen=True)
+class PoolLot:
+    """A lot's sats on no coin at the end, in a coin-traced wallet (ADR 0041 §4)."""
+
+    account: str
+    lot: str
+    sats: int
 
 
 @dataclass(frozen=True)
@@ -456,20 +527,31 @@ def long_term(acquired: date, disposed: date) -> bool:
 def run(
     events: Sequence[Event],
     methods: Mapping[str, Method] | None = None,
-    wallets: frozenset[str] = frozenset(),
+    wallets: Mapping[str, Wallet] | None = None,
 ) -> Result:
     """Apply `events` in order. `methods` holds each account's standing method (FIFO if absent);
-    `wallets` names the coin-traced self-custody accounts (ADR 0041), whose lots follow their coins."""
-    if not isinstance(wallets, frozenset) or not all(isinstance(w, str) and w for w in wallets):
-        raise EngineError("wallets is a frozenset of account names")
+    `wallets` the coin-traced self-custody accounts (ADR 0041), whose lots follow their coins."""
+    wallets = {} if wallets is None else wallets
+    if not isinstance(wallets, Mapping):
+        raise EngineError("wallets maps account names to Wallets")
+    for name, wallet in wallets.items():
+        if not isinstance(name, str) or not name or not isinstance(wallet, Wallet):
+            raise EngineError("wallets maps account names to Wallets")
+        if wallet.tracking_start is not None:
+            _check_moment(wallet.tracking_start, f"wallet {name!r}: its tracking start")
     with localcontext(CONTEXT):
-        return _Engine(methods or {}, wallets).run(events)
+        return _Engine(methods or {}, dict(wallets)).run(events)
 
 
 class _Engine:
     def __init__(
-        self, methods: Mapping[str, Method], wallets: frozenset[str] = frozenset(), *, replay: bool = False
+        self,
+        methods: Mapping[str, Method],
+        wallets: Mapping[str, Wallet] | None = None,
+        *,
+        replay: bool = False,
     ) -> None:
+        wallets = {} if wallets is None else wallets
         for account, method in methods.items():
             if method not in METHODS:
                 raise EngineError(f"account {account!r}: unknown standing method {method!r}")
@@ -491,7 +573,11 @@ class _Engine:
         self._shadow: _Engine | None = None if replay else _Engine(methods, wallets, replay=True)
         # Coin tracing (ADR 0041): each coin-traced wallet's coins, outpoint -> its lots' sats on it, in
         # the order they arrived. A lot's sats on coins never exceed the sats it holds.
-        self._wallets = wallets
+        self._wallets = frozenset(wallets)
+        self._tracking = {w: wallet.tracking_start for w, wallet in wallets.items()}
+        self._received: set[str] = set()  # the received coins' outpoints
+        self._draws: list[Drawn] = []
+        self._placeholders: list[Lot] = []
         self._coins: dict[str, dict[str, dict[str, int]]] = {w: {} for w in wallets}
         self._untraced: set[str] = set()  # wallets whose coins stopped matching their lots
         self._values: dict[str, int] = {}  # each linked output's value, as its links gave it
@@ -504,6 +590,8 @@ class _Engine:
         self._given: dict[str, tuple[tuple[Pick, ...], dict[str, int]]] = {}
 
     def run(self, events: Sequence[Event]) -> Result:
+        for wallet in sorted(w for w, start in self._tracking.items() if start is None):  # ADR 0041 §3
+            self._blocking.append(Untraced(wallet, "no_tracking_start", f"{wallet!r} has no tracking start"))
         last: date | None = None
         last_moment: datetime | None = None
         for event in events:
@@ -526,6 +614,8 @@ class _Engine:
             last_moment = event.at
             if isinstance(event, WalletTx):
                 self._wallet_tx(event)
+            elif isinstance(event, Received):
+                self._receive(event)
             elif isinstance(event, Transfer):
                 self._transfer(event)
             else:
@@ -561,6 +651,13 @@ class _Engine:
                 for outpoint, lots in self._coins[wallet].items()
                 for lot, sats in lots.items()
             ),
+            tuple(self._draws),
+            tuple(self._placeholders),
+            tuple(  # an untraced wallet's lots aren't placed: none is listed
+                PoolLot(wallet, lot, sats)
+                for wallet in sorted(self._wallets - self._untraced)
+                for lot, sats in self._pool(wallet)
+            ),
         )
 
     def _follow(self, event: Event) -> None:
@@ -579,6 +676,8 @@ class _Engine:
                 shadow._acquire(event)
             elif isinstance(event, WalletTx):
                 shadow._wallet_tx(event)
+            elif isinstance(event, Received):
+                shadow._receive(event)
             elif isinstance(event, Transfer):
                 shadow._transfer(event)
             else:
@@ -590,7 +689,9 @@ class _Engine:
             self._shadow, self._replay_stopped = None, event.id
             return
         accounts = {event.account}
-        leaving = event.leaving if isinstance(event, WalletTx) else event
+        leaving = (
+            event.leaving if isinstance(event, WalletTx) else None if isinstance(event, Received) else event
+        )
         if isinstance(leaving, Transfer):
             accounts.add(leaving.to)
         if any(shadow._held(a) != self._held(a) for a in accounts):
@@ -850,6 +951,65 @@ class _Engine:
                 if n == take:
                     queue.pop(0)
         return True
+
+    def _receive(self, r: Received) -> None:
+        """A coin from outside: the part no link covers draws from the pool, oldest first, if it arrived
+        before the wallet's tracking start; a pool short of it leaves a placeholder of unknown basis
+        (blocking). After the tracking start, or with none set, that part blocks (ADR 0041 §3, §4)."""
+        if r.account not in self._wallets:
+            raise EngineError(f"received coin {r.id!r}: {r.account!r} isn't a coin-traced wallet")
+        if not isinstance(r.outpoint, str) or ":" not in r.outpoint:
+            raise EngineError(f"received coin {r.id!r}: it names its outpoint (txid:vout)")
+        if r.outpoint in self._received:
+            raise EngineError(f"received coin {r.id!r}: {r.outpoint} was received already")
+        self._received.add(r.outpoint)
+        if self._values.setdefault(r.outpoint, r.value) != r.value:
+            raise EngineError(f"received coin {r.id!r}: its links gave {r.outpoint} another value")
+        if r.outpoint in self._spent:  # it came after the transaction that spent it: the caller's order
+            raise EngineError(f"received coin {r.id!r}: {r.outpoint} was spent already")
+        if any(r.outpoint in self._coins[w] for w in self._coins if w != r.account):
+            raise EngineError(f"received coin {r.id!r}: {r.outpoint} is another wallet's coin")
+        if r.account in self._untraced:  # its coin records were dropped, and it blocks already
+            return
+        on = self._coins[r.account].setdefault(r.outpoint, {})
+        need = r.value - sum(on.values())
+        if need <= 0:  # covered by links (links over its value blocked when they were made)
+            return
+        start = self._tracking[r.account]
+        if start is None:
+            self._blocking.append(Untraced(r.id, "no_tracking_start", f"{r.account!r} has no tracking start"))
+            return
+        if r.at >= start:
+            detail = f"{need} sats of {r.outpoint} no link covers, received after the tracking start"
+            self._blocking.append(Untraced(r.id, "unrecorded_receipt", detail))
+            return
+        for lot, free in self._pool(r.account):  # only lots already here: events come in time order
+            take = min(free, need)
+            on[lot] = on.get(lot, 0) + take
+            self._draws.append(Drawn(r.id, r.outpoint, lot, take))
+            need -= take
+            if not need:
+                return
+        lot_id = f"{r.id}{PLACEHOLDER}"
+        placeholder = Lot(lot_id, r.account, r.on, need, ZERO, False, None, None, True)
+        self._insert(r.account, _Open(placeholder, need, ZERO, None, False, r.on, created=True))
+        self._placeholders.append(placeholder)
+        self._blocking.append(UnknownBasis(lot_id))
+        on[lot_id] = need
+
+    def _pool(self, account: str) -> list[tuple[str, int]]:
+        """The wallet's lots on no coin, oldest first (by the date each reached the user, then its event
+        id, ADR 0041 §2.1), with their sats on no coin."""
+        on_coins: dict[str, int] = {}
+        for lots in self._coins[account].values():
+            for lot, n in lots.items():
+                on_coins[lot] = on_coins.get(lot, 0) + n
+        free = [
+            (o.lot.id, o.sats - on_coins.get(o.lot.id, 0))
+            for o in self._open.get(account, [])
+            if o.sats > on_coins.get(o.lot.id, 0)
+        ]
+        return sorted(free, key=lambda entry: self._oldest_key(entry[0]))
 
     def _check_links(self, event: str, coins: tuple[Coin, ...]) -> None:
         for c in coins:
@@ -1570,8 +1730,8 @@ def _merged(picks: Sequence[Pick]) -> dict[str, int]:
 
 
 def _check_common(event: Event) -> None:
-    if not isinstance(event, Acquisition | Disposal | Transfer | WalletTx):
-        raise EngineError("an event is an Acquisition, a Disposal, a Transfer or a WalletTx")
+    if not isinstance(event, Acquisition | Disposal | Transfer | WalletTx | Received):
+        raise EngineError("an event is an Acquisition, a Disposal, a Transfer, a WalletTx or a Received")
     if not (isinstance(event.id, str) and event.id and isinstance(event.account, str) and event.account):
         raise EngineError("an event names its id and its account")
     if any(c in event.id for c in RESERVED):  # the engine builds lot ids with them (lot@transfer)
